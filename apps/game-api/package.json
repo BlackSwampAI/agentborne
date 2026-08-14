@@ -18,7 +18,7 @@
     "hono": "4.13.2"
   },
   "devDependencies": {
-    "@types/node": "24.13.3",
+    "@types/node": "26.2.0",
     "esbuild": "0.28.2",
     "tsx": "4.23.12",
     "vitest": "4.1.10"
