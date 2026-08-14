@@ -10,6 +10,7 @@ import {
   h3CellSchema,
   experimentExportPreviewSchema,
   experimentExportResponseSchema,
+  healthResponseSchema,
   resetSimulationResponseSchema,
   restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
@@ -25,11 +26,19 @@ describe('game API simulation boundary', () => {
         { requestedAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
     });
-    expect((await app.request('/health')).status).toBe(200);
+    const health = await app.request('/health');
+    expect(health.status).toBe(200);
+    expect(healthResponseSchema.parse(await health.json()).status).toBe('ok');
     const response = await app.request('/api/simulation');
     expect(response.status).toBe(200);
     const payload = simulationSnapshotSchema.parse(await response.json());
     expect(payload.world.agents).toHaveLength(6);
+    expect(
+      payload.world.hexes.every(
+        (hex) => hex.state === 'open' && hex.controllerAgentId === null,
+      ),
+    ).toBe(true);
+    expect(payload.experiment.currentTerritory).toHaveLength(6);
   });
 
   it('returns accepted and rejected single-turn records with valid response shapes', async () => {
@@ -44,6 +53,22 @@ describe('game API simulation boundary', () => {
       ).json(),
     );
     expect(accepted.turn.outcome).toBe('accepted');
+    if (accepted.turn.outcome !== 'accepted')
+      throw new Error('Expected accepted infection fixture.');
+    expect(accepted.turn).toMatchObject({
+      event: {
+        type: 'hex-infected',
+        controllerAgentId: accepted.turn.agentId,
+      },
+    });
+    expect(
+      accepted.snapshot.world.hexes.find(
+        ({ cell }) => cell === accepted.turn.observation.currentCell.cell,
+      ),
+    ).toMatchObject({
+      state: 'infected',
+      controllerAgentId: accepted.turn.agentId,
+    });
 
     const rejectedApp = createApp({
       provider: new ScriptedAgentProvider([
@@ -366,6 +391,12 @@ describe('game API simulation boundary', () => {
     expect(restored.snapshot.world.events).toHaveLength(1);
     expect(restored.snapshot.world.agents[0]!.personality).toBe(
       agent.personality,
+    );
+    expect(
+      restored.snapshot.world.agents.find(({ name }) => name === 'Mingle')
+        ?.personality,
+    ).toBe(
+      'You are a social coalition-builder. Move toward visible agents, initiate and continue conversations, negotiate before taking their territory, and coordinate when useful. Infect open cells opportunistically, but value interaction over silent pursuit.',
     );
   });
 

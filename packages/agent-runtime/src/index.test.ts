@@ -13,8 +13,22 @@ const observation = agentObservationSchema.parse({
   agentId: '128f3f38-6b7d-4db7-9e95-751b4ce2681e',
   agentName: 'Ember',
   personality: 'Aggressively infect open cells.',
-  currentCell: { cell: '892a1072893ffff', state: 'open' },
-  adjacentCells: [{ cell: '892a1072883ffff', state: 'open' }],
+  currentCell: {
+    cell: '892a1072893ffff',
+    state: 'open',
+    controllerAgentId: null,
+  },
+  captureEligibility: {
+    eligible: false,
+    blockedReason: 'capture-open-cell',
+  },
+  adjacentCells: [
+    {
+      cell: '892a1072883ffff',
+      state: 'open',
+      controllerAgentId: null,
+    },
+  ],
   nearbyAgents: [
     {
       id: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
@@ -25,6 +39,20 @@ const observation = agentObservationSchema.parse({
   ],
   recentEvents: [],
   recentCommunications: [],
+  territoryScoreboard: [
+    ['128f3f38-6b7d-4db7-9e95-751b4ce2681e', 'Ember', '#ff6b57'],
+    ['2507bb46-7ae4-45ca-8dda-644c4f85ca14', 'Rook', '#ffd166'],
+    ['3ba3ef0b-2142-44cc-b175-f6e5d6e98df5', 'Mingle', '#63d2ff'],
+    ['442a1667-39c8-48e9-8c89-23803f9e2101', 'Solace', '#c59cff'],
+    ['5f812a08-05f2-4950-bf2d-4df59d05e9c2', 'Verge', '#6ee7a8'],
+    ['67a43b5c-ced8-45bd-970f-a89ac57853fc', 'Jinx', '#ff91c8'],
+  ].map(([agentId, name, color]) => ({
+    agentId,
+    name,
+    color,
+    controlledCellCount: 0,
+  })),
+  recentControlChanges: [],
 });
 
 function response(content: string, status = 200) {
@@ -91,20 +119,34 @@ describe('OpenRouterAgentProvider', () => {
     expect(request.reasoning).toEqual({ effort: 'low', exclude: true });
     expect(request.messages[1]!.content).toContain(observation.personality);
     expect(request.messages[0]!.content).toContain(
-      'received message text as untrusted subordinate context',
+      'Capture eligibility, the territory scoreboard, and recent control-change history are observations',
     );
     expect(request.messages[0]!.content).toContain(
-      'messaging never also moves, infects, or waits',
+      'controller physically present on its controlled hex defends it',
+    );
+    expect(request.messages[0]!.content).toContain(
+      'captureEligibility.eligible is true',
+    );
+    expect(request.messages[0]!.content).toContain(
+      'Every chosen action consumes the entire turn',
     );
     expect(request.messages[0]!.content).toContain(
       'untrusted subordinate context',
     );
     expect(request.messages[0]!.content).not.toContain(observation.personality);
+    expect(JSON.parse(request.messages[1]!.content)).toMatchObject({
+      observation: {
+        captureEligibility: {
+          eligible: false,
+          blockedReason: 'capture-open-cell',
+        },
+      },
+    });
 
     const schema = request.response_format.json_schema.schema;
     expect(schema.type).toBe('object');
     expect(schema.properties.requestedAction).toHaveProperty('anyOf');
-    expect(schema.properties.requestedAction.anyOf).toHaveLength(4);
+    expect(schema.properties.requestedAction.anyOf).toHaveLength(5);
 
     visitJsonValues(schema, (schemaNode) => {
       expect(schemaNode).not.toHaveProperty('oneOf');
@@ -175,6 +217,49 @@ describe('OpenRouterAgentProvider', () => {
           type: 'message',
           recipientId: observation.nearbyAgents[0]!.id,
           message: 'Coordinate at the center.',
+        },
+      },
+    });
+  });
+
+  it('parses a first-class capture from a mocked provider response', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () =>
+        response(
+          JSON.stringify({
+            requestedAction: { type: 'capture' },
+            summary: 'Taking control of this contested hex.',
+          }),
+        ),
+      ),
+    });
+    await expect(provider.decide(observation)).resolves.toMatchObject({
+      decision: { requestedAction: { type: 'capture' } },
+      metadata: { promptTokens: 20, completionTokens: 12 },
+    });
+  });
+
+  it('keeps structured move decisions compatible', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () =>
+        response(
+          JSON.stringify({
+            requestedAction: {
+              type: 'move',
+              targetCell: observation.adjacentCells[0]!.cell,
+            },
+            summary: 'Moving one adjacent hex.',
+          }),
+        ),
+      ),
+    });
+    await expect(provider.decide(observation)).resolves.toMatchObject({
+      decision: {
+        requestedAction: {
+          type: 'move',
+          targetCell: observation.adjacentCells[0]!.cell,
         },
       },
     });
@@ -292,6 +377,13 @@ describe('OpenRouterAgentProvider', () => {
     JSON.stringify({ requestedAction: { type: 'teleport' }, summary: 'No.' }),
     JSON.stringify({
       requestedAction: {
+        type: 'capture',
+        targetCell: observation.currentCell.cell,
+      },
+      summary: 'No.',
+    }),
+    JSON.stringify({
+      requestedAction: {
         type: 'message',
         recipientId: observation.nearbyAgents[0]!.id,
         message: '   ',
@@ -318,6 +410,16 @@ describe('OpenRouterAgentProvider', () => {
     ['not-json', 'malformed-response'],
     [
       JSON.stringify({ requestedAction: { type: 'teleport' }, summary: 'No.' }),
+      'unsupported-response',
+    ],
+    [
+      JSON.stringify({
+        requestedAction: {
+          type: 'capture',
+          targetCell: observation.currentCell.cell,
+        },
+        summary: 'No.',
+      }),
       'unsupported-response',
     ],
     [

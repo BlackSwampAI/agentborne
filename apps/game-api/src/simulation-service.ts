@@ -13,6 +13,7 @@ import {
   experimentExportPreviewSchema,
   h3CellSchema,
   RECENT_COMMUNICATION_LIMIT,
+  RECENT_CONTROL_CHANGE_LIMIT,
   PERSONALITY_MAX_LENGTH,
   personalitySchema,
   simulationSnapshotSchema,
@@ -34,6 +35,7 @@ import {
   applyRequestedAction,
   createDevelopmentWorld,
   DEVELOPMENT_AGENT_BLUEPRINTS,
+  getCaptureEligibility,
   toWorldState,
   type WorldState,
 } from '@agentborne/world-engine';
@@ -155,6 +157,7 @@ export class SimulationService {
         droppedRecords,
         complete: droppedRecords === 0,
         metrics: this.#experimentMetrics.snapshot(agents.map(({ id }) => id)),
+        currentTerritory: this.#territoryScoreboard(),
       },
     });
   }
@@ -428,7 +431,7 @@ export class SimulationService {
   #worldSnapshot(): SimulationSnapshot['world'] {
     return {
       generatedAt: RESET_GENERATED_AT,
-      hexes: [...this.#state.hexes].map(([cell, state]) => ({ cell, state })),
+      hexes: [...this.#state.hexes].map(([cell, hex]) => ({ cell, ...hex })),
       agents: structuredClone([...this.#state.agents.values()]),
       events: structuredClone([...this.#state.events]),
     };
@@ -456,7 +459,7 @@ export class SimulationService {
     const stateFor = (cell: H3Cell) => {
       const state = this.#state.hexes.get(cell);
       if (!state) throw new Error('Observation cell is outside the world.');
-      return { cell, state };
+      return { cell, ...state };
     };
     const adjacentCells = gridDisk(agent.currentCell, 1)
       .filter((cell) => cell !== agent.currentCell)
@@ -510,16 +513,63 @@ export class SimulationService {
           distance: event.distance,
         } as const;
       });
+    const recentControlChanges = this.#state.events
+      .filter(
+        (event): event is Extract<WorldEvent, { type: 'hex-captured' }> =>
+          event.type === 'hex-captured' &&
+          (event.controllerAgentId === agent.id ||
+            event.previousControllerAgentId === agent.id),
+      )
+      .slice(-RECENT_CONTROL_CHANGE_LIMIT)
+      .map((event) => {
+        const gained = event.controllerAgentId === agent.id;
+        const otherAgentId = gained
+          ? event.previousControllerAgentId
+          : event.controllerAgentId;
+        const otherAgent = this.#state.agents.get(otherAgentId);
+        if (!otherAgent)
+          throw new Error('A control-change participant does not exist.');
+        return {
+          eventId: event.id,
+          direction: gained ? ('gained' as const) : ('lost' as const),
+          otherAgentId,
+          otherAgentName: otherAgent.name,
+          cell: event.cell,
+          occurredAt: event.occurredAt,
+        };
+      });
     return agentObservationSchema.parse({
       agentId: agent.id,
       agentName: agent.name,
       personality: agent.personality,
       currentCell: stateFor(agent.currentCell),
+      captureEligibility: getCaptureEligibility(this.#state, agent.id),
       adjacentCells,
       nearbyAgents,
       recentEvents,
       recentCommunications,
+      territoryScoreboard: this.#territoryScoreboard(),
+      recentControlChanges,
     });
+  }
+
+  #territoryScoreboard() {
+    const counts = new Map<AgentId, number>(
+      [...this.#state.agents.keys()].map((id) => [id, 0]),
+    );
+    for (const hex of this.#state.hexes.values()) {
+      if (hex.state === 'infected')
+        counts.set(
+          hex.controllerAgentId,
+          (counts.get(hex.controllerAgentId) ?? 0) + 1,
+        );
+    }
+    return [...this.#state.agents.values()].map(({ id, name, color }) => ({
+      agentId: id,
+      name,
+      color,
+      controlledCellCount: counts.get(id) ?? 0,
+    }));
   }
 }
 
@@ -538,6 +588,12 @@ function summarizeEvent(
   const name = state.agents.get(event.agentId)?.name ?? 'An agent';
   if (event.type === 'agent-moved') return `${name} moved to ${event.toCell}.`;
   if (event.type === 'hex-infected') return `${name} infected ${event.cell}.`;
+  if (event.type === 'hex-captured') {
+    const previous =
+      state.agents.get(event.previousControllerAgentId)?.name ??
+      'another agent';
+    return `${name} captured ${event.cell} from ${previous}.`;
+  }
   return `${name} waited.`;
 }
 

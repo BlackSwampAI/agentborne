@@ -14,6 +14,7 @@ import {
   type ExperimentId,
   type ExperimentMetrics,
   type ExportedCommunication,
+  type ExportedControlChange,
   type PersonalityConfigurationEvent,
   type ProviderMetadata,
   type WorldSnapshot,
@@ -60,6 +61,10 @@ export class ExperimentMetricAccumulator {
       const recipient = this.#records.get(turn.event.recipientId);
       if (recipient) recipient.receivedCommunications += 1;
     }
+    if (turn.outcome === 'accepted' && turn.event.type === 'hex-captured') {
+      const displaced = this.#records.get(turn.event.previousControllerAgentId);
+      if (displaced) displaced.territoryLostThroughCapture += 1;
+    }
   }
 
   snapshot(agentIds: readonly AgentId[]): ExperimentMetrics {
@@ -91,10 +96,15 @@ interface MutableMetrics {
   providerErrors: number;
   requestedMoves: number;
   requestedInfections: number;
+  requestedCaptures: number;
   requestedMessages: number;
   requestedWaits: number;
   acceptedMovements: number;
   infections: number;
+  successfulCaptures: number;
+  territoryGainedThroughInfection: number;
+  territoryGainedThroughCapture: number;
+  territoryLostThroughCapture: number;
   deliveredMessages: number;
   sentCommunications: number;
   receivedCommunications: number;
@@ -115,10 +125,15 @@ function mutableMetrics(): MutableMetrics {
     providerErrors: 0,
     requestedMoves: 0,
     requestedInfections: 0,
+    requestedCaptures: 0,
     requestedMessages: 0,
     requestedWaits: 0,
     acceptedMovements: 0,
     infections: 0,
+    successfulCaptures: 0,
+    territoryGainedThroughInfection: 0,
+    territoryGainedThroughCapture: 0,
+    territoryLostThroughCapture: 0,
     deliveredMessages: 0,
     sentCommunications: 0,
     receivedCommunications: 0,
@@ -150,6 +165,7 @@ function addToMutable(
     if (turn.requestedAction.type === 'move') metrics.requestedMoves += 1;
     if (turn.requestedAction.type === 'infect')
       metrics.requestedInfections += 1;
+    if (turn.requestedAction.type === 'capture') metrics.requestedCaptures += 1;
     if (turn.requestedAction.type === 'message') metrics.requestedMessages += 1;
     if (turn.requestedAction.type === 'wait') metrics.requestedWaits += 1;
   }
@@ -157,8 +173,15 @@ function addToMutable(
     metrics.acceptedMovements += 1;
     metrics.visited.add(turn.event.toCell);
   }
-  if (turn.outcome === 'accepted' && turn.event.type === 'hex-infected')
+  if (turn.outcome === 'accepted' && turn.event.type === 'hex-infected') {
     metrics.infections += 1;
+    metrics.territoryGainedThroughInfection += 1;
+  }
+  if (turn.outcome === 'accepted' && turn.event.type === 'hex-captured') {
+    metrics.successfulCaptures += 1;
+    metrics.territoryGainedThroughCapture += 1;
+    if (aggregate) metrics.territoryLostThroughCapture += 1;
+  }
   if (turn.outcome === 'accepted' && turn.event.type === 'agent-messaged') {
     metrics.deliveredMessages += 1;
     metrics.sentCommunications += 1;
@@ -195,10 +218,15 @@ function finalizeMutable(metrics: MutableMetrics) {
     providerErrors: metrics.providerErrors,
     requestedMoves: metrics.requestedMoves,
     requestedInfections: metrics.requestedInfections,
+    requestedCaptures: metrics.requestedCaptures,
     requestedMessages: metrics.requestedMessages,
     requestedWaits: metrics.requestedWaits,
     acceptedMovements: metrics.acceptedMovements,
     successfullyInfectedCells: metrics.infections,
+    successfulCaptures: metrics.successfulCaptures,
+    territoryGainedThroughInfection: metrics.territoryGainedThroughInfection,
+    territoryGainedThroughCapture: metrics.territoryGainedThroughCapture,
+    territoryLostThroughCapture: metrics.territoryLostThroughCapture,
     deliveredMessages: metrics.deliveredMessages,
     sentCommunications: metrics.sentCommunications,
     receivedCommunications: metrics.receivedCommunications,
@@ -229,6 +257,7 @@ export function createExperimentExport(
   const selectedSet = new Set<AgentId>(selectedAgentIds);
   const filtered = filterTurns(source, request, selectedSet);
   const communications = filterCommunications(source, request, selectedSet);
+  const controlChanges = filterControlChanges(source, request, selectedSet);
   const firstRetainedTurn = source.turns[0]?.turnNumber;
   const lastRetainedTurn = source.turns.at(-1)?.turnNumber;
   const requestedRangeExtendsBeyondRetention = rangeExtendsBeyondRetention(
@@ -262,7 +291,7 @@ export function createExperimentExport(
           },
     );
   const document: ExperimentExportDocument = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt,
     experiment: {
       id: source.id,
@@ -278,6 +307,7 @@ export function createExperimentExport(
       selectedAgentIds,
       matchingRecordCount: filtered.length,
       matchingCommunicationCount: communications.length,
+      matchingControlChangeCount: controlChanges.length,
       firstMatchingTurn: filtered[0]?.turnNumber,
       lastMatchingTurn: filtered.at(-1)?.turnNumber,
     },
@@ -295,6 +325,11 @@ export function createExperimentExport(
             filtered,
             selectedAgentIds,
             communications,
+            controlChanges,
+          ),
+          currentTerritory: currentTerritory(
+            source.currentWorld,
+            source.currentAgents,
           ),
         }
       : {}),
@@ -309,7 +344,8 @@ export function createExperimentExport(
           worldEvents: filtered.flatMap((turn) => {
             if (
               turn.outcome !== 'accepted' ||
-              turn.event.type === 'agent-messaged'
+              turn.event.type === 'agent-messaged' ||
+              turn.event.type === 'hex-captured'
             )
               return [];
             return [structuredClone(turn.event)];
@@ -318,6 +354,9 @@ export function createExperimentExport(
       : {}),
     ...(include.communications
       ? { communications: structuredClone(communications) }
+      : {}),
+    ...(include.controlChanges
+      ? { controlChanges: structuredClone(controlChanges) }
       : {}),
     turns: filtered.map((turn) => exportTurn(turn, request)),
   };
@@ -330,6 +369,23 @@ function exportWorldState(world: WorldSnapshot): ExperimentExportWorldState {
     hexes: structuredClone(world.hexes),
     agents: structuredClone(world.agents),
   };
+}
+
+function currentTerritory(world: WorldSnapshot, agents: readonly Agent[]) {
+  const counts = new Map<AgentId, number>(agents.map(({ id }) => [id, 0]));
+  for (const hex of world.hexes) {
+    if (hex.state === 'infected')
+      counts.set(
+        hex.controllerAgentId,
+        (counts.get(hex.controllerAgentId) ?? 0) + 1,
+      );
+  }
+  return agents.map(({ id, name, color }) => ({
+    agentId: id,
+    name,
+    color,
+    controlledCellCount: counts.get(id) ?? 0,
+  }));
 }
 
 export function createExperimentPreview(
@@ -352,11 +408,17 @@ export function createExperimentPreview(
       document.filters,
       new Set(document.selection.selectedAgentIds),
     ),
+    filterControlChanges(
+      source,
+      document.filters,
+      new Set(document.selection.selectedAgentIds),
+    ),
   );
   return experimentExportPreviewSchema.parse({
     experimentId: source.id,
     matchingRecordCount: document.selection.matchingRecordCount,
     matchingCommunicationCount: document.selection.matchingCommunicationCount,
+    matchingControlChangeCount: document.selection.matchingControlChangeCount,
     selectedAgentCount: document.selection.selectedAgentIds.length,
     firstMatchingTurn: document.selection.firstMatchingTurn,
     lastMatchingTurn: document.selection.lastMatchingTurn,
@@ -444,6 +506,40 @@ function filterCommunications(
   return communications;
 }
 
+function filterControlChanges(
+  source: ExperimentSource,
+  request: ExperimentExportRequest,
+  selected: Set<AgentId>,
+): ExportedControlChange[] {
+  if (
+    !request.outcomes.includes('accepted') ||
+    !request.actions.includes('capture')
+  )
+    return [];
+  let controlChanges = source.turns.flatMap((turn) => {
+    if (
+      turn.outcome !== 'accepted' ||
+      turn.event.type !== 'hex-captured' ||
+      (!selected.has(turn.event.controllerAgentId) &&
+        !selected.has(turn.event.previousControllerAgentId))
+    )
+      return [];
+    return [
+      { ...structuredClone(turn.event), originatingTurn: turn.turnNumber },
+    ];
+  });
+  if (request.turns.mode === 'range') {
+    const range = request.turns;
+    controlChanges = controlChanges.filter(
+      ({ originatingTurn }) =>
+        originatingTurn >= range.fromTurn && originatingTurn <= range.toTurn,
+    );
+  } else if (request.turns.mode === 'latest') {
+    controlChanges = controlChanges.slice(-request.turns.count);
+  }
+  return controlChanges;
+}
+
 function rangeExtendsBeyondRetention(
   request: ExperimentExportRequest,
   source: ExperimentSource,
@@ -466,6 +562,7 @@ function inclusionsFor(request: ExperimentExportRequest) {
       initialWorld: true,
       currentWorld: true,
       communications: true,
+      controlChanges: true,
     };
   if (request.level === 'custom') {
     const custom = request.custom!;
@@ -476,6 +573,7 @@ function inclusionsFor(request: ExperimentExportRequest) {
       initialWorld: custom.initialWorldState,
       currentWorld: custom.currentWorldState,
       communications: custom.communications,
+      controlChanges: custom.controlChanges,
     };
   }
   return {
@@ -485,6 +583,7 @@ function inclusionsFor(request: ExperimentExportRequest) {
     initialWorld: false,
     currentWorld: false,
     communications: true,
+    controlChanges: true,
   };
 }
 
@@ -556,6 +655,8 @@ function exportTurn(
     if (custom && !custom.recentEvents) delete observation.recentEvents;
     if (custom && !custom.recentCommunications)
       delete observation.recentCommunications;
+    if (custom && !custom.recentControlChanges)
+      delete observation.recentControlChanges;
     base.observation = observation;
   }
   if (turn.outcome !== 'provider-error' && includeValidation)
@@ -575,6 +676,8 @@ function summarizeEvent(
   if (event.type === 'agent-moved')
     return `Moved from ${event.fromCell} to ${event.toCell}.`;
   if (event.type === 'hex-infected') return `Infected ${event.cell}.`;
+  if (event.type === 'hex-captured')
+    return `Captured ${event.cell} from ${event.previousControllerAgentId}.`;
   if (event.type === 'agent-messaged')
     return `Messaged ${event.recipientId} from distance ${event.distance}.`;
   return 'Waited.';
@@ -584,10 +687,12 @@ export function calculateExperimentMetrics(
   turns: readonly AgentTurnRecord[],
   agentIds: readonly AgentId[],
   communications: readonly ExportedCommunication[] = [],
+  controlChanges: readonly ExportedControlChange[] = [],
 ): ExperimentMetrics {
   const metricFor = (
     records: readonly AgentTurnRecord[],
     relevantCommunications: readonly ExportedCommunication[],
+    relevantControlChanges: readonly ExportedControlChange[],
     agentId?: AgentId,
   ) => {
     const latencies = records.flatMap(({ provider }) =>
@@ -627,6 +732,11 @@ export function calculateExperimentMetrics(
           turn.outcome !== 'provider-error' &&
           turn.requestedAction.type === 'infect',
       ).length,
+      requestedCaptures: records.filter(
+        (turn) =>
+          turn.outcome !== 'provider-error' &&
+          turn.requestedAction.type === 'capture',
+      ).length,
       requestedMessages: records.filter(
         (turn) =>
           turn.outcome !== 'provider-error' &&
@@ -645,6 +755,29 @@ export function calculateExperimentMetrics(
         (turn) =>
           turn.outcome === 'accepted' && turn.event.type === 'hex-infected',
       ).length,
+      successfulCaptures: records.filter(
+        (turn) =>
+          turn.outcome === 'accepted' && turn.event.type === 'hex-captured',
+      ).length,
+      territoryGainedThroughInfection: records.filter(
+        (turn) =>
+          turn.outcome === 'accepted' && turn.event.type === 'hex-infected',
+      ).length,
+      territoryGainedThroughCapture: agentId
+        ? relevantControlChanges.filter(
+            ({ controllerAgentId }) => controllerAgentId === agentId,
+          ).length
+        : relevantControlChanges.filter(({ controllerAgentId }) =>
+            agentIds.includes(controllerAgentId),
+          ).length,
+      territoryLostThroughCapture: agentId
+        ? relevantControlChanges.filter(
+            ({ previousControllerAgentId }) =>
+              previousControllerAgentId === agentId,
+          ).length
+        : relevantControlChanges.filter(({ previousControllerAgentId }) =>
+            agentIds.includes(previousControllerAgentId),
+          ).length,
       deliveredMessages: agentId
         ? relevantCommunications.filter(
             ({ agentId: senderId }) => senderId === agentId,
@@ -680,12 +813,13 @@ export function calculateExperimentMetrics(
     };
   };
   return experimentMetricsSchema.parse({
-    aggregate: metricFor(turns, communications),
+    aggregate: metricFor(turns, communications, controlChanges),
     byAgent: agentIds.map((agentId) => ({
       agentId,
       metrics: metricFor(
         turns.filter((turn) => turn.agentId === agentId),
         communications,
+        controlChanges,
         agentId,
       ),
     })),
