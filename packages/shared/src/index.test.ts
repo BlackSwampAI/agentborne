@@ -1,25 +1,174 @@
 import { describe, expect, it } from 'vitest';
-import { requestedActionSchema } from './index';
+import {
+  MODEL_SUMMARY_MAX_LENGTH,
+  agentDecisionSchema,
+  agentObservationSchema,
+  agentTurnRecordSchema,
+  simulationSnapshotSchema,
+} from '.';
 
-describe('requestedActionSchema', () => {
-  it.each([
-    { type: 'move', targetCell: '892a1072893ffff' },
-    { type: 'infect' },
-    {
-      type: 'message',
-      recipientId: 'ca0e2b4d-d88f-4c9e-a401-a7b740c6e5af',
-      message: 'Meet me at the edge.',
-    },
-    { type: 'wait' },
-  ])('accepts a structured $type action', (action) => {
-    expect(requestedActionSchema.safeParse(action).success).toBe(true);
+const agentId = '128f3f38-6b7d-4db7-9e95-751b4ce2681e';
+const cell = '892a1072893ffff';
+const adjacent = '892a1072883ffff';
+const observation = {
+  agentId,
+  agentName: 'Ember',
+  personality: 'Prefer infection.',
+  currentCell: { cell, state: 'open' },
+  adjacentCells: [{ cell: adjacent, state: 'open' }],
+  nearbyAgents: [],
+  recentEvents: [],
+};
+const baseTurn = {
+  turnNumber: 1,
+  agentId,
+  startedAt: '2026-08-13T12:00:00.000Z',
+  completedAt: '2026-08-13T12:00:01.000Z',
+  observation,
+};
+const provider = {
+  provider: 'openrouter',
+  model: 'google/gemini-3.7-flash',
+  latencyMs: 100,
+};
+const event = {
+  id: '67aa21b9-fc78-4b04-9f92-9862bf346f96',
+  agentId,
+  occurredAt: '2026-08-13T12:00:01.000Z',
+  type: 'hex-infected',
+  cell,
+};
+
+describe('agent observation and decision schemas', () => {
+  it('accepts a bounded state-bearing observation', () => {
+    expect(agentObservationSchema.parse(observation).currentCell.state).toBe(
+      'open',
+    );
   });
 
-  it('rejects invented action verbs', () => {
+  it.each([
+    { ...observation, adjacentCells: [] },
+    { ...observation, currentCell: { cell, state: 'unknown' } },
+    {
+      ...observation,
+      nearbyAgents: Array(6).fill({
+        id: agentId,
+        name: 'x',
+        currentCell: cell,
+        distance: 1,
+      }),
+    },
+  ])('rejects invalid or oversized observations', (value) => {
+    expect(agentObservationSchema.safeParse(value).success).toBe(false);
+  });
+
+  it.each([
+    {
+      requestedAction: { type: 'move', targetCell: adjacent },
+      summary: 'Move.',
+    },
+    { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+    { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+  ])('accepts a PR 2 decision', (decision) => {
+    expect(agentDecisionSchema.safeParse(decision).success).toBe(true);
+  });
+
+  it.each([
+    {
+      requestedAction: { type: 'teleport', targetCell: adjacent },
+      summary: 'No.',
+    },
+    {
+      requestedAction: {
+        type: 'message',
+        recipientId: agentId,
+        message: 'No.',
+      },
+      summary: 'No.',
+    },
+    {
+      requestedAction: { type: 'wait' },
+      summary: 'x'.repeat(MODEL_SUMMARY_MAX_LENGTH + 1),
+    },
+  ])('rejects forbidden actions and oversized model text', (decision) => {
+    expect(agentDecisionSchema.safeParse(decision).success).toBe(false);
+  });
+});
+
+describe('turn and snapshot schemas', () => {
+  it.each([
+    {
+      ...baseTurn,
+      outcome: 'accepted',
+      requestedAction: { type: 'infect' },
+      summary: 'Infect.',
+      validation: { accepted: true },
+      event,
+      provider,
+    },
+    {
+      ...baseTurn,
+      outcome: 'rejected',
+      requestedAction: { type: 'move', targetCell: adjacent },
+      summary: 'Move.',
+      validation: { accepted: false, reason: 'not-adjacent', details: 'No.' },
+      provider,
+    },
+    {
+      ...baseTurn,
+      outcome: 'provider-error',
+      failure: { code: 'timeout', message: 'Timed out.', retryable: true },
+    },
+  ])('validates $outcome turn records', (turn) => {
+    expect(agentTurnRecordSchema.safeParse(turn).success).toBe(true);
+  });
+
+  it('validates a complete API snapshot and rejects unbounded histories', () => {
+    const worldAgent = {
+      id: agentId,
+      name: 'Ember',
+      color: '#ff6b57',
+      personality: 'Prefer infection.',
+      currentCell: cell,
+    };
+    const snapshot = {
+      world: {
+        generatedAt: '2026-08-13T12:00:00.000Z',
+        hexes: [{ cell, state: 'open' }],
+        agents: [worldAgent],
+        events: [],
+      },
+      turnNumber: 0,
+      nextAgentId: agentId,
+      activeAgentId: null,
+      status: 'paused',
+      providerMode: 'openrouter',
+      providerConfigured: true,
+      turns: [],
+    };
+    const validTurn = {
+      ...baseTurn,
+      outcome: 'accepted',
+      requestedAction: { type: 'infect' },
+      summary: 'Infect.',
+      validation: { accepted: true },
+      event,
+      provider,
+    };
+    expect(simulationSnapshotSchema.safeParse(snapshot).success).toBe(true);
     expect(
-      requestedActionSchema.safeParse({
-        type: 'teleport',
-        targetCell: '892a1072893ffff',
+      simulationSnapshotSchema.safeParse({
+        ...snapshot,
+        turns: Array(121).fill(validTurn),
+      }).success,
+    ).toBe(false);
+    expect(
+      simulationSnapshotSchema.safeParse({
+        ...snapshot,
+        world: {
+          ...snapshot.world,
+          events: Array(121).fill(event),
+        },
       }).success,
     ).toBe(false);
   });

@@ -186,26 +186,80 @@ export interface DevelopmentWorldOptions {
   latitude?: number;
   longitude?: number;
   resolution?: number;
+  radius?: number;
   generatedAt?: string;
 }
+
+export const DEVELOPMENT_AGENT_BLUEPRINTS = [
+  {
+    id: '128f3f38-6b7d-4db7-9e95-751b4ce2681e',
+    name: 'Ember',
+    color: '#ff6b57',
+    personality:
+      'You are an aggressive infector. Prefer infecting open cells and move decisively toward uninfected space when your current cell is already infected.',
+  },
+  {
+    id: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
+    name: 'Rook',
+    color: '#ffd166',
+    personality:
+      'You are a restless wanderer. Prefer movement and variety, rarely waiting unless no move seems worthwhile.',
+  },
+  {
+    id: '3ba3ef0b-2142-44cc-b175-f6e5d6e98df5',
+    name: 'Mingle',
+    color: '#63d2ff',
+    personality:
+      'You are curious about other agents. Move toward visible agents and linger near activity, while infecting opportunistically.',
+  },
+  {
+    id: '442a1667-39c8-48e9-8c89-23803f9e2101',
+    name: 'Solace',
+    color: '#c59cff',
+    personality:
+      'You value solitude. Move away from nearby agents, seek quiet cells, and infect only when it helps claim isolated space.',
+  },
+  {
+    id: '5f812a08-05f2-4950-bf2d-4df59d05e9c2',
+    name: 'Verge',
+    color: '#6ee7a8',
+    personality:
+      'You are an edge-seeking explorer. Push toward cells with fewer onward options and favor expanding activity along the world boundary.',
+  },
+  {
+    id: '67a43b5c-ced8-45bd-970f-a89ac57853fc',
+    name: 'Jinx',
+    color: '#ff91c8',
+    personality:
+      'You are an unpredictable opportunist. Mix movement, infection, and occasional waiting based on whatever detail in the observation catches your attention.',
+  },
+] as const;
 
 export function createDevelopmentWorld({
   latitude = 41.6528,
   longitude = -83.5379,
   resolution = 9,
+  radius = 4,
   generatedAt = new Date().toISOString(),
 }: DevelopmentWorldOptions = {}): WorldSnapshot {
   const center = h3CellSchema.parse(
     latLngToCell(latitude, longitude, resolution),
   );
-  const cells = gridDisk(center, 2).map((cell) => h3CellSchema.parse(cell));
+  const cells = gridDisk(center, radius).map((cell) =>
+    h3CellSchema.parse(cell),
+  );
+  const startingIndexes = [0, 10, 20, 30, 40, 50];
   return {
     generatedAt,
-    hexes: cells.map((cell, index) => ({
+    hexes: cells.map((cell) => ({
       cell,
-      state: index === 0 || index === 4 ? 'infected' : 'open',
+      state: 'open' as const,
     })),
-    agents: [],
+    agents: DEVELOPMENT_AGENT_BLUEPRINTS.map((profile, index) => ({
+      ...profile,
+      id: agentIdSchema.parse(profile.id),
+      currentCell: cells[startingIndexes[index]!]!,
+    })),
     events: [],
   };
 }

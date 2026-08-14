@@ -12,9 +12,11 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@agentborne/agent-runtime": "workspace:*",
     "@agentborne/shared": "workspace:*",
     "@agentborne/world-engine": "workspace:*",
     "@hono/node-server": "2.1.0",
+    "h3-js": "4.5.0",
     "hono": "4.13.2"
   },
   "devDependencies": {
