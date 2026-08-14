@@ -1,0 +1,30 @@
+{
+  "name": "agentborne",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=24.15.0 <25",
+    "pnpm": ">=11.21.0 <12"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "dev": "pnpm --filter @agentborne/world-lab dev",
+    "dev:api": "pnpm --filter @agentborne/game-api dev",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "pnpm -r --if-present lint",
+    "test": "pnpm -r --if-present test",
+    "test:e2e": "playwright test",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "validate": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/node": "26.2.0",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.1",
+    "prettier": "3.9.6",
+    "typescript": "5.9.3"
+  }
+}

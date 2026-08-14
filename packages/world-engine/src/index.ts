@@ -1,0 +1,221 @@
+import { gridDisk, gridDistance, latLngToCell } from 'h3-js';
+import {
+  agentIdSchema,
+  h3CellSchema,
+  requestedActionSchema,
+  type ActionResult,
+  type Agent,
+  type AgentId,
+  type H3Cell,
+  type HexState,
+  type RequestedAction,
+  type WorldEvent,
+  type WorldSnapshot,
+} from '@agentborne/shared';
+
+export interface WorldState {
+  readonly hexes: ReadonlyMap<H3Cell, HexState>;
+  readonly agents: ReadonlyMap<AgentId, Agent>;
+  readonly events: readonly WorldEvent[];
+}
+
+export interface EngineContext {
+  createEventId: () => string;
+  now: () => string;
+  communicationRange: number;
+}
+
+export interface AppliedAction {
+  state: WorldState;
+  result: ActionResult;
+}
+
+const defaultContext: EngineContext = {
+  createEventId: () => crypto.randomUUID(),
+  now: () => new Date().toISOString(),
+  communicationRange: 1,
+};
+
+function rejected(
+  state: WorldState,
+  reason: Extract<ActionResult, { accepted: false }>['reason'],
+  details: string,
+): AppliedAction {
+  return { state, result: { accepted: false, reason, details } };
+}
+
+export function areAdjacent(from: H3Cell, to: H3Cell): boolean {
+  try {
+    return gridDistance(from, to) === 1;
+  } catch {
+    return false;
+  }
+}
+
+export function applyRequestedAction(
+  state: WorldState,
+  agentIdInput: string,
+  actionInput: unknown,
+  context: Partial<EngineContext> = {},
+): AppliedAction {
+  const agentIdResult = agentIdSchema.safeParse(agentIdInput);
+  const actionResult = requestedActionSchema.safeParse(actionInput);
+
+  if (!agentIdResult.success || !state.agents.has(agentIdResult.data)) {
+    return rejected(state, 'unknown-agent', 'The acting agent does not exist.');
+  }
+  if (!actionResult.success) {
+    return rejected(
+      state,
+      'invalid-action',
+      'The requested action failed schema validation.',
+    );
+  }
+
+  const agentId = agentIdResult.data;
+  const agent = state.agents.get(agentId);
+  if (!agent)
+    return rejected(state, 'unknown-agent', 'The acting agent does not exist.');
+
+  const resolvedContext = { ...defaultContext, ...context };
+  const eventBase = {
+    id: resolvedContext.createEventId() as WorldEvent['id'],
+    agentId,
+    occurredAt: resolvedContext.now(),
+  };
+  const action = actionResult.data;
+
+  if (action.type === 'move') {
+    if (!state.hexes.has(action.targetCell)) {
+      return rejected(
+        state,
+        'cell-not-in-world',
+        'The target cell is outside this world.',
+      );
+    }
+    if (!areAdjacent(agent.currentCell, action.targetCell)) {
+      return rejected(
+        state,
+        'not-adjacent',
+        'Agents may move only to an adjacent H3 cell.',
+      );
+    }
+    const event: WorldEvent = {
+      ...eventBase,
+      type: 'agent-moved',
+      fromCell: agent.currentCell,
+      toCell: action.targetCell,
+    };
+    const agents = new Map(state.agents);
+    agents.set(agentId, { ...agent, currentCell: action.targetCell });
+    return accept(state, { ...state, agents }, event);
+  }
+
+  if (action.type === 'infect') {
+    if (state.hexes.get(agent.currentCell) === 'infected') {
+      return rejected(
+        state,
+        'already-infected',
+        'The current cell is already infected.',
+      );
+    }
+    if (!state.hexes.has(agent.currentCell)) {
+      return rejected(
+        state,
+        'cell-not-in-world',
+        'The current cell is outside this world.',
+      );
+    }
+    const event: WorldEvent = {
+      ...eventBase,
+      type: 'hex-infected',
+      cell: agent.currentCell,
+    };
+    const hexes = new Map(state.hexes);
+    hexes.set(agent.currentCell, 'infected');
+    return accept(state, { ...state, hexes }, event);
+  }
+
+  if (action.type === 'message') {
+    const recipient = state.agents.get(action.recipientId);
+    if (!recipient) {
+      return rejected(
+        state,
+        'unknown-recipient',
+        'The recipient does not exist.',
+      );
+    }
+    if (recipient.id === agentId) {
+      return rejected(state, 'self-message', 'An agent cannot message itself.');
+    }
+    if (
+      gridDistance(agent.currentCell, recipient.currentCell) >
+      resolvedContext.communicationRange
+    ) {
+      return rejected(
+        state,
+        'out-of-range',
+        'The recipient is outside communication range.',
+      );
+    }
+    const event: WorldEvent = {
+      ...eventBase,
+      type: 'agent-messaged',
+      recipientId: action.recipientId,
+      message: action.message,
+    };
+    return accept(state, state, event);
+  }
+
+  const event: WorldEvent = { ...eventBase, type: 'agent-waited' };
+  return accept(state, state, event);
+}
+
+function accept(
+  state: WorldState,
+  updated: WorldState,
+  event: WorldEvent,
+): AppliedAction {
+  return {
+    state: { ...updated, events: [...state.events, event] },
+    result: { accepted: true, event },
+  };
+}
+
+export interface DevelopmentWorldOptions {
+  latitude?: number;
+  longitude?: number;
+  resolution?: number;
+  generatedAt?: string;
+}
+
+export function createDevelopmentWorld({
+  latitude = 41.6528,
+  longitude = -83.5379,
+  resolution = 9,
+  generatedAt = new Date().toISOString(),
+}: DevelopmentWorldOptions = {}): WorldSnapshot {
+  const center = h3CellSchema.parse(
+    latLngToCell(latitude, longitude, resolution),
+  );
+  const cells = gridDisk(center, 2).map((cell) => h3CellSchema.parse(cell));
+  return {
+    generatedAt,
+    hexes: cells.map((cell, index) => ({
+      cell,
+      state: index === 0 || index === 4 ? 'infected' : 'open',
+    })),
+    agents: [],
+    events: [],
+  };
+}
+
+export function toWorldState(snapshot: WorldSnapshot): WorldState {
+  return {
+    hexes: new Map(snapshot.hexes.map(({ cell, state }) => [cell, state])),
+    agents: new Map(snapshot.agents.map((agent) => [agent.id, agent])),
+    events: snapshot.events,
+  };
+}
+
+export type { RequestedAction };
