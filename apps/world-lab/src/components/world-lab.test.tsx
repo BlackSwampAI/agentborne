@@ -479,7 +479,7 @@ describe('WorldLab', () => {
     ).toBeEnabled();
     expect(screen.getByLabelText('Playback speed')).toBeInTheDocument();
     expect(
-      screen.getAllByRole('button', { name: /Select agent/ }),
+      await screen.findAllByRole('button', { name: /Select agent/ }),
     ).toHaveLength(6);
     expect(screen.getByText('Automated-test provider')).toBeInTheDocument();
   });
