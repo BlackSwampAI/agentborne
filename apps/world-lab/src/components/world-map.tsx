@@ -2,9 +2,11 @@
 
 import { useEffect, useRef } from 'react';
 import { cellToBoundary } from 'h3-js';
-import maplibregl, {
+import {
+  AttributionControl,
   type GeoJSONSource,
-  type Map as MapLibreMap,
+  Map,
+  NavigationControl,
 } from 'maplibre-gl';
 import type { H3Cell, HexState } from '@agentborne/shared';
 
@@ -47,15 +49,18 @@ export function WorldMap({
   onSelect,
 }: WorldMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<MapLibreMap | null>(null);
+  const mapRef = useRef<Map | null>(null);
   const onSelectRef = useRef(onSelect);
   const initialSelectedCell = useRef(selectedCell);
-  onSelectRef.current = onSelect;
+
+  useEffect(() => {
+    onSelectRef.current = onSelect;
+  }, [onSelect]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    const map = new maplibregl.Map({
+    const map = new Map({
       container: containerRef.current,
       center: [longitude, latitude],
       zoom: 14,
@@ -76,11 +81,8 @@ export function WorldMap({
       },
     });
     mapRef.current = map;
-    map.addControl(
-      new maplibregl.NavigationControl({ showCompass: false }),
-      'top-right',
-    );
-    map.addControl(new maplibregl.AttributionControl({ compact: true }));
+    map.addControl(new NavigationControl({ showCompass: false }), 'top-right');
+    map.addControl(new AttributionControl({ compact: true }));
 
     map.on('load', () => {
       map.addSource(sourceId, {

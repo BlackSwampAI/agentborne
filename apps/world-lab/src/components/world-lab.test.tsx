@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { WorldLab } from './world-lab';
 
 vi.mock('maplibre-gl', () => {
@@ -22,11 +22,9 @@ vi.mock('maplibre-gl', () => {
     remove() {}
   }
   return {
-    default: {
-      Map,
-      NavigationControl: class {},
-      AttributionControl: class {},
-    },
+    Map,
+    NavigationControl: class {},
+    AttributionControl: class {},
   };
 });
 

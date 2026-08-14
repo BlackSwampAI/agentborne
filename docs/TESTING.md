@@ -17,6 +17,10 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
+Playwright starts the World Lab on port 3000 by default. To reuse an existing
+development server on another port, run for example
+`PLAYWRIGHT_BASE_URL=http://127.0.0.1:3001 pnpm test:e2e`.
+
 `pnpm validate` aggregates formatting, lint, type checking, unit/integration tests, and builds. Browser smoke coverage remains separate because it installs and starts Chromium.
 
 ## Layers
