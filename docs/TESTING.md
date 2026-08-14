@@ -23,11 +23,11 @@ pnpm test:e2e
 
 ## Coverage
 
-- Shared schema tests cover valid/invalid observations and decisions, all turn outcomes, response snapshots, history bounds, and model-authored string limits.
+- Shared schema tests cover valid/invalid observations and decisions, all turn outcomes, response snapshots, 120-record turn and 120-event history bounds, and model-authored string limits.
 - World-engine tests cover adjacent and non-adjacent movement, infection persistence, repeated-infection rejection, wait, immutability on rejection, and deterministic 61-cell/six-agent construction.
-- Agent-runtime tests inspect strict OpenRouter requests, prompt placement, parsing, runtime validation, malformed/unsupported responses, timeouts, sanitization, secret non-leakage, missing configuration, and explicit scripted output.
-- Simulation-service tests cover deterministic reset, round robin, exactly one call per turn, latest-state observations, accepted/rejected/failure records, recovery, and turn/reset concurrency.
-- API integration tests validate snapshot, turn, reset, missing configuration, provider failure, rejection, and typed conflict responses.
+- Agent-runtime tests inspect strict OpenRouter requests, prompt placement, parsing, runtime validation, malformed/unsupported responses, body-inclusive timeouts and timer cleanup, sanitization, secret non-leakage, missing configuration, and explicit scripted output.
+- Simulation-service tests cover deterministic reset, round robin beyond retained history, monotonic total turn numbering, exactly one call per turn, latest-state observations, 120-record turn retention, 120-event retention, accepted/rejected/failure records, atomic rollback on internal validation failure, recovery, and turn/reset concurrency.
+- API integration tests validate snapshot, turn, reset, missing configuration, provider failure, internal-failure propagation and recovery, rejection, and typed conflict responses.
 - React tests cover controls/statuses, playback configuration, single turn, reset, agent/hex selection, inspector output, H3 readiness, and safe configuration errors.
 - Playwright verifies 61 visible H3 cells are reported ready, six markers, marker/inspector interaction, infection layer data changes, Start/Pause, reset, and the explicit automated-test provider.
 

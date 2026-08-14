@@ -15,7 +15,9 @@ Turns advance one agent at a time in deterministic round-robin order. The applic
 
 Normal interactive development selects OpenRouter and reports missing configuration or provider failure explicitly. A scripted provider exists only as an explicitly selected deterministic test seam. It is not a fallback and is visibly labeled in the World Lab.
 
-Turn records contain bounded observations, actions, summaries, validation results, events, and safe provider metadata. They never contain raw prompts, raw payloads, secrets, or private chain-of-thought.
+Turn records contain bounded observations, actions, summaries, validation results, events, and safe provider metadata. They never contain raw prompts, raw payloads, secrets, or private chain-of-thought. The total completed-turn count is monotonic and separate from the newest 120 retained turn records. The authoritative world likewise retains only its newest 120 events, while observations receive the newest eight relevant events in chronological order.
+
+Accepted and rejected turn records are fully schema-validated before the service atomically commits the candidate world, record, count, and cursor. Only errors originating in the provider decision call are converted to sanitized, recorded provider failures. Other engine, schema, or internal errors propagate without changing simulation progress, and turn cleanup restores a coherent idle status. OpenRouter's timeout remains active through body reading, decoding, extraction, and runtime validation, with final cleanup on every outcome.
 
 ## Consequences
 

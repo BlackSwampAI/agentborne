@@ -39,7 +39,8 @@ describe('OpenRouterAgentProvider', () => {
     expect(request.provider).toEqual({ require_parameters: true });
     expect(request.messages[1]!.content).toContain(observation.personality);
     expect(request.messages[0]!.content).toContain('Never produce messages');
-    expect(request.max_tokens).toBeLessThanOrEqual(200);
+    expect(request.max_completion_tokens).toBe(180);
+    expect(request).not.toHaveProperty('max_tokens');
   });
 
   it('parses and runtime-validates a structured decision', async () => {
@@ -133,6 +134,62 @@ describe('OpenRouterAgentProvider', () => {
     await expect(provider.decide(observation)).rejects.toMatchObject({
       failure: { code: 'timeout' },
     });
+  });
+
+  it('keeps the timeout active while reading the response body', async () => {
+    vi.useFakeTimers();
+    try {
+      let requestSignal: AbortSignal | null | undefined;
+      const provider = new OpenRouterAgentProvider({
+        apiKey: 'secret-test-key',
+        timeoutMs: 10,
+        fetchImplementation: vi.fn(async (_url, init) => {
+          requestSignal = init?.signal;
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers(),
+            json: () =>
+              new Promise((_resolve, reject) => {
+                requestSignal?.addEventListener('abort', () =>
+                  reject(new DOMException('aborted', 'AbortError')),
+                );
+              }),
+          } as Response;
+        }),
+      });
+      const pending = expect(
+        provider.decide(observation),
+      ).rejects.toMatchObject({ failure: { code: 'timeout' } });
+
+      await vi.advanceTimersByTimeAsync(10);
+      await pending;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the timeout after a successful response', async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new OpenRouterAgentProvider({
+        apiKey: 'secret-test-key',
+        fetchImplementation: vi.fn(async () =>
+          response(
+            JSON.stringify({
+              requestedAction: { type: 'wait' },
+              summary: 'Done.',
+            }),
+          ),
+        ),
+      });
+
+      await expect(provider.decide(observation)).resolves.toBeDefined();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reports missing configuration instead of using a heuristic fallback', async () => {

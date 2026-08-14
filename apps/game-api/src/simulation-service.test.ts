@@ -5,7 +5,12 @@ import {
   type AgentProvider,
   type ProviderDecision,
 } from '@agentborne/agent-runtime';
-import { h3CellSchema, type AgentObservation } from '@agentborne/shared';
+import {
+  h3CellSchema,
+  type AgentObservation,
+  type AgentTurnRecord,
+  type WorldEvent,
+} from '@agentborne/shared';
 import {
   SimulationConflictError,
   SimulationService,
@@ -58,6 +63,47 @@ describe('SimulationService', () => {
     expect(seen.map(({ agentId }) => agentId)).toEqual([...order, order[0]]);
   });
 
+  it('keeps total turn numbering and round robin independent of retained history', async () => {
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'long-running-test',
+      configured: true,
+      async decide(): Promise<ProviderDecision> {
+        return {
+          decision: { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'long-running-test',
+            latencyMs: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    const agentOrder = simulation
+      .getSnapshot()
+      .world.agents.map(({ id }) => id);
+
+    for (let index = 0; index < 125; index += 1) {
+      await simulation.executeNextTurn();
+    }
+
+    const snapshot = simulation.getSnapshot();
+    const retainedNumbers = snapshot.turns.map(({ turnNumber }) => turnNumber);
+    expect(snapshot.turnNumber).toBe(125);
+    expect(snapshot.turns).toHaveLength(120);
+    expect(retainedNumbers).toEqual(
+      Array.from({ length: 120 }, (_, index) => index + 6),
+    );
+    expect(new Set(retainedNumbers).size).toBe(120);
+    expect(snapshot.turns.map(({ agentId }) => agentId)).toEqual(
+      snapshot.turns.map(
+        ({ turnNumber }) => agentOrder[(turnNumber - 1) % agentOrder.length],
+      ),
+    );
+    expect(snapshot.nextAgentId).toBe(agentOrder[125 % agentOrder.length]);
+  });
+
   it('builds each observation from the latest authoritative world state', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
@@ -92,10 +138,17 @@ describe('SimulationService', () => {
       ]),
     );
     const before = rejected.getSnapshot().world;
-    expect((await rejected.executeNextTurn()).outcome).toBe('rejected');
+    expect(await rejected.executeNextTurn()).toMatchObject({
+      turnNumber: 1,
+      outcome: 'rejected',
+    });
     expect(rejected.getSnapshot().world.hexes).toEqual(before.hexes);
     expect(rejected.getSnapshot().world.agents).toEqual(before.agents);
-    expect((await rejected.executeNextTurn()).outcome).toBe('accepted');
+    expect(await rejected.executeNextTurn()).toMatchObject({
+      turnNumber: 2,
+      outcome: 'accepted',
+    });
+    expect(rejected.getSnapshot().turnNumber).toBe(2);
   });
 
   it('records a sanitized provider failure, preserves the world, and continues', async () => {
@@ -127,9 +180,139 @@ describe('SimulationService', () => {
     };
     const simulation = service(provider);
     const before = simulation.getSnapshot().world;
-    expect((await simulation.executeNextTurn()).outcome).toBe('provider-error');
+    expect(await simulation.executeNextTurn()).toMatchObject({
+      turnNumber: 1,
+      outcome: 'provider-error',
+    });
     expect(simulation.getSnapshot().world).toEqual(before);
-    expect((await simulation.executeNextTurn()).outcome).toBe('accepted');
+    expect(await simulation.executeNextTurn()).toMatchObject({
+      turnNumber: 2,
+      outcome: 'accepted',
+    });
+    expect(simulation.getSnapshot().turnNumber).toBe(2);
+  });
+
+  it('does not commit or advance after post-provider validation fails', async () => {
+    const seenAgentIds: AgentObservation['agentId'][] = [];
+    let calls = 0;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'invalid-metadata-test',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        calls += 1;
+        seenAgentIds.push(observation.agentId);
+        if (calls === 1) {
+          return {
+            decision: {
+              requestedAction: { type: 'wait' },
+              summary: 'Invalid metadata follows.',
+            },
+            metadata: {
+              provider: 'scripted-test',
+              model: '',
+              latencyMs: 0,
+            },
+          } as ProviderDecision;
+        }
+        return {
+          decision: { requestedAction: { type: 'wait' }, summary: 'Valid.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'invalid-metadata-test',
+            latencyMs: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    const before = simulation.getSnapshot();
+
+    await expect(simulation.executeNextTurn()).rejects.toBeDefined();
+
+    const afterFailure = simulation.getSnapshot();
+    expect(afterFailure.world).toEqual(before.world);
+    expect(afterFailure.turnNumber).toBe(0);
+    expect(afterFailure.turns).toEqual([]);
+    expect(afterFailure.nextAgentId).toBe(before.nextAgentId);
+    expect(afterFailure).toMatchObject({
+      activeAgentId: null,
+      status: 'paused',
+    });
+
+    const recovered = await simulation.executeNextTurn();
+    expect(recovered).toMatchObject({
+      turnNumber: 1,
+      agentId: before.nextAgentId,
+      outcome: 'accepted',
+    });
+    expect(seenAgentIds).toEqual([before.nextAgentId, before.nextAgentId]);
+  });
+
+  it('retains only the newest world events without changing current state', async () => {
+    let clock = 0;
+    let eventSequence = 0;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'moving-history-test',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        return {
+          decision: {
+            requestedAction: {
+              type: 'move',
+              targetCell: observation.adjacentCells[0]!.cell,
+            },
+            summary: 'Move.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'moving-history-test',
+            latencyMs: 0,
+          },
+        };
+      },
+    };
+    const simulation = new SimulationService({
+      provider,
+      now: () =>
+        new Date(
+          Date.parse('2026-08-13T12:00:00.000Z') + clock++,
+        ).toISOString(),
+      createEventId: () =>
+        `67aa21b9-fc78-4b04-9f92-${String(++eventSequence).padStart(12, '0')}`,
+    });
+    const producedEvents: WorldEvent[] = [];
+    let lastRecord: AgentTurnRecord | undefined;
+
+    for (let index = 0; index < 125; index += 1) {
+      lastRecord = await simulation.executeNextTurn();
+      if (lastRecord.outcome !== 'accepted') {
+        throw new Error(
+          'The moving history fixture must produce accepted turns.',
+        );
+      }
+      producedEvents.push(lastRecord.event);
+    }
+
+    const snapshot = simulation.getSnapshot();
+    expect(snapshot.world.events).toHaveLength(120);
+    expect(snapshot.world.events).toEqual(producedEvents.slice(-120));
+    expect(
+      lastRecord?.observation.recentEvents.map(({ occurredAt }) => occurredAt),
+    ).toEqual(producedEvents.slice(-9, -1).map(({ occurredAt }) => occurredAt));
+
+    for (const agent of snapshot.world.agents) {
+      const latestMove = producedEvents
+        .filter(
+          (event) => event.type === 'agent-moved' && event.agentId === agent.id,
+        )
+        .at(-1);
+      expect(latestMove?.type).toBe('agent-moved');
+      if (latestMove?.type === 'agent-moved') {
+        expect(agent.currentCell).toBe(latestMove.toCell);
+      }
+    }
   });
 
   it('prevents overlapping turns and reset during an in-flight request', async () => {

@@ -2,6 +2,7 @@ import { gridDistance, gridDisk } from 'h3-js';
 import {
   AgentProviderError,
   type AgentProvider,
+  type ProviderDecision,
 } from '@agentborne/agent-runtime';
 import {
   agentObservationSchema,
@@ -26,6 +27,7 @@ import {
 
 const RESET_GENERATED_AT = '2026-08-13T12:00:00.000Z';
 const MAX_TURN_HISTORY = 120;
+const MAX_WORLD_EVENT_HISTORY = 120;
 
 export class SimulationConflictError extends Error {
   constructor(message: string) {
@@ -46,6 +48,7 @@ export class SimulationService {
   readonly #createEventId: () => string;
   #state: WorldState;
   #turns: AgentTurnRecord[] = [];
+  #completedTurnCount = 0;
   #cursor = 0;
   #busy = false;
   #status: SimulationStatus;
@@ -76,7 +79,7 @@ export class SimulationService {
         agents,
         events: this.#state.events,
       },
-      turnNumber: this.#turns.length,
+      turnNumber: this.#completedTurnCount,
       nextAgentId: next.id,
       activeAgentId: this.#activeAgentId,
       status: this.#status,
@@ -97,6 +100,7 @@ export class SimulationService {
       createDevelopmentWorld({ generatedAt: RESET_GENERATED_AT }),
     );
     this.#turns = [];
+    this.#completedTurnCount = 0;
     this.#cursor = 0;
     this.#activeAgentId = null;
     this.#status = this.#provider.configured ? 'paused' : 'configuration-error';
@@ -114,23 +118,46 @@ export class SimulationService {
     this.#busy = true;
     this.#activeAgentId = agent.id;
     this.#status = 'waiting-for-model';
-    const startedAt = this.#now();
-    const observation = this.#buildObservation(agent.id);
-    const turnNumber = this.#turns.length + 1;
-    let record: AgentTurnRecord;
 
     try {
-      const providerResult = await this.#provider.decide(
-        structuredClone(observation),
-      );
+      const startedAt = this.#now();
+      const observation = this.#buildObservation(agent.id);
+      const turnNumber = this.#completedTurnCount + 1;
+      const providerObservation = structuredClone(observation);
+      let providerResult: ProviderDecision;
+
+      try {
+        providerResult = await this.#provider.decide(providerObservation);
+      } catch (error) {
+        const providerError = asProviderError(error);
+        const record = agentTurnRecordSchema.parse({
+          turnNumber,
+          agentId: agent.id,
+          startedAt,
+          completedAt: this.#now(),
+          observation,
+          outcome: 'provider-error',
+          failure: providerError.failure,
+          provider: providerError.metadata,
+        });
+        this.#commitCompletedTurn(record, this.#state, agents.length);
+        this.#status =
+          providerError.failure.code === 'configuration'
+            ? 'configuration-error'
+            : 'provider-error';
+        return record;
+      }
+
       const applied = applyRequestedAction(
         this.#state,
         agent.id,
         providerResult.decision.requestedAction,
         { now: this.#now, createEventId: this.#createEventId },
       );
+      let record: AgentTurnRecord;
+      let candidateState = this.#state;
+
       if (applied.result.accepted) {
-        this.#state = applied.state;
         record = agentTurnRecordSchema.parse({
           turnNumber,
           agentId: agent.id,
@@ -144,7 +171,10 @@ export class SimulationService {
           event: applied.result.event,
           provider: providerResult.metadata,
         });
-        this.#status = 'paused';
+        candidateState = {
+          ...applied.state,
+          events: applied.state.events.slice(-MAX_WORLD_EVENT_HISTORY),
+        };
       } else {
         record = agentTurnRecordSchema.parse({
           turnNumber,
@@ -158,32 +188,34 @@ export class SimulationService {
           validation: applied.result,
           provider: providerResult.metadata,
         });
-        this.#status = 'paused';
       }
-    } catch (error) {
-      const providerError = asProviderError(error);
-      record = agentTurnRecordSchema.parse({
-        turnNumber,
-        agentId: agent.id,
-        startedAt,
-        completedAt: this.#now(),
-        observation,
-        outcome: 'provider-error',
-        failure: providerError.failure,
-        provider: providerError.metadata,
-      });
-      this.#status =
-        providerError.failure.code === 'configuration'
-          ? 'configuration-error'
-          : 'provider-error';
+
+      this.#commitCompletedTurn(record, candidateState, agents.length);
+      this.#status = 'paused';
+      return record;
     } finally {
       this.#busy = false;
       this.#activeAgentId = null;
+      if (this.#status === 'waiting-for-model') {
+        this.#status = this.#provider.configured
+          ? 'paused'
+          : 'configuration-error';
+      }
     }
+  }
 
-    this.#turns = [...this.#turns, record].slice(-MAX_TURN_HISTORY);
-    this.#cursor = (this.#cursor + 1) % agents.length;
-    return record;
+  #commitCompletedTurn(
+    record: AgentTurnRecord,
+    state: WorldState,
+    agentCount: number,
+  ): void {
+    const turns = [...this.#turns, record].slice(-MAX_TURN_HISTORY);
+    const cursor = (this.#cursor + 1) % agentCount;
+
+    this.#state = state;
+    this.#turns = turns;
+    this.#completedTurnCount = record.turnNumber;
+    this.#cursor = cursor;
   }
 
   #buildObservation(agentId: AgentId): AgentObservation {

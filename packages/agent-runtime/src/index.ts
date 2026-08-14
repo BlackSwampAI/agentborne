@@ -110,7 +110,7 @@ export function buildOpenRouterRequest(
       },
     },
     provider: { require_parameters: true },
-    max_tokens: 180,
+    max_completion_tokens: 180,
     stream: false,
   };
 }
@@ -172,109 +172,114 @@ export class OpenRouterAgentProvider implements AgentProvider {
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
-    let response: Response;
     try {
-      response = await this.#fetch(OPENROUTER_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.#apiKey}`,
-          'Content-Type': 'application/json',
+      let response: Response;
+      try {
+        response = await this.#fetch(OPENROUTER_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.#apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(buildOpenRouterRequest(observation, this.model)),
+          signal: controller.signal,
+        });
+      } catch {
+        throw requestFailure(controller.signal.aborted);
+      }
+
+      if (!response.ok) {
+        throw new AgentProviderError(
+          {
+            code: 'provider-http',
+            message: `The model provider returned HTTP ${response.status}.`,
+            retryable: response.status === 429 || response.status >= 500,
+          },
+          {
+            provider: 'openrouter',
+            model: this.model,
+            requestId: response.headers.get('x-request-id') ?? undefined,
+            latencyMs: Date.now() - started,
+          },
+        );
+      }
+
+      let raw: unknown;
+      try {
+        raw = await response.json();
+      } catch {
+        if (controller.signal.aborted) throw requestFailure(true);
+        throw new AgentProviderError({
+          code: 'malformed-response',
+          message: 'The model provider returned malformed JSON.',
+          retryable: true,
+        });
+      }
+
+      const parsedResponse = openRouterResponseSchema.safeParse(raw);
+      if (!parsedResponse.success) {
+        throw new AgentProviderError({
+          code: 'unsupported-response',
+          message: 'The model provider returned an unsupported response shape.',
+          retryable: true,
+        });
+      }
+      const content = parsedResponse.data.choices[0]?.message.content;
+      if (!content) {
+        throw new AgentProviderError({
+          code: 'unsupported-response',
+          message: 'The model provider returned no structured decision.',
+          retryable: true,
+        });
+      }
+
+      let decisionInput: unknown;
+      try {
+        decisionInput = JSON.parse(content);
+      } catch {
+        throw new AgentProviderError({
+          code: 'malformed-response',
+          message: 'The model decision was not valid JSON.',
+          retryable: true,
+        });
+      }
+      const decision = agentDecisionSchema.safeParse(decisionInput);
+      if (!decision.success) {
+        throw new AgentProviderError({
+          code: 'unsupported-response',
+          message: 'The model decision failed runtime schema validation.',
+          retryable: true,
+        });
+      }
+
+      return {
+        decision: decision.data,
+        metadata: {
+          provider: 'openrouter',
+          model: parsedResponse.data.model ?? this.model,
+          requestId:
+            parsedResponse.data.id ??
+            response.headers.get('x-request-id') ??
+            undefined,
+          latencyMs: Date.now() - started,
+          promptTokens: parsedResponse.data.usage?.prompt_tokens,
+          completionTokens: parsedResponse.data.usage?.completion_tokens,
         },
-        body: JSON.stringify(buildOpenRouterRequest(observation, this.model)),
-        signal: controller.signal,
-      });
-    } catch {
-      const timedOut = controller.signal.aborted;
-      throw new AgentProviderError({
-        code: timedOut ? 'timeout' : 'network',
-        message: timedOut
-          ? 'The model request timed out.'
-          : 'The model provider could not be reached.',
-        retryable: true,
-      });
+      };
     } finally {
       clearTimeout(timeout);
     }
-
-    const latencyMs = Date.now() - started;
-    if (!response.ok) {
-      throw new AgentProviderError(
-        {
-          code: 'provider-http',
-          message: `The model provider returned HTTP ${response.status}.`,
-          retryable: response.status === 429 || response.status >= 500,
-        },
-        {
-          provider: 'openrouter',
-          model: this.model,
-          requestId: response.headers.get('x-request-id') ?? undefined,
-          latencyMs,
-        },
-      );
-    }
-
-    let raw: unknown;
-    try {
-      raw = await response.json();
-    } catch {
-      throw new AgentProviderError({
-        code: 'malformed-response',
-        message: 'The model provider returned malformed JSON.',
-        retryable: true,
-      });
-    }
-
-    const parsedResponse = openRouterResponseSchema.safeParse(raw);
-    if (!parsedResponse.success) {
-      throw new AgentProviderError({
-        code: 'unsupported-response',
-        message: 'The model provider returned an unsupported response shape.',
-        retryable: true,
-      });
-    }
-    const content = parsedResponse.data.choices[0]?.message.content;
-    if (!content) {
-      throw new AgentProviderError({
-        code: 'unsupported-response',
-        message: 'The model provider returned no structured decision.',
-        retryable: true,
-      });
-    }
-
-    let decisionInput: unknown;
-    try {
-      decisionInput = JSON.parse(content);
-    } catch {
-      throw new AgentProviderError({
-        code: 'malformed-response',
-        message: 'The model decision was not valid JSON.',
-        retryable: true,
-      });
-    }
-    const decision = agentDecisionSchema.safeParse(decisionInput);
-    if (!decision.success) {
-      throw new AgentProviderError({
-        code: 'unsupported-response',
-        message: 'The model decision failed runtime schema validation.',
-        retryable: true,
-      });
-    }
-
-    return {
-      decision: decision.data,
-      metadata: {
-        provider: 'openrouter',
-        model: parsedResponse.data.model ?? this.model,
-        requestId:
-          parsedResponse.data.id ??
-          response.headers.get('x-request-id') ??
-          undefined,
-        latencyMs,
-        promptTokens: parsedResponse.data.usage?.prompt_tokens,
-        completionTokens: parsedResponse.data.usage?.completion_tokens,
-      },
-    };
   }
+}
+
+function requestFailure(timedOut: boolean): AgentProviderError {
+  return new AgentProviderError({
+    code: timedOut ? 'timeout' : 'network',
+    message: timedOut
+      ? 'The model request timed out.'
+      : 'The model provider could not be reached.',
+    retryable: true,
+  });
 }
 
 export class ScriptedAgentProvider implements AgentProvider {

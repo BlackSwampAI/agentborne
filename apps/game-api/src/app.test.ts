@@ -93,6 +93,64 @@ describe('game API simulation boundary', () => {
     });
   });
 
+  it('returns internal errors for post-provider validation failures without advancing', async () => {
+    let calls = 0;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'invalid-metadata-test',
+      configured: true,
+      async decide(): Promise<ProviderDecision> {
+        calls += 1;
+        return {
+          decision: { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: calls === 1 ? '' : 'invalid-metadata-test',
+            latencyMs: 0,
+          },
+        } as ProviderDecision;
+      },
+    };
+    const app = createApp({ provider });
+    const initial = simulationSnapshotSchema.parse(
+      await (await app.request('/api/simulation')).json(),
+    );
+
+    const failed = await app.request('/api/simulation/turn', {
+      method: 'POST',
+    });
+    expect(failed.status).toBe(500);
+    await expect(failed.json()).resolves.toEqual({
+      error: {
+        code: 'internal_error',
+        message: 'An unexpected error occurred.',
+      },
+    });
+
+    const afterFailure = simulationSnapshotSchema.parse(
+      await (await app.request('/api/simulation')).json(),
+    );
+    expect(afterFailure).toMatchObject({
+      turnNumber: 0,
+      turns: [],
+      nextAgentId: initial.nextAgentId,
+      activeAgentId: null,
+      status: 'paused',
+    });
+    expect(afterFailure.world).toEqual(initial.world);
+
+    const recovered = singleTurnResponseSchema.parse(
+      await (
+        await app.request('/api/simulation/turn', { method: 'POST' })
+      ).json(),
+    );
+    expect(recovered.turn).toMatchObject({
+      turnNumber: 1,
+      agentId: initial.nextAgentId,
+      outcome: 'accepted',
+    });
+  });
+
   it('resets the complete simulation', async () => {
     const app = createApp({
       provider: new ScriptedAgentProvider([

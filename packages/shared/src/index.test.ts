@@ -31,6 +31,13 @@ const provider = {
   model: 'openai/gpt-5-mini',
   latencyMs: 100,
 };
+const event = {
+  id: '67aa21b9-fc78-4b04-9f92-9862bf346f96',
+  agentId,
+  occurredAt: '2026-08-13T12:00:01.000Z',
+  type: 'hex-infected',
+  cell,
+};
 
 describe('agent observation and decision schemas', () => {
   it('accepts a bounded state-bearing observation', () => {
@@ -96,13 +103,7 @@ describe('turn and snapshot schemas', () => {
       requestedAction: { type: 'infect' },
       summary: 'Infect.',
       validation: { accepted: true },
-      event: {
-        id: '67aa21b9-fc78-4b04-9f92-9862bf346f96',
-        agentId,
-        occurredAt: '2026-08-13T12:00:01.000Z',
-        type: 'hex-infected',
-        cell,
-      },
+      event,
       provider,
     },
     {
@@ -122,7 +123,7 @@ describe('turn and snapshot schemas', () => {
     expect(agentTurnRecordSchema.safeParse(turn).success).toBe(true);
   });
 
-  it('validates a complete API snapshot and rejects unbounded history', () => {
+  it('validates a complete API snapshot and rejects unbounded histories', () => {
     const worldAgent = {
       id: agentId,
       name: 'Ember',
@@ -145,11 +146,29 @@ describe('turn and snapshot schemas', () => {
       providerConfigured: true,
       turns: [],
     };
+    const validTurn = {
+      ...baseTurn,
+      outcome: 'accepted',
+      requestedAction: { type: 'infect' },
+      summary: 'Infect.',
+      validation: { accepted: true },
+      event,
+      provider,
+    };
     expect(simulationSnapshotSchema.safeParse(snapshot).success).toBe(true);
     expect(
       simulationSnapshotSchema.safeParse({
         ...snapshot,
-        turns: Array(121).fill({}),
+        turns: Array(121).fill(validTurn),
+      }).success,
+    ).toBe(false);
+    expect(
+      simulationSnapshotSchema.safeParse({
+        ...snapshot,
+        world: {
+          ...snapshot.world,
+          events: Array(121).fill(event),
+        },
       }).success,
     ).toBe(false);
   });

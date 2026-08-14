@@ -111,7 +111,7 @@ export const worldSnapshotSchema = z.object({
   generatedAt: z.iso.datetime(),
   hexes: z.array(z.object({ cell: h3CellSchema, state: hexStateSchema })),
   agents: z.array(agentSchema),
-  events: z.array(worldEventSchema),
+  events: z.array(worldEventSchema).max(120),
 });
 export type WorldSnapshot = z.infer<typeof worldSnapshotSchema>;
 
