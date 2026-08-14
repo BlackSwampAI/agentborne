@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import {
   BrowserTestAgentProvider,
@@ -8,6 +8,9 @@ import {
 } from '@agentborne/agent-runtime';
 import {
   apiErrorSchema,
+  experimentExportRequestSchema,
+  experimentExportPreviewSchema,
+  experimentExportResponseSchema,
   PERSONALITY_MAX_LENGTH,
   resetSimulationResponseSchema,
   restoreDefaultPersonalitiesResponseSchema,
@@ -23,6 +26,7 @@ import {
   SimulationService,
   SimulationValidationError,
 } from './simulation-service';
+import { ExperimentExportValidationError } from './experiment-export';
 
 export const healthResponseSchema = worldSnapshotSchema
   .pick({ generatedAt: true })
@@ -187,6 +191,56 @@ export function createApp(options: AppOptions = {}) {
     }
   });
 
+  app.post('/api/simulation/experiment/export/preview', async (context) => {
+    const request = experimentExportRequestSchema.safeParse(
+      await context.req.json().catch(() => undefined),
+    );
+    if (!request.success)
+      return context.json(
+        apiErrorSchema.parse({
+          error: {
+            code: 'invalid_export',
+            message: 'The export filters are invalid.',
+          },
+        }),
+        400,
+      );
+    try {
+      return context.json(
+        experimentExportPreviewSchema.parse(
+          service.previewExperimentExport(request.data),
+        ),
+      );
+    } catch (error) {
+      return exportErrorResponse(context, error);
+    }
+  });
+
+  app.post('/api/simulation/experiment/export', async (context) => {
+    const request = experimentExportRequestSchema.safeParse(
+      await context.req.json().catch(() => undefined),
+    );
+    if (!request.success)
+      return context.json(
+        apiErrorSchema.parse({
+          error: {
+            code: 'invalid_export',
+            message: 'The export filters are invalid.',
+          },
+        }),
+        400,
+      );
+    try {
+      return context.json(
+        experimentExportResponseSchema.parse({
+          document: service.generateExperimentExport(request.data),
+        }),
+      );
+    } catch (error) {
+      return exportErrorResponse(context, error);
+    }
+  });
+
   app.notFound((context) =>
     context.json(
       apiErrorSchema.parse({
@@ -219,3 +273,21 @@ export function createApp(options: AppOptions = {}) {
 }
 
 export type GameApi = ReturnType<typeof createApp>;
+
+function exportErrorResponse(context: Context, error: unknown) {
+  if (error instanceof SimulationConflictError)
+    return context.json(
+      apiErrorSchema.parse({
+        error: { code: 'export_conflict', message: error.message },
+      }),
+      409,
+    );
+  if (error instanceof ExperimentExportValidationError)
+    return context.json(
+      apiErrorSchema.parse({
+        error: { code: error.code, message: error.message },
+      }),
+      error.code === 'unknown_agent' ? 404 : 400,
+    );
+  throw error;
+}

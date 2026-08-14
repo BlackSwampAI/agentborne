@@ -6,6 +6,10 @@ import {
   agentDecisionSchema,
   agentObservationSchema,
   agentTurnRecordSchema,
+  experimentExportRequestSchema,
+  experimentIdSchema,
+  personalityConfigurationEventSchema,
+  providerMetadataSchema,
   restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
   updateAgentPersonalityRequestSchema,
@@ -64,6 +68,32 @@ const snapshot = {
   providerMode: 'openrouter',
   providerConfigured: true,
   turns: [],
+  experiment: {
+    id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    startedAt: '2026-08-13T12:00:00.000Z',
+    totalCompletedTurns: 0,
+    retainedTurns: 0,
+    droppedRecords: 0,
+    complete: true,
+    metrics: {
+      aggregate: {
+        totalTurns: 0,
+        accepted: 0,
+        rejected: 0,
+        providerErrors: 0,
+        requestedMoves: 0,
+        requestedInfections: 0,
+        requestedWaits: 0,
+        acceptedMovements: 0,
+        successfullyInfectedCells: 0,
+        uniqueVisitedCells: 0,
+        tokens: {},
+        knownCostCredits: 0,
+        turnsWithUnknownCost: 0,
+      },
+      byAgent: [],
+    },
+  },
 };
 
 describe('agent observation and decision schemas', () => {
@@ -176,6 +206,99 @@ describe('turn and snapshot schemas', () => {
         },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('experiment telemetry and export contracts', () => {
+  it('accepts complete, partial and tiny-cost provider usage without fabricating unknowns', () => {
+    expect(
+      providerMetadataSchema.parse({
+        ...provider,
+        promptTokens: 12,
+        completionTokens: 3,
+        totalTokens: 15,
+        reasoningTokens: 1,
+        cachedReadTokens: 8,
+        cacheWriteTokens: 2,
+        costCredits: 0.00000001,
+      }).costCredits,
+    ).toBe(0.00000001);
+    expect(providerMetadataSchema.parse(provider)).not.toHaveProperty(
+      'costCredits',
+    );
+  });
+
+  it('validates experiment identities and immutable configuration events', () => {
+    expect(experimentIdSchema.safeParse('not-an-id').success).toBe(false);
+    expect(
+      personalityConfigurationEventSchema.safeParse({
+        timestamp: '2026-08-13T12:00:00.000Z',
+        agentId,
+        previousPersonality: 'Before.',
+        newPersonality: 'After.',
+        operation: 'custom-edit',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('validates all levels and rejects empty, malformed, duplicate and inverted selections', () => {
+    const base = {
+      agents: { mode: 'selected', agentIds: [agentId] },
+      turns: { mode: 'entire-retained' },
+      outcomes: ['accepted'],
+      actions: ['wait'],
+    };
+    for (const level of ['minimal', 'standard', 'full-safe'])
+      expect(
+        experimentExportRequestSchema.safeParse({ ...base, level }).success,
+      ).toBe(true);
+    expect(
+      experimentExportRequestSchema.parse({ ...base, level: 'minimal' })
+        .serialization,
+    ).toBe('compact');
+    expect(
+      experimentExportRequestSchema.safeParse({
+        ...base,
+        level: 'minimal',
+        serialization: 'pretty',
+      }).success,
+    ).toBe(true);
+    expect(
+      experimentExportRequestSchema.safeParse({
+        ...base,
+        level: 'custom',
+        custom: {
+          turnObservations: false,
+          personalityTextHistory: false,
+          nearbyAgents: false,
+          recentEvents: false,
+          validationDetails: false,
+          resultingEvents: false,
+          providerUsageMetadata: false,
+          initialWorldState: false,
+          currentWorldState: false,
+          computedMetrics: false,
+        },
+      }).success,
+    ).toBe(true);
+    for (const invalid of [
+      { ...base, agents: { mode: 'selected', agentIds: [] }, level: 'minimal' },
+      { ...base, outcomes: [], level: 'minimal' },
+      { ...base, actions: [], level: 'minimal' },
+      {
+        ...base,
+        turns: { mode: 'range', fromTurn: 9, toTurn: 2 },
+        level: 'minimal',
+      },
+      {
+        ...base,
+        agents: { mode: 'selected', agentIds: ['bad-id'] },
+        level: 'minimal',
+      },
+    ])
+      expect(experimentExportRequestSchema.safeParse(invalid).success).toBe(
+        false,
+      );
   });
 });
 

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { gridDisk } from 'h3-js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  experimentExportDocumentSchema,
   simulationSnapshotSchema,
   type SimulationSnapshot,
 } from '@agentborne/shared';
@@ -174,7 +175,40 @@ const initial = simulationSnapshotSchema.parse({
   providerMode: 'scripted-test',
   providerConfigured: true,
   turns: [],
+  experiment: {
+    id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    startedAt: '2026-08-13T12:00:00.000Z',
+    totalCompletedTurns: 0,
+    retainedTurns: 0,
+    droppedRecords: 0,
+    complete: true,
+    metrics: {
+      aggregate: emptyMetrics(),
+      byAgent: world.agents.map(({ id }) => ({
+        agentId: id,
+        metrics: emptyMetrics(),
+      })),
+    },
+  },
 });
+
+function emptyMetrics() {
+  return {
+    totalTurns: 0,
+    accepted: 0,
+    rejected: 0,
+    providerErrors: 0,
+    requestedMoves: 0,
+    requestedInfections: 0,
+    requestedWaits: 0,
+    acceptedMovements: 0,
+    successfullyInfectedCells: 0,
+    uniqueVisitedCells: 0,
+    tokens: {},
+    knownCostCredits: 0,
+    turnsWithUnknownCost: 0,
+  };
+}
 
 function afterInfection(): SimulationSnapshot {
   const agent = world.agents[0]!;
@@ -213,6 +247,10 @@ function afterInfection(): SimulationSnapshot {
       provider: 'scripted-test' as const,
       model: 'test',
       latencyMs: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      costCredits: 0,
     },
   };
   return simulationSnapshotSchema.parse({
@@ -229,6 +267,40 @@ function afterInfection(): SimulationSnapshot {
     turnNumber: 1,
     nextAgentId: world.agents[1]!.id,
     turns: [turn],
+    experiment: {
+      ...initial.experiment,
+      totalCompletedTurns: 1,
+      retainedTurns: 1,
+      firstRetainedTurn: 1,
+      lastRetainedTurn: 1,
+      metrics: {
+        aggregate: {
+          ...emptyMetrics(),
+          totalTurns: 1,
+          accepted: 1,
+          requestedInfections: 1,
+          successfullyInfectedCells: 1,
+          uniqueVisitedCells: 1,
+          averageLatencyMs: 0,
+        },
+        byAgent: initial.experiment.metrics.byAgent.map((entry, index) =>
+          index === 0
+            ? {
+                ...entry,
+                metrics: {
+                  ...emptyMetrics(),
+                  totalTurns: 1,
+                  accepted: 1,
+                  requestedInfections: 1,
+                  successfullyInfectedCells: 1,
+                  uniqueVisitedCells: 1,
+                  averageLatencyMs: 0,
+                },
+              }
+            : entry,
+        ),
+      },
+    },
   });
 }
 
@@ -266,6 +338,10 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn(() => jsonResponse(initial)),
+  );
+  vi.stubGlobal(
+    'confirm',
+    vi.fn(() => true),
   );
 });
 
@@ -472,6 +548,9 @@ describe('WorldLab', () => {
       await screen.findByText('Infection · ' + world.agents[0]!.currentCell),
     ).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Reset world' }));
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining('unexported telemetry'),
+    );
     await waitFor(() =>
       expect(
         screen.getByText('Development world loaded with six agents.'),
@@ -757,7 +836,233 @@ describe('WorldLab', () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it('shows current and selected-agent experiment usage', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(afterInfection())),
+    );
+    render(<WorldLab />);
+    expect(
+      await screen.findByLabelText('Current experiment usage'),
+    ).toHaveTextContent('1 turns');
+    expect(screen.getByLabelText('Current experiment usage')).toHaveTextContent(
+      '0.0 credits known cost',
+    );
+    expect(screen.getByLabelText('Selected agent usage')).toHaveTextContent(
+      '1 turns',
+    );
+  });
+
+  it('preselects one agent, supports multi-select and previews server-owned export', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Export this agent' }),
+    );
+    expect(screen.getByRole('checkbox', { name: /Ember/ })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: /Rook/ })).not.toBeChecked();
+    await user.click(screen.getByRole('checkbox', { name: /Rook/ }));
+    vi.mocked(fetch).mockImplementationOnce(() =>
+      jsonResponse({
+        experimentId: initial.experiment.id,
+        matchingRecordCount: 0,
+        selectedAgentCount: 2,
+        retention: {
+          limit: 5000,
+          totalCompletedTurns: 0,
+          retainedTurns: 0,
+          droppedRecords: 0,
+          complete: true,
+          requestedRangeExtendsBeyondRetention: false,
+        },
+        knownCostCredits: 0,
+        turnsWithUnknownCost: 0,
+        serializedUtf8Bytes: 900,
+        approximateAiInputTokens: 225,
+        tokenEstimateMethod: 'ceil(UTF-8 bytes / 4)',
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Preview export' }));
+    expect(await screen.findByLabelText('Export preview')).toHaveTextContent(
+      '900 bytes',
+    );
+    const request = JSON.parse(
+      String(vi.mocked(fetch).mock.calls.at(-1)?.[1]?.body),
+    );
+    expect(request.agents).toEqual({
+      mode: 'selected',
+      agentIds: [world.agents[0]!.id, world.agents[1]!.id],
+    });
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(
+      screen.getByRole('button', { name: 'Preview export' }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Select all' }));
+    for (const agent of world.agents)
+      expect(
+        screen.getByRole('checkbox', { name: new RegExp(agent.name) }),
+      ).toBeChecked();
+  });
+
+  it('offers every tier, turn selector, outcome/action filters, and dependent Custom switches', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await user.click(await screen.findByText('Experiment Export'));
+    const level = screen.getByLabelText('Export level');
+    expect(level).toHaveTextContent('Minimal');
+    expect(level).toHaveTextContent('Standard');
+    expect(level).toHaveTextContent('Full safe');
+    expect(level).toHaveTextContent('Custom');
+    expect(screen.getByLabelText('JSON serialization')).toHaveValue('compact');
+    await user.selectOptions(
+      screen.getByLabelText('JSON serialization'),
+      'pretty',
+    );
+    await user.selectOptions(level, 'custom');
+    expect(screen.getByText('Advanced Custom switches')).toBeInTheDocument();
+    const observations = screen.getByRole('checkbox', {
+      name: 'Turn observations',
+    });
+    await user.click(observations);
+    expect(
+      screen.getByRole('checkbox', { name: 'Nearby agents' }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole('checkbox', { name: 'Recent events' }),
+    ).toBeDisabled();
+    await user.selectOptions(screen.getByLabelText('Turn range'), 'range');
+    expect(screen.getByLabelText('From turn')).toBeInTheDocument();
+    await user.click(screen.getByRole('checkbox', { name: 'accepted' }));
+    await user.click(screen.getByRole('checkbox', { name: 'rejected' }));
+    await user.click(screen.getByRole('checkbox', { name: 'provider error' }));
+    expect(
+      screen.getByRole('button', { name: 'Preview export' }),
+    ).toBeDisabled();
+  });
+
+  it('copies and downloads the exact same validated generated JSON and revokes its URL', async () => {
+    const user = userEvent.setup();
+    const progressed = afterInfection();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(progressed)),
+    );
+    const clipboardWrite = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
+    const createObjectURL = vi.fn(() => 'blob:experiment');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => undefined);
+    render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Export this agent' }),
+    );
+    const document = minimalExportDocument(progressed);
+    vi.mocked(fetch).mockImplementationOnce(() => jsonResponse({ document }));
+    await user.click(screen.getByRole('button', { name: 'Generate JSON' }));
+    await user.click(await screen.findByRole('button', { name: 'Copy JSON' }));
+    expect(clipboardWrite).toHaveBeenCalledWith(
+      JSON.stringify(experimentExportDocumentSchema.parse(document)),
+    );
+    clipboardWrite.mockRejectedValueOnce(new Error('denied'));
+    await user.click(screen.getByRole('button', { name: 'Copy JSON' }));
+    expect(await screen.findByText(/Copy failed/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Download JSON' }));
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:experiment');
+    expect(click).toHaveBeenCalledTimes(1);
+    click.mockRestore();
+  });
+
+  it('auto-pauses a fully infected world and disables automatic Start only', async () => {
+    const infected = simulationSnapshotSchema.parse({
+      ...initial,
+      world: {
+        ...initial.world,
+        hexes: initial.world.hexes.map((hex) => ({
+          ...hex,
+          state: 'infected' as const,
+        })),
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(infected)),
+    );
+    render(<WorldLab />);
+    expect(
+      await screen.findByText(/Development world fully infected/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Single turn' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Reset world' })).toBeEnabled();
+  });
 });
+
+function minimalExportDocument(snapshot: SimulationSnapshot) {
+  const turn = snapshot.turns[0]!;
+  const agent = snapshot.world.agents[0]!;
+  return {
+    schemaVersion: 1 as const,
+    generatedAt: '2026-08-13T12:00:02.000Z',
+    experiment: {
+      id: snapshot.experiment.id,
+      startedAt: snapshot.experiment.startedAt,
+      providerMode: snapshot.providerMode,
+    },
+    retention: {
+      limit: 5000,
+      totalCompletedTurns: 1,
+      retainedTurns: 1,
+      firstRetainedTurn: 1,
+      lastRetainedTurn: 1,
+      droppedRecords: 0,
+      complete: true,
+      requestedRangeExtendsBeyondRetention: false,
+    },
+    filters: {
+      agents: { mode: 'selected' as const, agentIds: [agent.id] },
+      turns: { mode: 'entire-retained' as const },
+      outcomes: ['accepted', 'rejected', 'provider-error'] as const,
+      actions: ['move', 'infect', 'wait'] as const,
+      level: 'minimal' as const,
+    },
+    selection: {
+      selectedAgentIds: [agent.id],
+      matchingRecordCount: 1,
+      firstMatchingTurn: 1,
+      lastMatchingTurn: 1,
+    },
+    agents: [agent],
+    metrics: {
+      aggregate: snapshot.experiment.metrics.aggregate,
+      byAgent: [snapshot.experiment.metrics.byAgent[0]!],
+    },
+    turns: [
+      {
+        turnNumber: turn.turnNumber,
+        startedAt: turn.startedAt,
+        completedAt: turn.completedAt,
+        agentId: turn.agentId,
+        outcome: turn.outcome,
+        ...(turn.outcome === 'accepted'
+          ? {
+              requestedAction: turn.requestedAction,
+              summary: turn.summary,
+              eventSummary: `Infected ${agent.currentCell}.`,
+              provider: turn.provider,
+            }
+          : {}),
+      },
+    ],
+  };
+}
 
 function apiBaseForTest() {
   return process.env.NEXT_PUBLIC_GAME_API_BASE_URL ?? '/api/game/simulation';

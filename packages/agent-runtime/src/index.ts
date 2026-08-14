@@ -138,11 +138,24 @@ const openRouterResponseSchema = z.object({
       message: z.object({ content: z.string().nullable() }),
     }),
   ),
-  usage: z
+  usage: z.unknown().optional(),
+});
+
+const openRouterUsageSchema = z.object({
+  prompt_tokens: z.number().int().nonnegative().optional(),
+  completion_tokens: z.number().int().nonnegative().optional(),
+  total_tokens: z.number().int().nonnegative().optional(),
+  cost: z.number().nonnegative().finite().optional(),
+  completion_tokens_details: z
+    .object({ reasoning_tokens: z.number().int().nonnegative().optional() })
+    .passthrough()
+    .optional(),
+  prompt_tokens_details: z
     .object({
-      prompt_tokens: z.number().int().nonnegative().optional(),
-      completion_tokens: z.number().int().nonnegative().optional(),
+      cached_tokens: z.number().int().nonnegative().optional(),
+      cache_write_tokens: z.number().int().nonnegative().optional(),
     })
+    .passthrough()
     .optional(),
 });
 
@@ -246,59 +259,131 @@ export class OpenRouterAgentProvider implements AgentProvider {
       }
 
       const parsedResponse = openRouterResponseSchema.safeParse(raw);
+      const safeMetadata = providerMetadataFromResponse(
+        raw,
+        response,
+        this.model,
+        Date.now() - started,
+        collectSensitiveValues({
+          apiKey: this.#apiKey,
+          observation,
+          additionalValues: [
+            requestBody,
+            ...providerRequest.messages.map(({ content }) => content),
+          ],
+        }),
+      );
       if (!parsedResponse.success) {
-        throw new AgentProviderError({
-          code: 'unsupported-response',
-          message: 'The model provider returned an unsupported response shape.',
-          retryable: true,
-        });
+        throw new AgentProviderError(
+          {
+            code: 'unsupported-response',
+            message:
+              'The model provider returned an unsupported response shape.',
+            retryable: true,
+          },
+          safeMetadata,
+        );
       }
       const content = parsedResponse.data.choices[0]?.message.content;
       if (!content) {
-        throw new AgentProviderError({
-          code: 'unsupported-response',
-          message: 'The model provider returned no structured decision.',
-          retryable: true,
-        });
+        throw new AgentProviderError(
+          {
+            code: 'unsupported-response',
+            message: 'The model provider returned no structured decision.',
+            retryable: true,
+          },
+          safeMetadata,
+        );
       }
 
       let decisionInput: unknown;
       try {
         decisionInput = JSON.parse(content);
       } catch {
-        throw new AgentProviderError({
-          code: 'malformed-response',
-          message: 'The model decision was not valid JSON.',
-          retryable: true,
-        });
+        throw new AgentProviderError(
+          {
+            code: 'malformed-response',
+            message: 'The model decision was not valid JSON.',
+            retryable: true,
+          },
+          safeMetadata,
+        );
       }
       const decision = agentDecisionSchema.safeParse(decisionInput);
       if (!decision.success) {
-        throw new AgentProviderError({
-          code: 'unsupported-response',
-          message: 'The model decision failed runtime schema validation.',
-          retryable: true,
-        });
+        throw new AgentProviderError(
+          {
+            code: 'unsupported-response',
+            message: 'The model decision failed runtime schema validation.',
+            retryable: true,
+          },
+          safeMetadata,
+        );
       }
 
       return {
         decision: decision.data,
-        metadata: {
-          provider: 'openrouter',
-          model: parsedResponse.data.model ?? this.model,
-          requestId:
-            parsedResponse.data.id ??
-            response.headers.get('x-request-id') ??
-            undefined,
-          latencyMs: Date.now() - started,
-          promptTokens: parsedResponse.data.usage?.prompt_tokens,
-          completionTokens: parsedResponse.data.usage?.completion_tokens,
-        },
+        metadata: safeMetadata,
       };
     } finally {
       clearTimeout(timeout);
     }
   }
+}
+
+function providerMetadataFromResponse(
+  raw: unknown,
+  response: Response,
+  fallbackModel: string,
+  latencyMs: number,
+  sensitiveValues: string[],
+): ProviderMetadata {
+  const root = asRecord(raw);
+  const usage = openRouterUsageSchema.safeParse(root?.usage);
+  const parsedUsage = usage.success ? usage.data : undefined;
+  const requestId =
+    sanitizeDiagnosticCode(root?.id, sensitiveValues, 160) ??
+    sanitizeDiagnosticCode(
+      response.headers.get('x-request-id'),
+      sensitiveValues,
+      160,
+    );
+  return {
+    provider: 'openrouter',
+    model:
+      sanitizeDiagnosticMessage(root?.model, sensitiveValues, 120) ??
+      sanitizeDiagnosticMessage(fallbackModel, sensitiveValues, 120) ??
+      DEFAULT_OPENROUTER_MODEL,
+    latencyMs,
+    ...(requestId === undefined ? {} : { requestId }),
+    ...(parsedUsage?.prompt_tokens === undefined
+      ? {}
+      : { promptTokens: parsedUsage.prompt_tokens }),
+    ...(parsedUsage?.completion_tokens === undefined
+      ? {}
+      : { completionTokens: parsedUsage.completion_tokens }),
+    ...(parsedUsage?.total_tokens === undefined
+      ? {}
+      : { totalTokens: parsedUsage.total_tokens }),
+    ...(parsedUsage?.completion_tokens_details?.reasoning_tokens === undefined
+      ? {}
+      : {
+          reasoningTokens:
+            parsedUsage.completion_tokens_details.reasoning_tokens,
+        }),
+    ...(parsedUsage?.prompt_tokens_details?.cached_tokens === undefined
+      ? {}
+      : { cachedReadTokens: parsedUsage.prompt_tokens_details.cached_tokens }),
+    ...(parsedUsage?.prompt_tokens_details?.cache_write_tokens === undefined
+      ? {}
+      : {
+          cacheWriteTokens:
+            parsedUsage.prompt_tokens_details.cache_write_tokens,
+        }),
+    ...(parsedUsage?.cost === undefined
+      ? {}
+      : { costCredits: parsedUsage.cost }),
+  };
 }
 
 function requestFailure(timedOut: boolean): AgentProviderError {
@@ -526,6 +611,13 @@ export class ScriptedAgentProvider implements AgentProvider {
         provider: 'scripted-test',
         model: this.model,
         latencyMs: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        reasoningTokens: 0,
+        cachedReadTokens: 0,
+        cacheWriteTokens: 0,
+        costCredits: 0,
       },
     };
   }
@@ -558,6 +650,13 @@ export class BrowserTestAgentProvider implements AgentProvider {
         provider: 'scripted-test',
         model: this.model,
         latencyMs: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        reasoningTokens: 0,
+        cachedReadTokens: 0,
+        cacheWriteTokens: 0,
+        costCredits: 0,
       },
     };
   }

@@ -18,12 +18,23 @@ import {
   SimulationService,
   SimulationValidationError,
 } from './simulation-service';
+import { serializeExperimentExport } from './experiment-export';
 
 const now = () => '2026-08-13T12:00:01.000Z';
 const createEventId = () => '67aa21b9-fc78-4b04-9f92-9862bf346f96';
 
 function service(provider: AgentProvider) {
   return new SimulationService({ provider, now, createEventId });
+}
+
+function exportRequest(level: 'minimal' | 'standard' | 'full-safe' | 'custom') {
+  return {
+    agents: { mode: 'all' as const },
+    turns: { mode: 'entire-retained' as const },
+    outcomes: ['accepted', 'rejected', 'provider-error'] as const,
+    actions: ['move', 'infect', 'wait'] as const,
+    level,
+  };
 }
 
 describe('SimulationService', () => {
@@ -35,9 +46,378 @@ describe('SimulationService', () => {
     );
     const initial = simulation.getSnapshot();
     await simulation.executeNextTurn();
-    expect(simulation.reset()).toEqual(initial);
+    const reset = simulation.reset();
+    expect(reset.world).toEqual(initial.world);
+    expect(reset.experiment.id).not.toBe(initial.experiment.id);
+    expect(reset.experiment.totalCompletedTurns).toBe(0);
     expect(initial.world.agents).toHaveLength(6);
     expect(initial.world.hexes).toHaveLength(61);
+  });
+
+  it('retains complete experiment records independently of the 120-turn browser snapshot', async () => {
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'retention-test',
+      configured: true,
+      async decide() {
+        return {
+          decision: {
+            requestedAction: { type: 'wait' as const },
+            summary: 'Wait.',
+          },
+          metadata: {
+            provider: 'scripted-test' as const,
+            model: 'retention-test',
+            latencyMs: 1,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = new SimulationService({
+      provider,
+      now,
+      createEventId,
+      experimentRetentionLimit: 125,
+    });
+    for (let index = 0; index < 125; index += 1)
+      await simulation.executeNextTurn();
+    const snapshot = simulation.getSnapshot();
+    expect(snapshot.turns).toHaveLength(120);
+    expect(snapshot.experiment).toMatchObject({
+      totalCompletedTurns: 125,
+      retainedTurns: 125,
+      droppedRecords: 0,
+      complete: true,
+    });
+    expect(
+      simulation.generateExperimentExport(exportRequest('full-safe')).turns,
+    ).toHaveLength(125);
+  });
+
+  it('reports configurable experiment truncation and absolute retained bounds', async () => {
+    const simulation = new SimulationService({
+      provider: new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: '1' },
+        { requestedAction: { type: 'wait' }, summary: '2' },
+        { requestedAction: { type: 'wait' }, summary: '3' },
+      ]),
+      now,
+      createEventId,
+      experimentRetentionLimit: 2,
+    });
+    await simulation.executeNextTurn();
+    await simulation.executeNextTurn();
+    await simulation.executeNextTurn();
+    expect(simulation.getSnapshot().experiment).toMatchObject({
+      retainedTurns: 2,
+      firstRetainedTurn: 2,
+      lastRetainedTurn: 3,
+      droppedRecords: 1,
+      complete: false,
+    });
+    const preview = simulation.previewExperimentExport({
+      ...exportRequest('minimal'),
+      turns: { mode: 'range', fromTurn: 1, toTurn: 3 },
+    });
+    expect(preview.retention.requestedRangeExtendsBeyondRetention).toBe(true);
+  });
+
+  it('estimates the selected Compact or Pretty serialization and defaults to Compact', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+      ]),
+    );
+    await simulation.executeNextTurn();
+    const compact = simulation.previewExperimentExport(
+      exportRequest('minimal'),
+    );
+    const pretty = simulation.previewExperimentExport({
+      ...exportRequest('minimal'),
+      serialization: 'pretty',
+    });
+    expect(compact.serializedUtf8Bytes).toBeLessThan(
+      pretty.serializedUtf8Bytes,
+    );
+    expect(compact.approximateAiInputTokens).toBeLessThan(
+      pretty.approximateAiInputTokens,
+    );
+    expect(
+      simulation.generateExperimentExport(exportRequest('minimal')).filters
+        .serialization,
+    ).toBe('compact');
+  });
+
+  it('aggregates charged cost as exact decimal input without JSON artifacts', async () => {
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'decimal-cost-test',
+      configured: true,
+      async decide() {
+        return {
+          decision: {
+            requestedAction: { type: 'wait' as const },
+            summary: 'Wait.',
+          },
+          metadata: {
+            provider: 'scripted-test' as const,
+            model: 'decimal-cost-test',
+            latencyMs: 0,
+            costCredits: 0.14064472125,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    await simulation.executeNextTurn();
+    await simulation.executeNextTurn();
+    await simulation.executeNextTurn();
+    const document = simulation.generateExperimentExport(
+      exportRequest('minimal'),
+    );
+    expect(document.metrics?.aggregate.knownCostCredits).toBe(0.42193416375);
+    expect(serializeExperimentExport(document)).toContain(
+      '"knownCostCredits":0.42193416375',
+    );
+    expect(serializeExperimentExport(document)).not.toContain(
+      '0.4219341637499998',
+    );
+  });
+
+  it('records immutable personality configuration history and clears it on reset', () => {
+    let sequence = 0;
+    const simulation = new SimulationService({
+      provider: new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+      ]),
+      now,
+      createEventId,
+      createExperimentId: () =>
+        `aaaaaaaa-aaaa-4aaa-8aaa-${String(++sequence).padStart(12, '0')}`,
+    });
+    const before = simulation.getSnapshot();
+    const agent = before.world.agents[0]!;
+    simulation.updateAgentPersonality(agent.id, 'Custom immutable edit.');
+    simulation.restoreDefaultPersonalities();
+    const full = simulation.generateExperimentExport(
+      exportRequest('full-safe'),
+    );
+    expect(full.configurationEvents).toMatchObject([
+      {
+        operation: 'custom-edit',
+        previousPersonality: agent.personality,
+        newPersonality: 'Custom immutable edit.',
+      },
+      {
+        operation: 'restore-default',
+        previousPersonality: 'Custom immutable edit.',
+        newPersonality: agent.personality,
+      },
+    ]);
+    const captured = structuredClone(full.configurationEvents);
+    simulation.updateAgentPersonality(agent.id, 'Another edit.');
+    expect(full.configurationEvents).toEqual(captured);
+    const reset = simulation.reset();
+    expect(reset.experiment.id).not.toBe(before.experiment.id);
+    expect(
+      simulation.generateExperimentExport(exportRequest('full-safe'))
+        .configurationEvents,
+    ).toEqual([]);
+  });
+
+  it('filters agents, latest/ranges, outcomes and actions chronologically with subset metrics', async () => {
+    let call = 0;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'filter-test',
+      configured: true,
+      async decide(observation) {
+        call += 1;
+        const requestedAction =
+          call === 1
+            ? { type: 'infect' as const }
+            : call === 2
+              ? {
+                  type: 'move' as const,
+                  targetCell: observation.adjacentCells[0]!.cell,
+                }
+              : { type: 'wait' as const };
+        return {
+          decision: { requestedAction, summary: 'Safe summary.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'filter-test',
+            latencyMs: call,
+            promptTokens: call,
+            completionTokens: call,
+            totalTokens: call * 2,
+            costCredits: call === 3 ? undefined : 0.00000001,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    await simulation.executeNextTurn();
+    await simulation.executeNextTurn();
+    await simulation.executeNextTurn();
+    const agents = simulation.getSnapshot().world.agents;
+    const selected = [agents[0]!.id, agents[1]!.id];
+    const document = simulation.generateExperimentExport({
+      ...exportRequest('standard'),
+      agents: { mode: 'selected', agentIds: selected },
+      turns: { mode: 'latest', count: 10 },
+      outcomes: ['accepted'],
+      actions: ['move', 'infect'],
+    });
+    expect(document.selection.selectedAgentIds).toEqual(selected);
+    expect(document.turns.map(({ turnNumber }) => turnNumber)).toEqual([1, 2]);
+    expect(document.metrics?.aggregate).toMatchObject({
+      totalTurns: 2,
+      requestedMoves: 1,
+      requestedInfections: 1,
+      acceptedMovements: 1,
+      successfullyInfectedCells: 1,
+      knownCostCredits: 0.00000002,
+      turnsWithUnknownCost: 0,
+    });
+    expect(document.metrics?.aggregate.uniqueVisitedCells).toBeGreaterThan(1);
+    const oneAgent = simulation.generateExperimentExport({
+      ...exportRequest('minimal'),
+      agents: { mode: 'selected', agentIds: [agents[2]!.id] },
+      turns: { mode: 'range', fromTurn: 3, toTurn: 3 },
+    });
+    expect(oneAgent.selection).toMatchObject({
+      selectedAgentIds: [agents[2]!.id],
+      matchingRecordCount: 1,
+      firstMatchingTurn: 3,
+      lastMatchingTurn: 3,
+    });
+    expect(
+      simulation.generateExperimentExport(exportRequest('minimal')).metrics
+        ?.aggregate,
+    ).toMatchObject({
+      knownCostCredits: 0.00000002,
+      turnsWithUnknownCost: 1,
+    });
+  });
+
+  it('keeps Full safe world snapshots state-only and scopes canonical events to the export selection', async () => {
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'full-safe-event-scope-test',
+      configured: true,
+      async decide() {
+        return {
+          decision: {
+            requestedAction: { type: 'wait' as const },
+            summary: 'Wait.',
+          },
+          metadata: {
+            provider: 'scripted-test' as const,
+            model: 'full-safe-event-scope-test',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    for (let index = 0; index < 7; index += 1)
+      await simulation.executeNextTurn();
+
+    const agents = simulation.getSnapshot().world.agents;
+    const selectedAgent = agents[0]!;
+    const oneAgent = simulation.generateExperimentExport({
+      ...exportRequest('full-safe'),
+      agents: { mode: 'selected', agentIds: [selectedAgent.id] },
+      turns: { mode: 'range', fromTurn: 1, toTurn: 6 },
+      outcomes: ['accepted'],
+      actions: ['wait'],
+    });
+
+    expect(oneAgent.initialWorld?.agents).toHaveLength(6);
+    expect(oneAgent.initialWorld?.hexes).toHaveLength(61);
+    expect(oneAgent.currentWorld?.agents).toHaveLength(6);
+    expect(oneAgent.currentWorld?.hexes).toHaveLength(61);
+    expect(oneAgent.initialWorld).not.toHaveProperty('events');
+    expect(oneAgent.currentWorld).not.toHaveProperty('events');
+    expect(oneAgent.worldEvents).toHaveLength(1);
+    expect(
+      oneAgent.worldEvents?.every(
+        ({ agentId }) => agentId === selectedAgent.id,
+      ),
+    ).toBe(true);
+    expect(oneAgent.turns.map(({ turnNumber }) => turnNumber)).toEqual([1]);
+
+    const allAgents = simulation.generateExperimentExport(
+      exportRequest('full-safe'),
+    );
+    expect(allAgents.selection.selectedAgentIds).toEqual(
+      agents.map(({ id }) => id),
+    );
+    expect(allAgents.turns).toHaveLength(7);
+    expect(allAgents.worldEvents).toHaveLength(7);
+    expect(allAgents.initialWorld).not.toHaveProperty('events');
+    expect(allAgents.currentWorld).not.toHaveProperty('events');
+  });
+
+  it('produces predictable Minimal, Standard, Full safe and Custom omissions without mutation', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+      ]),
+    );
+    await simulation.executeNextTurn();
+    const before = simulation.getSnapshot();
+    expect(() =>
+      simulation.generateExperimentExport({
+        ...exportRequest('minimal'),
+        outcomes: [],
+      }),
+    ).toThrow(/invalid/i);
+    expect(simulation.getSnapshot()).toEqual(before);
+    const minimal = simulation.generateExperimentExport(
+      exportRequest('minimal'),
+    );
+    const standard = simulation.generateExperimentExport(
+      exportRequest('standard'),
+    );
+    const full = simulation.generateExperimentExport(
+      exportRequest('full-safe'),
+    );
+    const custom = simulation.generateExperimentExport({
+      ...exportRequest('custom'),
+      custom: {
+        turnObservations: false,
+        personalityTextHistory: false,
+        nearbyAgents: false,
+        recentEvents: false,
+        validationDetails: false,
+        resultingEvents: false,
+        providerUsageMetadata: false,
+        initialWorldState: false,
+        currentWorldState: false,
+        computedMetrics: false,
+      },
+    });
+    expect(minimal.turns[0]).not.toHaveProperty('observation');
+    expect(standard.turns[0]).toHaveProperty('observation');
+    expect(full).toHaveProperty('initialWorld');
+    expect(full).toHaveProperty('configurationEvents');
+    expect(full.initialWorld).not.toHaveProperty('events');
+    expect(full.currentWorld).not.toHaveProperty('events');
+    expect(full.worldEvents).toEqual([
+      expect.objectContaining({ agentId: before.world.agents[0]!.id }),
+    ]);
+    expect(custom).not.toHaveProperty('metrics');
+    expect(custom.turns[0]).not.toHaveProperty('provider');
+    minimal.turns[0]!.outcome = 'rejected';
+    expect(
+      simulation.generateExperimentExport(exportRequest('minimal')).turns[0]
+        ?.outcome,
+    ).toBe('accepted');
+    expect(simulation.getSnapshot()).toEqual(before);
   });
 
   it('calls the provider exactly once per turn in round-robin order', async () => {
@@ -478,6 +858,12 @@ describe('SimulationService', () => {
     expect(() => simulation.restoreDefaultPersonalities()).toThrow(
       SimulationConflictError,
     );
+    expect(() =>
+      simulation.previewExperimentExport(exportRequest('minimal')),
+    ).toThrow(SimulationConflictError);
+    expect(() =>
+      simulation.generateExperimentExport(exportRequest('minimal')),
+    ).toThrow(SimulationConflictError);
     release({
       decision: { requestedAction: { type: 'wait' }, summary: 'Done.' },
       metadata: {

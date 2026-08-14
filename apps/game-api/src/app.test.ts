@@ -8,6 +8,8 @@ import {
 } from '@agentborne/agent-runtime';
 import {
   h3CellSchema,
+  experimentExportPreviewSchema,
+  experimentExportResponseSchema,
   resetSimulationResponseSchema,
   restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
@@ -348,6 +350,24 @@ describe('game API simulation boundary', () => {
     await expect(restoreConflict.json()).resolves.toMatchObject({
       error: { code: 'personality_conflict' },
     });
+    const exportConflict = await app.request(
+      '/api/simulation/experiment/export/preview',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agents: { mode: 'all' },
+          turns: { mode: 'entire-retained' },
+          outcomes: ['accepted'],
+          actions: ['wait'],
+          level: 'minimal',
+        }),
+      },
+    );
+    expect(exportConflict.status).toBe(409);
+    await expect(exportConflict.json()).resolves.toMatchObject({
+      error: { code: 'export_conflict' },
+    });
     release({
       decision: { requestedAction: { type: 'wait' }, summary: 'Done.' },
       metadata: {
@@ -374,4 +394,99 @@ describe('game API simulation boundary', () => {
       },
     });
   });
+
+  it('previews and generates schema-valid retained exports through narrow endpoints', async () => {
+    const app = createApp({
+      provider: new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+      ]),
+    });
+    await app.request('/api/simulation/turn', { method: 'POST' });
+    const request = {
+      agents: { mode: 'all' },
+      turns: { mode: 'entire-retained' },
+      outcomes: ['accepted', 'rejected', 'provider-error'],
+      actions: ['move', 'infect', 'wait'],
+      level: 'minimal',
+    };
+    const previewResponse = await app.request(
+      '/api/simulation/experiment/export/preview',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      },
+    );
+    expect(previewResponse.status).toBe(200);
+    const preview = experimentExportPreviewSchema.parse(
+      await previewResponse.json(),
+    );
+    expect(preview).toMatchObject({
+      matchingRecordCount: 1,
+      knownCostCredits: 0,
+      turnsWithUnknownCost: 0,
+    });
+    const generatedResponse = await app.request(
+      '/api/simulation/experiment/export',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      },
+    );
+    const generated = experimentExportResponseSchema.parse(
+      await generatedResponse.json(),
+    );
+    expect(
+      generated.document.turns.map(({ turnNumber }) => turnNumber),
+    ).toEqual([1]);
+    expect(JSON.stringify(generated)).not.toMatch(
+      /authorization|api[_-]?key|rawPrompt|rawBody|chainOfThought|privateReasoning/i,
+    );
+  });
+
+  it.each([
+    [{}, 400, 'invalid_export'],
+    [
+      {
+        agents: { mode: 'selected', agentIds: [] },
+        turns: { mode: 'entire-retained' },
+        outcomes: ['accepted'],
+        actions: ['wait'],
+        level: 'minimal',
+      },
+      400,
+      'invalid_export',
+    ],
+    [
+      {
+        agents: {
+          mode: 'selected',
+          agentIds: ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'],
+        },
+        turns: { mode: 'entire-retained' },
+        outcomes: ['accepted'],
+        actions: ['wait'],
+        level: 'minimal',
+      },
+      404,
+      'unknown_agent',
+    ],
+  ])(
+    'returns typed safe export validation failures',
+    async (body, status, code) => {
+      const app = createApp({
+        provider: new ScriptedAgentProvider([
+          { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        ]),
+      });
+      const response = await app.request('/api/simulation/experiment/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(status);
+      await expect(response.json()).resolves.toMatchObject({ error: { code } });
+    },
+  );
 });

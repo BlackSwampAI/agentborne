@@ -24,6 +24,14 @@ World Lab personality edits are also untrusted, bounded text. The Game API trims
 
 Personality mutation errors use typed, generic response bodies. They do not expose raw prompts, provider responses, credentials, diagnostics, stack traces, or internal service details. There is still no authentication or persistence; these endpoints remain limited to the loopback development surface.
 
+## Experiment telemetry and exports
+
+The Game API captures only schema-validated safe observations, requested actions, visible concise summaries, validation outcomes, world events, bounded provider failures, and normalized usage metadata. It never records or exports API keys, authorization headers, fixed system prompts, raw provider request/response bodies, private chain-of-thought, hidden analysis, or unbounded diagnostics. Historical turns and configuration events are cloned and immutable.
+
+Export requests, agent IDs, levels, ranges, outcome/action filters, and Custom dependencies are runtime-validated. Filtering and metrics remain server-owned so the browser cannot promote its 120-turn snapshot into authoritative history. Preview and generation reject overlap with turns and mutations. Generated JSON is schema-versioned and omits excluded fields instead of emitting misleading nulls. Export world-state snapshots contain spatial agents/hexes but no embedded event history; filtered top-level `worldEvents` is the only canonical event stream, preventing out-of-scope agent events from leaking through current-world context.
+
+Actual cost is accepted only from OpenRouter's safe `usage.cost`. Missing cost is unknown, never zero; scripted-test providers explicitly report zero. There is still no authentication, budget enforcement, persistence, provider-management endpoint, upload, or sharing link. The loopback-only boundary remains mandatory.
+
 ## Reporting
 
 This is a private repository. Report suspected vulnerabilities privately to the repository owners rather than opening a public issue.
