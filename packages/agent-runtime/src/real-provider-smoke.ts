@@ -43,6 +43,7 @@ const observation = agentObservationSchema.parse({
   adjacentCells,
   nearbyAgents: [],
   recentEvents: [],
+  recentCommunications: [],
 });
 
 try {

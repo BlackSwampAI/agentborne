@@ -535,6 +535,27 @@ dd {
   margin: 0;
   padding-left: 18px;
 }
+.communication-history,
+.observation-communications {
+  margin: 0;
+  padding-left: 18px;
+  color: #bcc9c5;
+  font-size: 0.77rem;
+  line-height: 1.5;
+}
+.communication-history li {
+  margin-bottom: 9px;
+  overflow-wrap: anywhere;
+}
+.communication-history p {
+  margin-top: 3px;
+  color: #d8e2df;
+  white-space: pre-wrap;
+}
+.observation-communications li {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
 .event-panel ol {
   list-style: none;
   padding: 0;
@@ -546,6 +567,7 @@ dd {
   gap: 10px;
   font-size: 0.8rem;
   padding: 4px 0;
+  overflow-wrap: anywhere;
 }
 .event-panel time {
   color: #82938e;

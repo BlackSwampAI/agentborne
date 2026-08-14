@@ -412,6 +412,18 @@ export function WorldLab() {
               turns={snapshot.turns.filter(
                 ({ agentId }) => agentId === selectedAgent.id,
               )}
+              communications={snapshot.world.events.filter(
+                (
+                  event,
+                ): event is Extract<
+                  SimulationSnapshot['world']['events'][number],
+                  { type: 'agent-messaged' }
+                > =>
+                  event.type === 'agent-messaged' &&
+                  (event.agentId === selectedAgent.id ||
+                    event.recipientId === selectedAgent.id),
+              )}
+              agents={snapshot.world.agents}
               mutationDisabled={personalityControlsDisabled}
               mutationPending={personalityPending}
               onApplyPersonality={updatePersonality}
@@ -457,7 +469,7 @@ export function WorldLab() {
             </section>
           )}
 
-          <EventLog turns={snapshot.turns} />
+          <EventLog turns={snapshot.turns} agents={snapshot.world.agents} />
         </aside>
       </div>
     </main>
@@ -469,6 +481,8 @@ function AgentInspector({
   cellState,
   latestTurn,
   turns,
+  communications,
+  agents,
   mutationDisabled,
   mutationPending,
   onApplyPersonality,
@@ -479,6 +493,13 @@ function AgentInspector({
   cellState: 'open' | 'infected';
   latestTurn?: AgentTurnRecord;
   turns: AgentTurnRecord[];
+  communications: Array<
+    Extract<
+      SimulationSnapshot['world']['events'][number],
+      { type: 'agent-messaged' }
+    >
+  >;
+  agents: SimulationSnapshot['world']['agents'];
   mutationDisabled: boolean;
   mutationPending: boolean;
   onApplyPersonality: (
@@ -535,6 +556,8 @@ function AgentInspector({
       <div className="agent-usage" aria-label="Selected agent usage">
         <strong>Experiment usage</strong>
         <span>{metrics?.totalTurns ?? 0} turns</span>
+        <span>{metrics?.sentCommunications ?? 0} sent</span>
+        <span>{metrics?.receivedCommunications ?? 0} received</span>
         <span>{formatCost(metrics?.knownCostCredits ?? 0)} known cost</span>
         {(metrics?.turnsWithUnknownCost ?? 0) > 0 && (
           <span>{metrics?.turnsWithUnknownCost} unknown-cost turns</span>
@@ -543,6 +566,38 @@ function AgentInspector({
       <button type="button" onClick={() => onExportAgent(agent.id)}>
         Export this agent
       </button>
+      <h3>Recent communications</h3>
+      {communications.length === 0 ? (
+        <p className="muted">No communications for this agent yet.</p>
+      ) : (
+        <ol
+          className="communication-history"
+          aria-label="Recent communications"
+        >
+          {communications.map((communication) => {
+            const sender = agents.find(
+              ({ id }) => id === communication.agentId,
+            );
+            const recipient = agents.find(
+              ({ id }) => id === communication.recipientId,
+            );
+            const direction =
+              communication.agentId === agent.id ? 'Outbound' : 'Inbound';
+            return (
+              <li key={communication.id}>
+                <div>
+                  <strong>{direction}</strong>{' '}
+                  <span>
+                    {sender?.name ?? communication.agentId} →{' '}
+                    {recipient?.name ?? communication.recipientId}
+                  </span>
+                </div>
+                <p>{communication.message}</p>
+              </li>
+            );
+          })}
+        </ol>
+      )}
       <div className="personality-heading">
         <h3>Active personality</h3>
         {!editing && (
@@ -715,6 +770,20 @@ function AgentInspector({
             <p>
               Recent public events: {latestTurn.observation.recentEvents.length}
             </p>
+            <p>
+              Recent communications:{' '}
+              {latestTurn.observation.recentCommunications.length}
+            </p>
+            <ol className="observation-communications">
+              {latestTurn.observation.recentCommunications.map(
+                (communication) => (
+                  <li key={communication.eventId}>
+                    {communication.direction}: {communication.senderName} →{' '}
+                    {communication.recipientName}: {communication.message}
+                  </li>
+                ),
+              )}
+            </ol>
           </details>
         </div>
       ) : (
@@ -741,6 +810,7 @@ function ExperimentUsageMeter({ snapshot }: { snapshot: SimulationSnapshot }) {
     <div className="usage-meter" aria-label="Current experiment usage">
       <strong>Current experiment</strong>
       <span>{snapshot.experiment.totalCompletedTurns} turns</span>
+      <span>{metrics.deliveredMessages} messages delivered</span>
       <span>{formatCost(metrics.knownCostCredits)} known cost</span>
       <span>
         {metrics.tokens.totalTokens ??
@@ -760,12 +830,14 @@ const defaultCustomOptions: CustomExportOptions = {
   personalityTextHistory: true,
   nearbyAgents: true,
   recentEvents: true,
+  recentCommunications: true,
   validationDetails: true,
   resultingEvents: true,
   providerUsageMetadata: true,
   initialWorldState: false,
   currentWorldState: true,
   computedMetrics: true,
+  communications: true,
 };
 
 function ExperimentExportPanel({
@@ -796,11 +868,9 @@ function ExperimentExportPanel({
   const [outcomes, setOutcomes] = useState<
     Array<'accepted' | 'rejected' | 'provider-error'>
   >(['accepted', 'rejected', 'provider-error']);
-  const [actions, setActions] = useState<Array<'move' | 'infect' | 'wait'>>([
-    'move',
-    'infect',
-    'wait',
-  ]);
+  const [actions, setActions] = useState<
+    Array<'move' | 'infect' | 'message' | 'wait'>
+  >(['move', 'infect', 'message', 'wait']);
   const [custom, setCustom] = useState(defaultCustomOptions);
   const [preview, setPreview] = useState<ExperimentExportPreview | null>(null);
   const [document, setDocument] = useState<ExperimentExportDocument | null>(
@@ -1064,7 +1134,7 @@ function ExperimentExportPanel({
       />
       <FilterChecks
         label="Actions"
-        options={['move', 'infect', 'wait']}
+        options={['move', 'infect', 'message', 'wait']}
         selected={actions}
         onToggle={(value) => setActions(toggle(actions, value))}
       />
@@ -1077,7 +1147,9 @@ function ExperimentExportPanel({
                 <input
                   checked={custom[key]}
                   disabled={
-                    (key === 'nearbyAgents' || key === 'recentEvents') &&
+                    (key === 'nearbyAgents' ||
+                      key === 'recentEvents' ||
+                      key === 'recentCommunications') &&
                     !custom.turnObservations
                   }
                   type="checkbox"
@@ -1090,6 +1162,7 @@ function ExperimentExportPanel({
                       ) {
                         next.nearbyAgents = false;
                         next.recentEvents = false;
+                        next.recentCommunications = false;
                       }
                       return next;
                     })
@@ -1150,6 +1223,10 @@ function ExperimentExportPanel({
             <dd>{preview.matchingRecordCount} records</dd>
           </div>
           <div>
+            <dt>Communications</dt>
+            <dd>{preview.matchingCommunicationCount} accepted</dd>
+          </div>
+          <div>
             <dt>Size</dt>
             <dd>{preview.serializedUtf8Bytes} bytes</dd>
           </div>
@@ -1206,12 +1283,14 @@ function customOptionLabel(key: keyof CustomExportOptions): string {
     personalityTextHistory: 'Personality text and history',
     nearbyAgents: 'Nearby agents',
     recentEvents: 'Recent events',
+    recentCommunications: 'Recent communications in observations',
     validationDetails: 'Validation details',
     resultingEvents: 'Resulting events',
     providerUsageMetadata: 'Provider usage metadata',
     initialWorldState: 'Initial world state',
     currentWorldState: 'Current world state',
     computedMetrics: 'Computed metrics',
+    communications: 'Canonical communications',
   }[key];
 }
 
@@ -1225,7 +1304,13 @@ function serializeExportDocument(document: ExperimentExportDocument): string {
     : JSON.stringify(document);
 }
 
-function EventLog({ turns }: { turns: AgentTurnRecord[] }) {
+function EventLog({
+  turns,
+  agents,
+}: {
+  turns: AgentTurnRecord[];
+  agents: SimulationSnapshot['world']['agents'];
+}) {
   return (
     <section className="panel event-panel">
       <p className="panel-kicker">World events</p>
@@ -1243,7 +1328,7 @@ function EventLog({ turns }: { turns: AgentTurnRecord[] }) {
             .map((turn) => (
               <li data-outcome={turn.outcome} key={turn.turnNumber}>
                 <time>#{turn.turnNumber}</time>
-                <span>{formatTurn(turn)}</span>
+                <span>{formatTurn(turn, agents)}</span>
               </li>
             ))
         )}
@@ -1258,10 +1343,16 @@ function formatAction(
     { outcome: 'accepted' | 'rejected' }
   >['requestedAction'],
 ) {
-  return action.type === 'move' ? `move → ${action.targetCell}` : action.type;
+  if (action.type === 'move') return `move → ${action.targetCell}`;
+  if (action.type === 'message')
+    return `message → ${action.recipientId}: ${action.message}`;
+  return action.type;
 }
 
-function formatTurn(turn: AgentTurnRecord) {
+function formatTurn(
+  turn: AgentTurnRecord,
+  agents: SimulationSnapshot['world']['agents'],
+) {
   if (turn.outcome === 'provider-error')
     return `Provider failure · ${turn.failure.message}`;
   if (turn.outcome === 'rejected')
@@ -1270,5 +1361,11 @@ function formatTurn(turn: AgentTurnRecord) {
     return `Movement · ${turn.event.toCell}`;
   if (turn.event.type === 'hex-infected')
     return `Infection · ${turn.event.cell}`;
+  if (turn.event.type === 'agent-messaged') {
+    const event = turn.event;
+    const sender = agents.find(({ id }) => id === event.agentId);
+    const recipient = agents.find(({ id }) => id === event.recipientId);
+    return `Message · ${sender?.name ?? event.agentId} → ${recipient?.name ?? event.recipientId}: ${event.message}`;
+  }
   return 'Waited';
 }

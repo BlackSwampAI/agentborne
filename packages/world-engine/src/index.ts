@@ -2,6 +2,7 @@ import { gridDisk, gridDistance, latLngToCell } from 'h3-js';
 import {
   agentIdSchema,
   h3CellSchema,
+  MESSAGE_RANGE,
   requestedActionSchema,
   type ActionResult,
   type Agent,
@@ -22,7 +23,6 @@ export interface WorldState {
 export interface EngineContext {
   createEventId: () => string;
   now: () => string;
-  communicationRange: number;
 }
 
 export interface AppliedAction {
@@ -33,7 +33,6 @@ export interface AppliedAction {
 const defaultContext: EngineContext = {
   createEventId: () => crypto.randomUUID(),
   now: () => new Date().toISOString(),
-  communicationRange: 1,
 };
 
 function rejected(
@@ -148,10 +147,17 @@ export function applyRequestedAction(
     if (recipient.id === agentId) {
       return rejected(state, 'self-message', 'An agent cannot message itself.');
     }
-    if (
-      gridDistance(agent.currentCell, recipient.currentCell) >
-      resolvedContext.communicationRange
-    ) {
+    let distance: number;
+    try {
+      distance = gridDistance(agent.currentCell, recipient.currentCell);
+    } catch {
+      return rejected(
+        state,
+        'out-of-range',
+        'The recipient is outside communication range.',
+      );
+    }
+    if (distance > MESSAGE_RANGE) {
       return rejected(
         state,
         'out-of-range',
@@ -163,6 +169,7 @@ export function applyRequestedAction(
       type: 'agent-messaged',
       recipientId: action.recipientId,
       message: action.message,
+      distance,
     };
     return accept(state, state, event);
   }

@@ -166,6 +166,7 @@ vi.mock('maplibre-gl', () => {
 const world = createDevelopmentWorld({
   generatedAt: '2026-08-13T12:00:00.000Z',
 });
+const HOSTILE_MESSAGE = '<img src=x onerror=alert(1)> Hold position.';
 const initial = simulationSnapshotSchema.parse({
   world,
   turnNumber: 0,
@@ -200,9 +201,13 @@ function emptyMetrics() {
     providerErrors: 0,
     requestedMoves: 0,
     requestedInfections: 0,
+    requestedMessages: 0,
     requestedWaits: 0,
     acceptedMovements: 0,
     successfullyInfectedCells: 0,
+    deliveredMessages: 0,
+    sentCommunications: 0,
+    receivedCommunications: 0,
     uniqueVisitedCells: 0,
     tokens: {},
     knownCostCredits: 0,
@@ -237,6 +242,7 @@ function afterInfection(): SimulationSnapshot {
       adjacentCells: [{ cell: adjacent, state: 'open' as const }],
       nearbyAgents: [],
       recentEvents: [],
+      recentCommunications: [],
     },
     outcome: 'accepted' as const,
     requestedAction: { type: 'infect' as const },
@@ -299,6 +305,104 @@ function afterInfection(): SimulationSnapshot {
               }
             : entry,
         ),
+      },
+    },
+  });
+}
+
+function afterMessage(): SimulationSnapshot {
+  const sender = world.agents[0]!;
+  const recipient = world.agents[1]!;
+  const message = HOSTILE_MESSAGE;
+  const event = {
+    id: '67aa21b9-fc78-4b04-9f92-9862bf346f96',
+    agentId: sender.id,
+    recipientId: recipient.id,
+    occurredAt: '2026-08-13T12:00:01.000Z',
+    type: 'agent-messaged' as const,
+    message,
+    distance: 2,
+  };
+  const turn = {
+    turnNumber: 1,
+    agentId: sender.id,
+    startedAt: '2026-08-13T12:00:00.000Z',
+    completedAt: '2026-08-13T12:00:01.000Z',
+    observation: {
+      agentId: sender.id,
+      agentName: sender.name,
+      personality: sender.personality,
+      currentCell: { cell: sender.currentCell, state: 'open' as const },
+      adjacentCells: [{ cell: world.hexes[1]!.cell, state: 'open' as const }],
+      nearbyAgents: [
+        {
+          id: recipient.id,
+          name: recipient.name,
+          currentCell: recipient.currentCell,
+          distance: 2,
+        },
+      ],
+      recentEvents: [],
+      recentCommunications: [],
+    },
+    outcome: 'accepted' as const,
+    requestedAction: {
+      type: 'message' as const,
+      recipientId: recipient.id,
+      message,
+    },
+    summary: 'Sending a nearby message.',
+    validation: { accepted: true as const },
+    event,
+    provider: {
+      provider: 'scripted-test' as const,
+      model: 'test',
+      latencyMs: 0,
+      costCredits: 0,
+    },
+  };
+  return simulationSnapshotSchema.parse({
+    ...initial,
+    world: { ...world, events: [event] },
+    turnNumber: 1,
+    nextAgentId: recipient.id,
+    turns: [turn],
+    experiment: {
+      ...initial.experiment,
+      totalCompletedTurns: 1,
+      retainedTurns: 1,
+      firstRetainedTurn: 1,
+      lastRetainedTurn: 1,
+      metrics: {
+        aggregate: {
+          ...emptyMetrics(),
+          totalTurns: 1,
+          accepted: 1,
+          requestedMessages: 1,
+          deliveredMessages: 1,
+          sentCommunications: 1,
+          receivedCommunications: 1,
+          uniqueVisitedCells: 1,
+          averageLatencyMs: 0,
+        },
+        byAgent: initial.experiment.metrics.byAgent.map((entry, index) => ({
+          ...entry,
+          metrics:
+            index === 0
+              ? {
+                  ...emptyMetrics(),
+                  totalTurns: 1,
+                  accepted: 1,
+                  requestedMessages: 1,
+                  deliveredMessages: 1,
+                  sentCommunications: 1,
+                  uniqueVisitedCells: 1,
+                  averageLatencyMs: 0,
+                }
+              : index === 1
+                ? { ...emptyMetrics(), receivedCommunications: 1 }
+                : entry.metrics,
+        })),
       },
     },
   });
@@ -375,7 +479,7 @@ describe('WorldLab', () => {
     ).toBeEnabled();
     expect(screen.getByLabelText('Playback speed')).toBeInTheDocument();
     expect(
-      screen.getAllByRole('button', { name: /Select agent/ }),
+      await screen.findAllByRole('button', { name: /Select agent/ }),
     ).toHaveLength(6);
     expect(screen.getByText('Automated-test provider')).toBeInTheDocument();
   });
@@ -474,6 +578,61 @@ describe('WorldLab', () => {
     expect(screen.getByRole('heading', { name: /Rook/ })).toBeInTheDocument();
     expect(screen.getByText(world.agents[1]!.personality)).toBeInTheDocument();
     expect(screen.getByText(world.agents[1]!.id)).toBeInTheDocument();
+    expect(
+      screen.getByText('No communications for this agent yet.'),
+    ).toBeInTheDocument();
+  });
+
+  it('renders accepted messages, directions, and hostile-looking text as plain text', async () => {
+    const changed = afterMessage();
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementationOnce(() => jsonResponse(initial))
+        .mockImplementationOnce(() =>
+          jsonResponse({ snapshot: changed, turn: changed.turns[0] }),
+        ),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Single turn' }),
+    );
+    expect(
+      await screen.findByText(/Message · Ember → Rook/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Recent communications')).toHaveTextContent(
+      'Outbound Ember → Rook',
+    );
+    expect(screen.getAllByText(HOSTILE_MESSAGE).length).toBeGreaterThan(0);
+    expect(document.querySelector('img[src="x"]')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Select agent Rook' }));
+    expect(screen.getByLabelText('Recent communications')).toHaveTextContent(
+      'Inbound Ember → Rook',
+    );
+  });
+
+  it('clears visible communications after reset', async () => {
+    const changed = afterMessage();
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementationOnce(() => jsonResponse(changed))
+        .mockImplementationOnce(() => jsonResponse({ snapshot: initial })),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    expect(
+      await screen.findByLabelText('Recent communications'),
+    ).toHaveTextContent('Outbound Ember → Rook');
+    await user.click(screen.getByRole('button', { name: 'Reset world' }));
+    expect(
+      await screen.findByText('No communications for this agent yet.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(HOSTILE_MESSAGE)).not.toBeInTheDocument();
   });
 
   it('executes one turn and renders infection and decision details safely', async () => {
@@ -867,6 +1026,7 @@ describe('WorldLab', () => {
       jsonResponse({
         experimentId: initial.experiment.id,
         matchingRecordCount: 0,
+        matchingCommunicationCount: 0,
         selectedAgentCount: 2,
         retention: {
           limit: 5000,
@@ -915,6 +1075,7 @@ describe('WorldLab', () => {
     expect(level).toHaveTextContent('Full safe');
     expect(level).toHaveTextContent('Custom');
     expect(screen.getByLabelText('JSON serialization')).toHaveValue('compact');
+    expect(screen.getByRole('checkbox', { name: 'message' })).toBeChecked();
     await user.selectOptions(
       screen.getByLabelText('JSON serialization'),
       'pretty',
@@ -931,6 +1092,14 @@ describe('WorldLab', () => {
     expect(
       screen.getByRole('checkbox', { name: 'Recent events' }),
     ).toBeDisabled();
+    expect(
+      screen.getByRole('checkbox', {
+        name: 'Recent communications in observations',
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole('checkbox', { name: 'Canonical communications' }),
+    ).toBeEnabled();
     await user.selectOptions(screen.getByLabelText('Turn range'), 'range');
     expect(screen.getByLabelText('From turn')).toBeInTheDocument();
     await user.click(screen.getByRole('checkbox', { name: 'accepted' }));
@@ -1009,7 +1178,7 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
   const turn = snapshot.turns[0]!;
   const agent = snapshot.world.agents[0]!;
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     generatedAt: '2026-08-13T12:00:02.000Z',
     experiment: {
       id: snapshot.experiment.id,
@@ -1030,12 +1199,13 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
       agents: { mode: 'selected' as const, agentIds: [agent.id] },
       turns: { mode: 'entire-retained' as const },
       outcomes: ['accepted', 'rejected', 'provider-error'] as const,
-      actions: ['move', 'infect', 'wait'] as const,
+      actions: ['move', 'infect', 'message', 'wait'] as const,
       level: 'minimal' as const,
     },
     selection: {
       selectedAgentIds: [agent.id],
       matchingRecordCount: 1,
+      matchingCommunicationCount: 0,
       firstMatchingTurn: 1,
       lastMatchingTurn: 1,
     },
@@ -1044,6 +1214,7 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
       aggregate: snapshot.experiment.metrics.aggregate,
       byAgent: [snapshot.experiment.metrics.byAgent[0]!],
     },
+    communications: [],
     turns: [
       {
         turnNumber: turn.turnNumber,

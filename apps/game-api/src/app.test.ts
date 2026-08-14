@@ -64,6 +64,67 @@ describe('game API simulation boundary', () => {
     expect(rejected.turn.outcome).toBe('rejected');
   });
 
+  it('returns typed accepted and rejected message responses', async () => {
+    const bootstrap = createApp({
+      provider: new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'placeholder' },
+      ]),
+    });
+    const snapshot = simulationSnapshotSchema.parse(
+      await (await bootstrap.request('/api/simulation')).json(),
+    );
+    const [sender, recipient] = snapshot.world.agents;
+    const acceptedApp = createApp({
+      provider: new ScriptedAgentProvider([
+        {
+          requestedAction: {
+            type: 'message',
+            recipientId: recipient!.id,
+            message: 'Nearby API message.',
+          },
+          summary: 'Send.',
+        },
+      ]),
+    });
+    const accepted = singleTurnResponseSchema.parse(
+      await (
+        await acceptedApp.request('/api/simulation/turn', { method: 'POST' })
+      ).json(),
+    );
+    expect(accepted.turn).toMatchObject({
+      outcome: 'accepted',
+      event: {
+        type: 'agent-messaged',
+        agentId: sender!.id,
+        recipientId: recipient!.id,
+        message: 'Nearby API message.',
+      },
+    });
+
+    const rejectedApp = createApp({
+      provider: new ScriptedAgentProvider([
+        {
+          requestedAction: {
+            type: 'message',
+            recipientId: sender!.id,
+            message: 'Self message.',
+          },
+          summary: 'Try.',
+        },
+      ]),
+    });
+    const rejected = singleTurnResponseSchema.parse(
+      await (
+        await rejectedApp.request('/api/simulation/turn', { method: 'POST' })
+      ).json(),
+    );
+    expect(rejected.turn).toMatchObject({
+      outcome: 'rejected',
+      validation: { reason: 'self-message' },
+    });
+    expect(rejected.snapshot.world.events).toEqual([]);
+  });
+
   it('returns provider failures and missing configuration safely', async () => {
     const failureProvider: AgentProvider = {
       mode: 'scripted-test',
@@ -406,7 +467,7 @@ describe('game API simulation boundary', () => {
       agents: { mode: 'all' },
       turns: { mode: 'entire-retained' },
       outcomes: ['accepted', 'rejected', 'provider-error'],
-      actions: ['move', 'infect', 'wait'],
+      actions: ['move', 'infect', 'message', 'wait'],
       level: 'minimal',
     };
     const previewResponse = await app.request(

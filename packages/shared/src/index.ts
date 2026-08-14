@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
 export const MODEL_SUMMARY_MAX_LENGTH = 240;
+export const MESSAGE_MAX_LENGTH = 280;
+export const MESSAGE_RANGE = 3;
+export const RECENT_COMMUNICATION_LIMIT = 6;
 export const PERSONALITY_MAX_LENGTH = 600;
 export const PROVIDER_ERROR_MAX_LENGTH = 240;
 
@@ -42,14 +45,18 @@ export const moveActionSchema = z.object({
   targetCell: h3CellSchema,
 });
 export const infectActionSchema = z.object({ type: z.literal('infect') });
+export const messageContentSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(MESSAGE_MAX_LENGTH);
 export const messageActionSchema = z.object({
   type: z.literal('message'),
   recipientId: agentIdSchema,
-  message: z.string().trim().min(1).max(1_000),
+  message: messageContentSchema,
 });
 export const waitActionSchema = z.object({ type: z.literal('wait') });
 
-/** All engine actions. Messaging remains dormant until Roadmap PR 4. */
 export const requestedActionSchema = z.discriminatedUnion('type', [
   moveActionSchema,
   infectActionSchema,
@@ -57,14 +64,8 @@ export const requestedActionSchema = z.discriminatedUnion('type', [
   waitActionSchema,
 ]);
 export type RequestedAction = z.infer<typeof requestedActionSchema>;
-
-/** The deliberately smaller action surface available to PR 2 models. */
-export const agentMapActionSchema = z.discriminatedUnion('type', [
-  moveActionSchema,
-  infectActionSchema,
-  waitActionSchema,
-]);
-export type AgentMapAction = z.infer<typeof agentMapActionSchema>;
+export const agentTurnActionSchema = requestedActionSchema;
+export type AgentTurnAction = z.infer<typeof agentTurnActionSchema>;
 
 const worldEventBaseSchema = z.object({
   id: eventIdSchema,
@@ -72,22 +73,41 @@ const worldEventBaseSchema = z.object({
   occurredAt: z.iso.datetime(),
 });
 
+export const acceptedMessageEventSchema = worldEventBaseSchema.extend({
+  type: z.literal('agent-messaged'),
+  recipientId: agentIdSchema,
+  message: messageContentSchema,
+  distance: z.number().int().min(0).max(MESSAGE_RANGE),
+});
+export type AcceptedMessageEvent = z.infer<typeof acceptedMessageEventSchema>;
+
+const agentMovedWorldEventSchema = worldEventBaseSchema.extend({
+  type: z.literal('agent-moved'),
+  fromCell: h3CellSchema,
+  toCell: h3CellSchema,
+});
+const hexInfectedWorldEventSchema = worldEventBaseSchema.extend({
+  type: z.literal('hex-infected'),
+  cell: h3CellSchema,
+});
+const agentWaitedWorldEventSchema = worldEventBaseSchema.extend({
+  type: z.literal('agent-waited'),
+});
+
+export const nonCommunicationWorldEventSchema = z.discriminatedUnion('type', [
+  agentMovedWorldEventSchema,
+  hexInfectedWorldEventSchema,
+  agentWaitedWorldEventSchema,
+]);
+export type NonCommunicationWorldEvent = z.infer<
+  typeof nonCommunicationWorldEventSchema
+>;
+
 export const worldEventSchema = z.discriminatedUnion('type', [
-  worldEventBaseSchema.extend({
-    type: z.literal('agent-moved'),
-    fromCell: h3CellSchema,
-    toCell: h3CellSchema,
-  }),
-  worldEventBaseSchema.extend({
-    type: z.literal('hex-infected'),
-    cell: h3CellSchema,
-  }),
-  worldEventBaseSchema.extend({
-    type: z.literal('agent-messaged'),
-    recipientId: agentIdSchema,
-    message: z.string().min(1).max(1_000),
-  }),
-  worldEventBaseSchema.extend({ type: z.literal('agent-waited') }),
+  agentMovedWorldEventSchema,
+  hexInfectedWorldEventSchema,
+  acceptedMessageEventSchema,
+  agentWaitedWorldEventSchema,
 ]);
 export type WorldEvent = z.infer<typeof worldEventSchema>;
 
@@ -141,6 +161,19 @@ export const publicEventObservationSchema = z.object({
   summary: z.string().trim().min(1).max(180),
 });
 
+export const observedCommunicationSchema = z.object({
+  eventId: eventIdSchema,
+  senderId: agentIdSchema,
+  senderName: z.string().trim().min(1).max(80),
+  recipientId: agentIdSchema,
+  recipientName: z.string().trim().min(1).max(80),
+  direction: z.enum(['inbound', 'outbound']),
+  message: messageContentSchema,
+  occurredAt: z.iso.datetime(),
+  distance: z.number().int().min(0).max(MESSAGE_RANGE),
+});
+export type ObservedCommunication = z.infer<typeof observedCommunicationSchema>;
+
 export const agentObservationSchema = z.object({
   agentId: agentIdSchema,
   agentName: z.string().trim().min(1).max(80),
@@ -149,11 +182,14 @@ export const agentObservationSchema = z.object({
   adjacentCells: z.array(cellObservationSchema).min(1).max(6),
   nearbyAgents: z.array(nearbyAgentObservationSchema).max(5),
   recentEvents: z.array(publicEventObservationSchema).max(8),
+  recentCommunications: z
+    .array(observedCommunicationSchema)
+    .max(RECENT_COMMUNICATION_LIMIT),
 });
 export type AgentObservation = z.infer<typeof agentObservationSchema>;
 
 export const agentDecisionSchema = z.object({
-  requestedAction: agentMapActionSchema,
+  requestedAction: agentTurnActionSchema,
   summary: z.string().trim().min(1).max(MODEL_SUMMARY_MAX_LENGTH),
 });
 export type AgentDecision = z.infer<typeof agentDecisionSchema>;
@@ -199,7 +235,7 @@ const turnRecordBaseSchema = z.object({
 });
 
 const completedTurnFields = {
-  requestedAction: agentMapActionSchema,
+  requestedAction: agentTurnActionSchema,
   summary: z.string().trim().min(1).max(MODEL_SUMMARY_MAX_LENGTH),
   provider: providerMetadataSchema,
 };
@@ -371,9 +407,13 @@ export const metricCountsSchema = z.object({
   providerErrors: z.number().int().nonnegative(),
   requestedMoves: z.number().int().nonnegative(),
   requestedInfections: z.number().int().nonnegative(),
+  requestedMessages: z.number().int().nonnegative(),
   requestedWaits: z.number().int().nonnegative(),
   acceptedMovements: z.number().int().nonnegative(),
   successfullyInfectedCells: z.number().int().nonnegative(),
+  deliveredMessages: z.number().int().nonnegative(),
+  sentCommunications: z.number().int().nonnegative(),
+  receivedCommunications: z.number().int().nonnegative(),
   uniqueVisitedCells: z.number().int().nonnegative(),
   averageLatencyMs: z.number().nonnegative().optional(),
   tokens: tokenTotalsSchema,
@@ -395,7 +435,7 @@ export const exportOutcomeSchema = z.enum([
   'rejected',
   'provider-error',
 ]);
-export const exportActionSchema = z.enum(['move', 'infect', 'wait']);
+export const exportActionSchema = z.enum(['move', 'infect', 'message', 'wait']);
 export const exportLevelSchema = z.enum([
   'minimal',
   'standard',
@@ -410,19 +450,25 @@ export const customExportOptionsSchema = z
     personalityTextHistory: z.boolean(),
     nearbyAgents: z.boolean(),
     recentEvents: z.boolean(),
+    recentCommunications: z.boolean(),
     validationDetails: z.boolean(),
     resultingEvents: z.boolean(),
     providerUsageMetadata: z.boolean(),
     initialWorldState: z.boolean(),
     currentWorldState: z.boolean(),
     computedMetrics: z.boolean(),
+    communications: z.boolean(),
   })
   .strict()
   .superRefine((value, context) => {
-    if (!value.turnObservations && (value.nearbyAgents || value.recentEvents)) {
+    if (
+      !value.turnObservations &&
+      (value.nearbyAgents || value.recentEvents || value.recentCommunications)
+    ) {
       context.addIssue({
         code: 'custom',
-        message: 'Nearby agents and recent events require turn observations.',
+        message:
+          'Nearby agents, recent events, and recent communications require turn observations.',
       });
     }
   });
@@ -471,7 +517,7 @@ export const experimentExportRequestSchema = z
     agents: exportSelectionSchema,
     turns: exportTurnSelectionSchema,
     outcomes: z.array(exportOutcomeSchema).min(1).max(3),
-    actions: z.array(exportActionSchema).min(1).max(3),
+    actions: z.array(exportActionSchema).min(1).max(4),
     level: exportLevelSchema,
     serialization: exportSerializationSchema.default('compact'),
     custom: customExportOptionsSchema.optional(),
@@ -500,6 +546,7 @@ export type ExperimentExportRequest = z.infer<
 export const experimentExportPreviewSchema = z.object({
   experimentId: experimentIdSchema,
   matchingRecordCount: z.number().int().nonnegative(),
+  matchingCommunicationCount: z.number().int().nonnegative(),
   selectedAgentCount: z.number().int().positive().max(6),
   firstMatchingTurn: z.number().int().positive().optional(),
   lastMatchingTurn: z.number().int().positive().optional(),
@@ -520,7 +567,7 @@ export const experimentExportTurnSchema = z.object({
   completedAt: z.iso.datetime(),
   agentId: agentIdSchema,
   outcome: exportOutcomeSchema,
-  requestedAction: agentMapActionSchema.optional(),
+  requestedAction: agentTurnActionSchema.optional(),
   summary: z.string().trim().min(1).max(MODEL_SUMMARY_MAX_LENGTH).optional(),
   validationReason: invalidActionReasonSchema.optional(),
   eventSummary: z.string().trim().min(1).max(300).optional(),
@@ -544,13 +591,18 @@ export const experimentExportTurnSchema = z.object({
 export const experimentExportWorldStateSchema = worldSnapshotSchema.omit({
   events: true,
 });
+
+export const exportedCommunicationSchema = acceptedMessageEventSchema.extend({
+  originatingTurn: z.number().int().positive(),
+});
+export type ExportedCommunication = z.infer<typeof exportedCommunicationSchema>;
 export type ExperimentExportWorldState = z.infer<
   typeof experimentExportWorldStateSchema
 >;
 
 export const experimentExportDocumentSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.literal(2),
     generatedAt: z.iso.datetime(),
     experiment: experimentManifestSchema,
     retention: experimentRetentionSchema,
@@ -558,6 +610,7 @@ export const experimentExportDocumentSchema = z
     selection: z.object({
       selectedAgentIds: z.array(agentIdSchema).min(1).max(6),
       matchingRecordCount: z.number().int().nonnegative(),
+      matchingCommunicationCount: z.number().int().nonnegative(),
       firstMatchingTurn: z.number().int().positive().optional(),
       lastMatchingTurn: z.number().int().positive().optional(),
     }),
@@ -575,7 +628,8 @@ export const experimentExportDocumentSchema = z
     metrics: experimentMetricsSchema.optional(),
     initialWorld: experimentExportWorldStateSchema.optional(),
     currentWorld: experimentExportWorldStateSchema.optional(),
-    worldEvents: z.array(worldEventSchema).optional(),
+    worldEvents: z.array(nonCommunicationWorldEventSchema).optional(),
+    communications: z.array(exportedCommunicationSchema).optional(),
     turns: z.array(experimentExportTurnSchema),
   })
   .superRefine((document, context) => {
@@ -609,6 +663,12 @@ export const experimentExportDocumentSchema = z
       context.addIssue({
         code: 'custom',
         message: 'World event inclusion does not match the export level.',
+      });
+    const communications = level !== 'custom' || custom?.communications;
+    if (Boolean(document.communications) !== Boolean(communications))
+      context.addIssue({
+        code: 'custom',
+        message: 'Communication inclusion does not match the export level.',
       });
     for (const turn of document.turns) {
       const observation =

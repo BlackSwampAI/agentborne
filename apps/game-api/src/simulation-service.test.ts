@@ -7,6 +7,8 @@ import {
 } from '@agentborne/agent-runtime';
 import {
   PERSONALITY_MAX_LENGTH,
+  agentIdSchema,
+  experimentExportDocumentSchema,
   h3CellSchema,
   type AgentObservation,
   type AgentTurnRecord,
@@ -32,7 +34,7 @@ function exportRequest(level: 'minimal' | 'standard' | 'full-safe' | 'custom') {
     agents: { mode: 'all' as const },
     turns: { mode: 'entire-retained' as const },
     outcomes: ['accepted', 'rejected', 'provider-error'] as const,
-    actions: ['move', 'infect', 'wait'] as const,
+    actions: ['move', 'infect', 'message', 'wait'] as const,
     level,
   };
 }
@@ -362,6 +364,137 @@ describe('SimulationService', () => {
     expect(allAgents.currentWorld).not.toHaveProperty('events');
   });
 
+  it('exports accepted communications for either participant without importing unrelated or rejected messages', async () => {
+    const initial = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'placeholder' },
+      ]),
+    ).getSnapshot();
+    const [sender, recipient] = initial.world.agents;
+    let call = 0;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'message-export-test',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        call += 1;
+        const requestedAction =
+          call === 1
+            ? {
+                type: 'message' as const,
+                recipientId: recipient!.id,
+                message: 'Inbound selection proof.',
+              }
+            : call === 3
+              ? {
+                  type: 'message' as const,
+                  recipientId: observation.nearbyAgents.find(
+                    ({ id, distance }) =>
+                      distance <= 3 &&
+                      id !== sender!.id &&
+                      id !== recipient!.id,
+                  )!.id,
+                  message: 'Unrelated communication.',
+                }
+              : call === 4
+                ? {
+                    type: 'message' as const,
+                    recipientId: observation.agentId,
+                    message: 'Rejected self message.',
+                  }
+                : { type: 'wait' as const };
+        return {
+          decision: { requestedAction, summary: 'Test export.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'message-export-test',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    for (let index = 0; index < 4; index += 1)
+      await simulation.executeNextTurn();
+
+    const inboundRequest = {
+      ...exportRequest('minimal'),
+      agents: { mode: 'selected', agentIds: [recipient!.id] },
+      outcomes: ['accepted'],
+      actions: ['message'],
+    } as const;
+    const inbound = simulation.generateExperimentExport(inboundRequest);
+    expect(inbound.turns).toEqual([]);
+    expect(inbound.communications).toMatchObject([
+      {
+        originatingTurn: 1,
+        agentId: sender!.id,
+        recipientId: recipient!.id,
+        message: 'Inbound selection proof.',
+      },
+    ]);
+    expect(inbound.metrics?.aggregate).toMatchObject({
+      requestedMessages: 0,
+      deliveredMessages: 1,
+      sentCommunications: 0,
+      receivedCommunications: 1,
+    });
+    const inboundPreview = simulation.previewExperimentExport(inboundRequest);
+    const inboundBytes = new TextEncoder().encode(
+      serializeExperimentExport(inbound),
+    ).byteLength;
+    expect(inboundPreview).toMatchObject({
+      matchingRecordCount: 0,
+      matchingCommunicationCount: 1,
+      serializedUtf8Bytes: inboundBytes,
+      approximateAiInputTokens: Math.ceil(inboundBytes / 4),
+    });
+    for (const filteredRequest of [
+      { ...inboundRequest, actions: ['wait'] },
+      { ...inboundRequest, outcomes: ['rejected'] },
+      {
+        ...inboundRequest,
+        turns: { mode: 'range', fromTurn: 2, toTurn: 4 },
+      },
+    ])
+      expect(
+        simulation.generateExperimentExport(filteredRequest).communications,
+      ).toEqual([]);
+    const senderFull = simulation.generateExperimentExport({
+      ...inboundRequest,
+      level: 'full-safe',
+      agents: { mode: 'selected', agentIds: [sender!.id] },
+    });
+    expect(senderFull.turns).toHaveLength(1);
+    expect(senderFull.turns[0]?.event).toMatchObject({
+      type: 'agent-messaged',
+    });
+    expect(senderFull.communications).toHaveLength(1);
+    expect(senderFull.worldEvents).toEqual([]);
+    expect(senderFull.initialWorld).not.toHaveProperty('events');
+    expect(senderFull.currentWorld).not.toHaveProperty('events');
+
+    const rejectedSender = initial.world.agents[3]!;
+    const rejected = simulation.generateExperimentExport({
+      ...exportRequest('full-safe'),
+      agents: { mode: 'selected', agentIds: [rejectedSender.id] },
+      outcomes: ['accepted', 'rejected'],
+      actions: ['message'],
+    });
+    expect(rejected.turns).toHaveLength(1);
+    expect(rejected.turns[0]).toMatchObject({
+      outcome: 'rejected',
+      validationReason: 'self-message',
+    });
+    expect(rejected.communications).toEqual([]);
+    expect(rejected.worldEvents).toEqual([]);
+    expect(rejected.metrics?.aggregate).toMatchObject({
+      requestedMessages: 1,
+      deliveredMessages: 0,
+    });
+  });
+
   it('produces predictable Minimal, Standard, Full safe and Custom omissions without mutation', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
@@ -393,14 +526,23 @@ describe('SimulationService', () => {
         personalityTextHistory: false,
         nearbyAgents: false,
         recentEvents: false,
+        recentCommunications: false,
         validationDetails: false,
         resultingEvents: false,
         providerUsageMetadata: false,
         initialWorldState: false,
         currentWorldState: false,
         computedMetrics: false,
+        communications: false,
       },
     });
+    expect(minimal.schemaVersion).toBe(2);
+    expect(
+      experimentExportDocumentSchema.safeParse({
+        ...minimal,
+        schemaVersion: 1,
+      }).success,
+    ).toBe(false);
     expect(minimal.turns[0]).not.toHaveProperty('observation');
     expect(standard.turns[0]).toHaveProperty('observation');
     expect(full).toHaveProperty('initialWorld');
@@ -410,6 +552,10 @@ describe('SimulationService', () => {
     expect(full.worldEvents).toEqual([
       expect.objectContaining({ agentId: before.world.agents[0]!.id }),
     ]);
+    expect(minimal.communications).toEqual([]);
+    expect(standard.communications).toEqual([]);
+    expect(full.communications).toEqual([]);
+    expect(custom).not.toHaveProperty('communications');
     expect(custom).not.toHaveProperty('metrics');
     expect(custom.turns[0]).not.toHaveProperty('provider');
     minimal.turns[0]!.outcome = 'rejected';
@@ -498,6 +644,191 @@ describe('SimulationService', () => {
     const second = await simulation.executeNextTurn();
     expect(second.observation.recentEvents).toHaveLength(1);
     expect(second.observation.recentEvents[0]?.type).toBe('hex-infected');
+  });
+
+  it('delivers messages as exclusive turns and exposes inbound and outbound context', async () => {
+    const initial = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'placeholder' },
+      ]),
+    ).getSnapshot();
+    const sender = initial.world.agents[0]!;
+    const recipient = initial.world.agents[1]!;
+    const simulation = service(
+      new ScriptedAgentProvider([
+        {
+          requestedAction: {
+            type: 'message',
+            recipientId: recipient.id,
+            message: '  Hold near the center.  ',
+          },
+          summary: 'Coordinate.',
+        },
+        { requestedAction: { type: 'wait' }, summary: 'Observe.' },
+        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { requestedAction: { type: 'wait' }, summary: 'Observe sender.' },
+      ]),
+    );
+    const before = simulation.getSnapshot().world;
+    const sent = await simulation.executeNextTurn();
+    expect(sent).toMatchObject({
+      agentId: sender.id,
+      outcome: 'accepted',
+      event: {
+        type: 'agent-messaged',
+        recipientId: recipient.id,
+        message: 'Hold near the center.',
+      },
+    });
+    expect(simulation.getSnapshot().world.agents).toEqual(before.agents);
+    expect(simulation.getSnapshot().world.hexes).toEqual(before.hexes);
+
+    const recipientTurn = await simulation.executeNextTurn();
+    expect(recipientTurn.observation.recentCommunications).toMatchObject([
+      {
+        senderId: sender.id,
+        recipientId: recipient.id,
+        direction: 'inbound',
+        message: 'Hold near the center.',
+      },
+    ]);
+    for (let index = 0; index < 5; index += 1)
+      await simulation.executeNextTurn();
+    const senderTurn = simulation.getSnapshot().turns.at(-1)!;
+    expect(senderTurn.agentId).toBe(sender.id);
+    expect(senderTurn.observation.recentCommunications[0]).toMatchObject({
+      direction: 'outbound',
+      recipientId: recipient.id,
+    });
+  });
+
+  it('rejects self and unknown recipients without a delivered event', async () => {
+    const ids = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'placeholder' },
+      ]),
+    )
+      .getSnapshot()
+      .world.agents.map(({ id }) => id);
+    for (const [recipientId, reason] of [
+      [ids[0]!, 'self-message'],
+      [
+        agentIdSchema.parse('6b58a30d-5d47-4ea3-8c1c-43edcc919553'),
+        'unknown-recipient',
+      ],
+    ] as const) {
+      const simulation = service(
+        new ScriptedAgentProvider([
+          {
+            requestedAction: {
+              type: 'message',
+              recipientId,
+              message: 'Hello.',
+            },
+            summary: 'Try message.',
+          },
+        ]),
+      );
+      expect(await simulation.executeNextTurn()).toMatchObject({
+        outcome: 'rejected',
+        validation: { accepted: false, reason },
+      });
+      expect(simulation.getSnapshot().world.events).toEqual([]);
+    }
+  });
+
+  it('keeps recent communication context chronological and capped at six', async () => {
+    const seen: AgentObservation[] = [];
+    let clock = 0;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'communication-history-test',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        seen.push(observation);
+        const target = observation.nearbyAgents.find(
+          ({ distance }) => distance <= 3,
+        );
+        return {
+          decision: {
+            requestedAction: target
+              ? {
+                  type: 'message',
+                  recipientId: target.id,
+                  message: `Turn ${seen.length}`,
+                }
+              : { type: 'wait' },
+            summary: 'Message.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'communication-history-test',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = new SimulationService({
+      provider,
+      now: () =>
+        new Date(
+          Date.parse('2026-08-13T12:00:00.000Z') + clock++,
+        ).toISOString(),
+      createEventId,
+    });
+    for (let index = 0; index < 48; index += 1)
+      await simulation.executeNextTurn();
+    const bounded = seen.findLast(
+      ({ recentCommunications }) => recentCommunications.length === 6,
+    );
+    expect(bounded?.recentCommunications).toHaveLength(6);
+    expect(
+      bounded?.recentCommunications.map(({ occurredAt }) => occurredAt),
+    ).toEqual(
+      bounded?.recentCommunications
+        .map(({ occurredAt }) => occurredAt)
+        .toSorted(),
+    );
+  });
+
+  it('reset clears accepted communication history and metrics', async () => {
+    const initial = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'placeholder' },
+      ]),
+    ).getSnapshot();
+    const simulation = service(
+      new ScriptedAgentProvider([
+        {
+          requestedAction: {
+            type: 'message',
+            recipientId: initial.world.agents[1]!.id,
+            message: 'Before reset.',
+          },
+          summary: 'Message.',
+        },
+      ]),
+    );
+    await simulation.executeNextTurn();
+    expect(simulation.getSnapshot().world.events).toHaveLength(1);
+    expect(simulation.getSnapshot().experiment.metrics.aggregate).toMatchObject(
+      {
+        requestedMessages: 1,
+        deliveredMessages: 1,
+      },
+    );
+    const reset = simulation.reset();
+    expect(reset.world.events).toEqual([]);
+    expect(reset.experiment.metrics.aggregate).toMatchObject({
+      requestedMessages: 0,
+      deliveredMessages: 0,
+      sentCommunications: 0,
+      receivedCommunications: 0,
+    });
   });
 
   it('updates an existing agent and uses the trimmed personality on its next turn', async () => {

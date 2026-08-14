@@ -12,6 +12,7 @@ import {
   experimentExportDocumentSchema,
   experimentExportPreviewSchema,
   h3CellSchema,
+  RECENT_COMMUNICATION_LIMIT,
   PERSONALITY_MAX_LENGTH,
   personalitySchema,
   simulationSnapshotSchema,
@@ -485,6 +486,30 @@ export class SimulationService {
         occurredAt: event.occurredAt,
         summary: summarizeEvent(event, this.#state),
       }));
+    const recentCommunications = this.#state.events
+      .filter(
+        (event): event is Extract<WorldEvent, { type: 'agent-messaged' }> =>
+          event.type === 'agent-messaged' &&
+          (event.agentId === agent.id || event.recipientId === agent.id),
+      )
+      .slice(-RECENT_COMMUNICATION_LIMIT)
+      .map((event) => {
+        const sender = this.#state.agents.get(event.agentId);
+        const recipient = this.#state.agents.get(event.recipientId);
+        if (!sender || !recipient)
+          throw new Error('A communication participant does not exist.');
+        return {
+          eventId: event.id,
+          senderId: sender.id,
+          senderName: sender.name,
+          recipientId: recipient.id,
+          recipientName: recipient.name,
+          direction: event.agentId === agent.id ? 'outbound' : 'inbound',
+          message: event.message,
+          occurredAt: event.occurredAt,
+          distance: event.distance,
+        } as const;
+      });
     return agentObservationSchema.parse({
       agentId: agent.id,
       agentName: agent.name,
@@ -493,6 +518,7 @@ export class SimulationService {
       adjacentCells,
       nearbyAgents,
       recentEvents,
+      recentCommunications,
     });
   }
 }

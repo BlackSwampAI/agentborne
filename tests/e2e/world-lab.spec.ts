@@ -2,6 +2,8 @@ import { expect, test } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { experimentExportDocumentSchema } from '@agentborne/shared';
 
+const ROOK_ID = '2507bb46-7ae4-45ca-8dda-644c4f85ca14';
+
 test('runs the complete deterministic World Lab browser flow', async ({
   page,
 }) => {
@@ -74,7 +76,10 @@ test('runs the complete deterministic World Lab browser flow', async ({
   ).toBeVisible();
 
   await page.getByRole('button', { name: 'Single turn' }).click();
-  await expect(page.getByText(/Infection ·/)).toBeVisible();
+  await expect(page.getByText(/Message · Ember → Rook/)).toBeVisible();
+  await expect(page.getByLabel('Recent communications')).toContainText(
+    'Outbound Ember → Rook',
+  );
   const latestObservation = page.getByText('Latest structured observation');
   await latestObservation.click();
   await expect(
@@ -85,21 +90,32 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '61');
   await expect(worldMap).toHaveAttribute(
     'data-rendered-infected-cell-count',
-    '1',
+    '0',
   );
   await expect(page.getByTestId('infected-count')).toHaveText(
-    '1 rendered infected',
+    '0 rendered infected',
   );
 
+  await page.getByRole('button', { name: 'Select agent Rook' }).click();
+  await expect(page.getByLabel('Recent communications')).toContainText(
+    'Inbound Ember → Rook',
+  );
   await page.getByRole('button', { name: 'Single turn' }).click();
+  const recipientObservation = page.getByText('Latest structured observation');
+  await recipientObservation.click();
+  await expect(
+    page
+      .locator('details')
+      .filter({ hasText: 'Latest structured observation' }),
+  ).toContainText('inbound: Ember → Rook');
   await page.getByRole('button', { name: 'Single turn' }).click();
   await expect(page.getByText('Turn 3', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Select agent Ember' }).click();
+  await page.getByRole('button', { name: 'Select agent Rook' }).click();
   await page.getByRole('button', { name: 'Export this agent' }).click();
-  await expect(page.getByRole('checkbox', { name: /Ember/ })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: /Rook/ })).toBeChecked();
   await page.getByRole('button', { name: 'Preview export' }).click();
   await expect(page.getByLabel('Export preview')).toContainText('1 records');
-  await page.getByRole('checkbox', { name: /Rook/ }).check();
+  await expect(page.getByLabel('Export preview')).toContainText('1 accepted');
   await page.getByRole('button', { name: 'Generate JSON' }).click();
   await expect(page.getByText(/schema-validated/)).toBeVisible();
   const downloadPromise = page.waitForEvent('download');
@@ -110,8 +126,15 @@ test('runs the complete deterministic World Lab browser flow', async ({
   const exported = experimentExportDocumentSchema.parse(
     JSON.parse(await readFile(downloadedPath!, 'utf8')),
   );
+  expect(exported.schemaVersion).toBe(2);
   expect(exported.filters.level).toBe('minimal');
-  expect(exported.selection.selectedAgentIds).toHaveLength(2);
+  expect(exported.selection.selectedAgentIds).toEqual([ROOK_ID]);
+  expect(exported.communications).toMatchObject([
+    {
+      originatingTurn: 1,
+      message: 'Meet near the center and contain the spread.',
+    },
+  ]);
   expect(exported.metrics?.aggregate.knownCostCredits).toBe(0);
   expect(exported.metrics?.aggregate.turnsWithUnknownCost).toBe(0);
   expect(exported.turns.map(({ turnNumber }) => turnNumber)).toEqual(
@@ -140,6 +163,9 @@ test('runs the complete deterministic World Lab browser flow', async ({
   }
   await expect(
     page.getByText('Development world loaded with six agents.'),
+  ).toBeVisible();
+  await expect(
+    page.getByText('No communications for this agent yet.'),
   ).toBeVisible();
 
   await page.getByRole('button', { name: 'Single turn' }).click();
