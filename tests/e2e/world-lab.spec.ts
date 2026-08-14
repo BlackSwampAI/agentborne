@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
+import { experimentExportDocumentSchema } from '@agentborne/shared';
 
 test('runs the complete deterministic World Lab browser flow', async ({
   page,
@@ -89,6 +91,36 @@ test('runs the complete deterministic World Lab browser flow', async ({
     '1 rendered infected',
   );
 
+  await page.getByRole('button', { name: 'Single turn' }).click();
+  await page.getByRole('button', { name: 'Single turn' }).click();
+  await expect(page.getByText('Turn 3', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Select agent Ember' }).click();
+  await page.getByRole('button', { name: 'Export this agent' }).click();
+  await expect(page.getByRole('checkbox', { name: /Ember/ })).toBeChecked();
+  await page.getByRole('button', { name: 'Preview export' }).click();
+  await expect(page.getByLabel('Export preview')).toContainText('1 records');
+  await page.getByRole('checkbox', { name: /Rook/ }).check();
+  await page.getByRole('button', { name: 'Generate JSON' }).click();
+  await expect(page.getByText(/schema-validated/)).toBeVisible();
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Download JSON' }).click();
+  const download = await downloadPromise;
+  const downloadedPath = await download.path();
+  expect(downloadedPath).not.toBeNull();
+  const exported = experimentExportDocumentSchema.parse(
+    JSON.parse(await readFile(downloadedPath!, 'utf8')),
+  );
+  expect(exported.filters.level).toBe('minimal');
+  expect(exported.selection.selectedAgentIds).toHaveLength(2);
+  expect(exported.metrics?.aggregate.knownCostCredits).toBe(0);
+  expect(exported.metrics?.aggregate.turnsWithUnknownCost).toBe(0);
+  expect(exported.turns.map(({ turnNumber }) => turnNumber)).toEqual(
+    exported.turns
+      .map(({ turnNumber }) => turnNumber)
+      .toSorted((a, b) => a - b),
+  );
+
+  page.once('dialog', (dialog) => dialog.accept());
   await page.getByRole('button', { name: 'Reset world' }).click();
   await expect(page.getByText('Turn 0')).toBeVisible();
   await expect(

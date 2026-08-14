@@ -8,6 +8,8 @@ World Lab → Game API / simulation service → agent runtime → requested acti
                       snapshot / turn record ← world engine validation
 ```
 
+The Game API also owns one process-local experiment record. Each completed safe turn is captured once, independently from the browser snapshot, and server-side export levels filter that record without affecting provider requests.
+
 ## Applications
 
 `apps/world-lab` is a Next.js App Router developer/admin surface. It fetches runtime-validated simulation snapshots through a local rewrite, controls one turn at a time, and updates MapLibre's existing H3 GeoJSON source without recreating the map. Agent markers are fully visible and use deterministic offsets when sharing cells.
@@ -19,6 +21,8 @@ World Lab → Game API / simulation service → agent runtime → requested acti
 - `POST /api/simulation/reset` — deterministic reset, rejected while a turn is active
 - `POST /api/simulation/agents/:agentId/personality` — trim, validate, and replace one active personality
 - `POST /api/simulation/personalities/restore-defaults` — restore all six original personality directives without resetting progress
+- `POST /api/simulation/experiment/export/preview` — validate filters and report subset size, retention, cost, and approximate sharing tokens
+- `POST /api/simulation/experiment/export` — construct one schema-versioned safe JSON document
 
 The legacy `GET /api/development-world` and `GET /health` endpoints remain for low-level diagnostics.
 
@@ -34,6 +38,14 @@ The engine alone accepts or rejects actions and creates world events. Rejections
 
 Only failures thrown by the provider decision call become sanitized provider-failure turn records. Those failures remain non-mutating, count as completed recorded turns, advance round robin, and do not prevent later turns. The public turn number is the total completed-turn count and is independent of the retained history: snapshots keep only the newest 120 turn records and newest 120 world events. Observations select the newest eight relevant public events from that retained event history in chronological order.
 
+## Experiment telemetry and export
+
+The active experiment has a runtime-validated UUID, start time, initial six-agent configuration, immutable personality-change events, initial world, and up to 5,000 complete safe turns. The existing browser snapshot and world-event list remain capped at 120. Absolute numbering, first/last retained turns, dropped count, and completeness disclose truncation. Reset creates a new experiment and clears telemetry/cost while preserving active personalities; no previous experiments survive reset or process restart.
+
+Metrics and filtering are deterministic Game API responsibilities. Export metrics always describe the filtered retained subset. Decimal-string accumulation prevents binary floating-point artifacts in aggregate provider cost while retaining tiny charges. Minimal and Standard provide progressively more turn context, Full safe includes the richest safe structured record and world/configuration context, and Custom applies validated inclusion dependencies. Full-safe initial/current world states retain all agents and hex states for spatial context but deliberately omit event history; the agent-filtered top-level `worldEvents` array is the canonical exported event stream. Compact JSON is the AI-sharing default and Pretty JSON is available for human review. Preview serializes the same prospective document with the selected encoding and estimates AI input as `ceil(UTF-8 bytes / 4)` without a tokenizer dependency.
+
+The agent runtime follows [OpenRouter's usage-accounting contract](https://openrouter.ai/docs/cookbook/administration/usage-accounting) and normalizes optional non-streaming usage fields: prompt, completion, total, reasoning, cached-read, cache-write tokens, and actual `usage.cost` as `costCredits`. It never derives price from a table. Safe usage already returned with a billable response is retained on later decision JSON/schema failure; network and HTTP failures without usage remain unknown. Scripted providers explicitly report zero tokens and zero cost.
+
 ## Packages
 
 `packages/shared` owns all public schemas: profiles, personality mutation requests/responses, observations, PR 2 decisions, provider metadata/failures, turn outcomes, snapshots, and API responses. Types are inferred from Zod.
@@ -46,3 +58,4 @@ The provider abort timeout covers the complete response lifecycle, including bod
 
 The rationale and deferrals are recorded in [ADR 0002](adr/0002-first-visible-llm-invasion.md).
 Personality ownership and reset semantics are recorded in [ADR 0003](adr/0003-session-personality-configuration.md).
+Experiment capture and export semantics are recorded in [ADR 0004](adr/0004-server-owned-experiment-telemetry.md).

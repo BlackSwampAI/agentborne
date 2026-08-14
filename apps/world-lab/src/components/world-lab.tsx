@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   PERSONALITY_MAX_LENGTH,
+  experimentExportPreviewSchema,
+  experimentExportRequestSchema,
+  experimentExportResponseSchema,
   personalitySchema,
   resetSimulationResponseSchema,
   restoreDefaultPersonalitiesResponseSchema,
@@ -12,6 +15,10 @@ import {
   updateAgentPersonalityResponseSchema,
   type AgentId,
   type AgentTurnRecord,
+  type CustomExportOptions,
+  type ExperimentExportDocument,
+  type ExperimentExportPreview,
+  type ExperimentExportRequest,
   type H3Cell,
   type SimulationSnapshot,
 } from '@agentborne/shared';
@@ -40,10 +47,14 @@ export function WorldLab() {
   );
   const [speed, setSpeed] = useState(1_000);
   const [uiError, setUiError] = useState<string | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportAgentIds, setExportAgentIds] = useState<AgentId[]>([]);
   const inFlightRef = useRef(false);
 
   const applySnapshot = useCallback((next: SimulationSnapshot) => {
     setSnapshot(next);
+    if (next.world.hexes.every(({ state }) => state === 'infected'))
+      setRunning(false);
     setSelectedCell((current) => current ?? next.world.hexes[0]!.cell);
     setSelectedAgentId((current) => current ?? next.world.agents[0]!.id);
   }, []);
@@ -98,6 +109,14 @@ export function WorldLab() {
 
   const reset = async () => {
     if (inFlightRef.current) return;
+    if (
+      snapshot &&
+      snapshot.experiment.totalCompletedTurns > 0 &&
+      !window.confirm(
+        `Reset World will discard ${snapshot.experiment.totalCompletedTurns} completed experiment turn records and all unexported telemetry. Continue?`,
+      )
+    )
+      return;
     setRunning(false);
     setResetting(true);
     setUiError(null);
@@ -204,6 +223,8 @@ export function WorldLab() {
     }
   };
 
+  const fullyInfected =
+    snapshot?.world.hexes.every(({ state }) => state === 'infected') ?? false;
   if (!snapshot) {
     return (
       <main className="loading-state">
@@ -236,6 +257,12 @@ export function WorldLab() {
     ({ id }) => id === snapshot.nextAgentId,
   );
   const personalityControlsDisabled =
+    running ||
+    inFlight ||
+    resetting ||
+    personalityPending ||
+    snapshot.activeAgentId !== null;
+  const exportMutationPending =
     running ||
     inFlight ||
     resetting ||
@@ -298,6 +325,7 @@ export function WorldLab() {
                   disabled={
                     inFlight ||
                     personalityPending ||
+                    fullyInfected ||
                     !snapshot.providerConfigured
                   }
                   type="button"
@@ -346,6 +374,13 @@ export function WorldLab() {
                 <option value={250}>Fast · 0.25s</option>
               </select>
             </label>
+            <ExperimentUsageMeter snapshot={snapshot} />
+            {fullyInfected && (
+              <p className="callout success" role="status">
+                Development world fully infected. Automatic playback is paused;
+                Single turn remains a manual cost-incurring diagnostic action.
+              </p>
+            )}
             {!snapshot.providerConfigured && (
               <p className="callout configuration" role="alert">
                 Model calls unavailable. Set OPENROUTER_API_KEY on the Game API
@@ -380,8 +415,27 @@ export function WorldLab() {
               mutationDisabled={personalityControlsDisabled}
               mutationPending={personalityPending}
               onApplyPersonality={updatePersonality}
+              metrics={
+                snapshot.experiment.metrics.byAgent.find(
+                  ({ agentId }) => agentId === selectedAgent.id,
+                )?.metrics
+              }
+              onExportAgent={(agentId) => {
+                setRunning(false);
+                setExportAgentIds([agentId]);
+                setExportOpen(true);
+              }}
             />
           )}
+
+          <ExperimentExportPanel
+            agents={snapshot.world.agents}
+            disabled={exportMutationPending}
+            open={exportOpen}
+            selectedAgentIds={exportAgentIds}
+            onOpenChange={setExportOpen}
+            onSelectionChange={setExportAgentIds}
+          />
 
           {selectedHex && (
             <section className="panel selected-panel">
@@ -418,6 +472,8 @@ function AgentInspector({
   mutationDisabled,
   mutationPending,
   onApplyPersonality,
+  metrics,
+  onExportAgent,
 }: {
   agent: SimulationSnapshot['world']['agents'][number];
   cellState: 'open' | 'infected';
@@ -429,6 +485,8 @@ function AgentInspector({
     agentId: AgentId,
     personality: string,
   ) => Promise<boolean>;
+  metrics?: SimulationSnapshot['experiment']['metrics']['aggregate'];
+  onExportAgent: (agentId: AgentId) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(agent.personality);
@@ -474,6 +532,17 @@ function AgentInspector({
           <dd>{cellState}</dd>
         </div>
       </dl>
+      <div className="agent-usage" aria-label="Selected agent usage">
+        <strong>Experiment usage</strong>
+        <span>{metrics?.totalTurns ?? 0} turns</span>
+        <span>{formatCost(metrics?.knownCostCredits ?? 0)} known cost</span>
+        {(metrics?.turnsWithUnknownCost ?? 0) > 0 && (
+          <span>{metrics?.turnsWithUnknownCost} unknown-cost turns</span>
+        )}
+      </div>
+      <button type="button" onClick={() => onExportAgent(agent.id)}>
+        Export this agent
+      </button>
       <div className="personality-heading">
         <h3>Active personality</h3>
         {!editing && (
@@ -664,6 +733,496 @@ function AgentInspector({
       </ol>
     </section>
   );
+}
+
+function ExperimentUsageMeter({ snapshot }: { snapshot: SimulationSnapshot }) {
+  const metrics = snapshot.experiment.metrics.aggregate;
+  return (
+    <div className="usage-meter" aria-label="Current experiment usage">
+      <strong>Current experiment</strong>
+      <span>{snapshot.experiment.totalCompletedTurns} turns</span>
+      <span>{formatCost(metrics.knownCostCredits)} known cost</span>
+      <span>
+        {metrics.tokens.totalTokens ??
+          (metrics.tokens.promptTokens ?? 0) +
+            (metrics.tokens.completionTokens ?? 0)}{' '}
+        tokens
+      </span>
+      {metrics.turnsWithUnknownCost > 0 && (
+        <span>{metrics.turnsWithUnknownCost} unknown-cost turns</span>
+      )}
+    </div>
+  );
+}
+
+const defaultCustomOptions: CustomExportOptions = {
+  turnObservations: true,
+  personalityTextHistory: true,
+  nearbyAgents: true,
+  recentEvents: true,
+  validationDetails: true,
+  resultingEvents: true,
+  providerUsageMetadata: true,
+  initialWorldState: false,
+  currentWorldState: true,
+  computedMetrics: true,
+};
+
+function ExperimentExportPanel({
+  agents,
+  disabled,
+  open,
+  selectedAgentIds,
+  onOpenChange,
+  onSelectionChange,
+}: {
+  agents: SimulationSnapshot['world']['agents'];
+  disabled: boolean;
+  open: boolean;
+  selectedAgentIds: AgentId[];
+  onOpenChange: (open: boolean) => void;
+  onSelectionChange: (ids: AgentId[]) => void;
+}) {
+  const [level, setLevel] =
+    useState<ExperimentExportRequest['level']>('minimal');
+  const [serialization, setSerialization] =
+    useState<ExperimentExportRequest['serialization']>('compact');
+  const [turnMode, setTurnMode] = useState<
+    'entire-retained' | 'latest' | 'range'
+  >('entire-retained');
+  const [latestCount, setLatestCount] = useState<10 | 25 | 50 | 120>(120);
+  const [fromTurn, setFromTurn] = useState(1);
+  const [toTurn, setToTurn] = useState(120);
+  const [outcomes, setOutcomes] = useState<
+    Array<'accepted' | 'rejected' | 'provider-error'>
+  >(['accepted', 'rejected', 'provider-error']);
+  const [actions, setActions] = useState<Array<'move' | 'infect' | 'wait'>>([
+    'move',
+    'infect',
+    'wait',
+  ]);
+  const [custom, setCustom] = useState(defaultCustomOptions);
+  const [preview, setPreview] = useState<ExperimentExportPreview | null>(null);
+  const [document, setDocument] = useState<ExperimentExportDocument | null>(
+    null,
+  );
+  const [generatedRequestJson, setGeneratedRequestJson] = useState<
+    string | null
+  >(null);
+  const [pending, setPending] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+
+  useEffect(() => {
+    if (open && detailsRef.current) detailsRef.current.open = true;
+  }, [open]);
+
+  const requestInput = {
+    agents:
+      selectedAgentIds.length === agents.length
+        ? { mode: 'all' as const }
+        : { mode: 'selected' as const, agentIds: selectedAgentIds },
+    turns:
+      turnMode === 'entire-retained'
+        ? { mode: 'entire-retained' as const }
+        : turnMode === 'latest'
+          ? { mode: 'latest' as const, count: latestCount }
+          : { mode: 'range' as const, fromTurn, toTurn },
+    outcomes,
+    actions,
+    level,
+    serialization,
+    ...(level === 'custom' ? { custom } : {}),
+  };
+  const parsedRequest = experimentExportRequestSchema.safeParse(requestInput);
+  const generationDisabled = disabled || pending || !parsedRequest.success;
+  const currentRequestJson = parsedRequest.success
+    ? JSON.stringify(parsedRequest.data)
+    : null;
+  const documentIsCurrent =
+    document !== null && generatedRequestJson === currentRequestJson;
+
+  const requestExport = async (previewOnly: boolean) => {
+    if (!parsedRequest.success) return;
+    setPending(true);
+    setNotice(null);
+    try {
+      const response = await fetch(
+        `${apiBase}/experiment/export${previewOnly ? '/preview' : ''}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(parsedRequest.data),
+        },
+      );
+      if (response.status === 409) {
+        setNotice(
+          'Pause playback and wait for pending mutations before exporting.',
+        );
+        return;
+      }
+      if (!response.ok) throw new Error('export request failed');
+      if (previewOnly) {
+        setPreview(experimentExportPreviewSchema.parse(await response.json()));
+        setDocument(null);
+        setGeneratedRequestJson(null);
+        setNotice('Export preview updated.');
+      } else {
+        const payload = experimentExportResponseSchema.parse(
+          await response.json(),
+        );
+        setDocument(payload.document);
+        setGeneratedRequestJson(JSON.stringify(parsedRequest.data));
+        setNotice('Export JSON generated and schema-validated.');
+      }
+    } catch {
+      setNotice('Export failed safely. Review the selection and try again.');
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const copyJson = async () => {
+    if (!document || !documentIsCurrent) return;
+    try {
+      await navigator.clipboard.writeText(serializeExportDocument(document));
+      setNotice('Export JSON copied to the clipboard.');
+    } catch {
+      setNotice('Copy failed. Clipboard permission may be unavailable.');
+    }
+  };
+
+  const downloadJson = () => {
+    if (!document || !documentIsCurrent) return;
+    try {
+      const json = serializeExportDocument(document);
+      const url = URL.createObjectURL(
+        new Blob([json], { type: 'application/json' }),
+      );
+      const link = window.document.createElement('a');
+      const scope =
+        document.selection.selectedAgentIds.length === agents.length
+          ? 'all-agents'
+          : document.selection.selectedAgentIds.length === 1
+            ? 'one-agent'
+            : `${document.selection.selectedAgentIds.length}-agents`;
+      const range =
+        document.filters.turns.mode === 'range'
+          ? `turns-${document.filters.turns.fromTurn}-${document.filters.turns.toTurn}`
+          : document.filters.turns.mode === 'latest'
+            ? `latest-${document.filters.turns.count}`
+            : 'entire-retained';
+      link.href = url;
+      link.download = `agentborne-experiment-${document.experiment.id}-${scope}-${range}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setNotice('Export JSON download started.');
+    } catch {
+      setNotice('Download failed safely.');
+    }
+  };
+
+  const toggle = <T extends string>(values: T[], value: T): T[] =>
+    values.includes(value)
+      ? values.filter((candidate) => candidate !== value)
+      : [...values, value];
+
+  return (
+    <details
+      className="panel export-panel"
+      ref={detailsRef}
+      onToggle={(event) => {
+        const nextOpen = event.currentTarget.open;
+        onOpenChange(nextOpen);
+        if (nextOpen && selectedAgentIds.length === 0)
+          onSelectionChange(agents.map(({ id }) => id));
+      }}
+    >
+      <summary>Experiment Export</summary>
+      <p className="muted">
+        Server-owned retained telemetry; exports never change prompts or model
+        usage.
+      </p>
+      <fieldset>
+        <legend>Agents</legend>
+        <div className="selection-actions">
+          <button
+            type="button"
+            onClick={() => onSelectionChange(agents.map(({ id }) => id))}
+          >
+            Select all
+          </button>
+          <button type="button" onClick={() => onSelectionChange([])}>
+            Clear
+          </button>
+        </div>
+        {agents.map((agent) => (
+          <label className="checkbox-row" key={agent.id}>
+            <input
+              checked={selectedAgentIds.includes(agent.id)}
+              type="checkbox"
+              onChange={() =>
+                onSelectionChange(toggle(selectedAgentIds, agent.id))
+              }
+            />
+            <span
+              className="agent-swatch"
+              style={{ background: agent.color }}
+            />
+            {agent.name}
+          </label>
+        ))}
+      </fieldset>
+      <label>
+        Export level
+        <select
+          value={level}
+          onChange={(event) =>
+            setLevel(event.target.value as ExperimentExportRequest['level'])
+          }
+        >
+          <option value="minimal">Minimal</option>
+          <option value="standard">Standard</option>
+          <option value="full-safe">Full safe</option>
+          <option value="custom">Custom export</option>
+        </select>
+      </label>
+      <fieldset>
+        <legend>Advanced JSON options</legend>
+        <label>
+          JSON serialization
+          <select
+            value={serialization}
+            onChange={(event) =>
+              setSerialization(
+                event.target.value as ExperimentExportRequest['serialization'],
+              )
+            }
+          >
+            <option value="compact">Compact · AI sharing default</option>
+            <option value="pretty">Pretty · human review</option>
+          </select>
+        </label>
+      </fieldset>
+      <label>
+        Turn range
+        <select
+          value={turnMode}
+          onChange={(event) =>
+            setTurnMode(event.target.value as typeof turnMode)
+          }
+        >
+          <option value="entire-retained">Entire retained experiment</option>
+          <option value="latest">Latest matching records</option>
+          <option value="range">Custom absolute range</option>
+        </select>
+      </label>
+      {turnMode === 'latest' && (
+        <label>
+          Latest count
+          <select
+            value={latestCount}
+            onChange={(event) =>
+              setLatestCount(Number(event.target.value) as typeof latestCount)
+            }
+          >
+            {[10, 25, 50, 120].map((count) => (
+              <option key={count} value={count}>
+                {count}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {turnMode === 'range' && (
+        <div className="range-row">
+          <label>
+            From turn
+            <input
+              min="1"
+              type="number"
+              value={fromTurn}
+              onChange={(event) => setFromTurn(Number(event.target.value))}
+            />
+          </label>
+          <label>
+            To turn
+            <input
+              min="1"
+              type="number"
+              value={toTurn}
+              onChange={(event) => setToTurn(Number(event.target.value))}
+            />
+          </label>
+        </div>
+      )}
+      <FilterChecks
+        label="Outcomes"
+        options={['accepted', 'rejected', 'provider-error']}
+        selected={outcomes}
+        onToggle={(value) => setOutcomes(toggle(outcomes, value))}
+      />
+      <FilterChecks
+        label="Actions"
+        options={['move', 'infect', 'wait']}
+        selected={actions}
+        onToggle={(value) => setActions(toggle(actions, value))}
+      />
+      {level === 'custom' && (
+        <fieldset>
+          <legend>Advanced Custom switches</legend>
+          {(Object.keys(custom) as Array<keyof CustomExportOptions>).map(
+            (key) => (
+              <label className="checkbox-row" key={key}>
+                <input
+                  checked={custom[key]}
+                  disabled={
+                    (key === 'nearbyAgents' || key === 'recentEvents') &&
+                    !custom.turnObservations
+                  }
+                  type="checkbox"
+                  onChange={() =>
+                    setCustom((current) => {
+                      const next = { ...current, [key]: !current[key] };
+                      if (
+                        key === 'turnObservations' &&
+                        !next.turnObservations
+                      ) {
+                        next.nearbyAgents = false;
+                        next.recentEvents = false;
+                      }
+                      return next;
+                    })
+                  }
+                />
+                {customOptionLabel(key)}
+              </label>
+            ),
+          )}
+        </fieldset>
+      )}
+      {open && !parsedRequest.success && (
+        <p className="inline-error" role="alert">
+          Select at least one agent, outcome, and action, and enter a valid
+          range.
+        </p>
+      )}
+      {disabled && (
+        <p className="muted">
+          Pause playback and wait for all turn, reset, and personality work to
+          finish.
+        </p>
+      )}
+      <div className="export-actions">
+        <button
+          disabled={generationDisabled}
+          type="button"
+          onClick={() => void requestExport(true)}
+        >
+          Preview export
+        </button>
+        <button
+          disabled={generationDisabled}
+          type="button"
+          onClick={() => void requestExport(false)}
+        >
+          Generate JSON
+        </button>
+        <button
+          disabled={!documentIsCurrent}
+          type="button"
+          onClick={() => void copyJson()}
+        >
+          Copy JSON
+        </button>
+        <button
+          disabled={!documentIsCurrent}
+          type="button"
+          onClick={downloadJson}
+        >
+          Download JSON
+        </button>
+      </div>
+      {preview && (
+        <dl className="preview-grid" aria-label="Export preview">
+          <div>
+            <dt>Matching</dt>
+            <dd>{preview.matchingRecordCount} records</dd>
+          </div>
+          <div>
+            <dt>Size</dt>
+            <dd>{preview.serializedUtf8Bytes} bytes</dd>
+          </div>
+          <div>
+            <dt>Approx. AI input</dt>
+            <dd>{preview.approximateAiInputTokens} tokens</dd>
+          </div>
+          <div>
+            <dt>Selected cost</dt>
+            <dd>{formatCost(preview.knownCostCredits)}</dd>
+          </div>
+        </dl>
+      )}
+      {notice && (
+        <p className="callout" role="status">
+          {notice}
+        </p>
+      )}
+    </details>
+  );
+}
+
+function FilterChecks<T extends string>({
+  label,
+  options,
+  selected,
+  onToggle,
+}: {
+  label: string;
+  options: readonly T[];
+  selected: T[];
+  onToggle: (value: T) => void;
+}) {
+  return (
+    <fieldset>
+      <legend>{label}</legend>
+      {options.map((option) => (
+        <label className="checkbox-row" key={option}>
+          <input
+            checked={selected.includes(option)}
+            type="checkbox"
+            onChange={() => onToggle(option)}
+          />
+          {option.replaceAll('-', ' ')}
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+function customOptionLabel(key: keyof CustomExportOptions): string {
+  return {
+    turnObservations: 'Turn observations',
+    personalityTextHistory: 'Personality text and history',
+    nearbyAgents: 'Nearby agents',
+    recentEvents: 'Recent events',
+    validationDetails: 'Validation details',
+    resultingEvents: 'Resulting events',
+    providerUsageMetadata: 'Provider usage metadata',
+    initialWorldState: 'Initial world state',
+    currentWorldState: 'Current world state',
+    computedMetrics: 'Computed metrics',
+  }[key];
+}
+
+function formatCost(cost: number): string {
+  return `${cost.toFixed(8).replace(/0+$/, '').replace(/\.$/, '.0')} credits`;
+}
+
+function serializeExportDocument(document: ExperimentExportDocument): string {
+  return document.filters.serialization === 'pretty'
+    ? JSON.stringify(document, null, 2)
+    : JSON.stringify(document);
 }
 
 function EventLog({ turns }: { turns: AgentTurnRecord[] }) {

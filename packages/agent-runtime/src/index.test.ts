@@ -140,6 +140,132 @@ describe('OpenRouterAgentProvider', () => {
     expect(fetchImplementation).toHaveBeenCalledTimes(1);
   });
 
+  it('normalizes complete OpenRouter usage accounting without rounding tiny cost', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              id: 'safe-id',
+              model: 'safe/model',
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      requestedAction: { type: 'wait' },
+                      summary: 'Wait.',
+                    }),
+                  },
+                },
+              ],
+              usage: {
+                prompt_tokens: 101,
+                completion_tokens: 23,
+                total_tokens: 124,
+                cost: 0.00000017,
+                completion_tokens_details: { reasoning_tokens: 7 },
+                prompt_tokens_details: {
+                  cached_tokens: 80,
+                  cache_write_tokens: 4,
+                },
+              },
+            }),
+          ),
+      ),
+    });
+    await expect(provider.decide(observation)).resolves.toMatchObject({
+      metadata: {
+        promptTokens: 101,
+        completionTokens: 23,
+        totalTokens: 124,
+        reasoningTokens: 7,
+        cachedReadTokens: 80,
+        cacheWriteTokens: 4,
+        costCredits: 0.00000017,
+      },
+    });
+  });
+
+  it('supports a successful response with usage omitted', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      requestedAction: { type: 'wait' },
+                      summary: 'Wait.',
+                    }),
+                  },
+                },
+              ],
+            }),
+          ),
+      ),
+    });
+    const result = await provider.decide(observation);
+    expect(result.metadata).not.toHaveProperty('costCredits');
+    expect(result.metadata).not.toHaveProperty('totalTokens');
+  });
+
+  it('never copies secrets, observations or raw provider payloads into safe metadata', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'sk-or-secret-test-key',
+      fetchImplementation: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              id: `Bearer sk-or-secret-test-key ${observation.personality}`,
+              model: JSON.stringify({
+                observation,
+                authorization: 'sk-or-secret-test-key',
+              }),
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      requestedAction: { type: 'wait' },
+                      summary: 'Wait.',
+                    }),
+                  },
+                },
+              ],
+              usage: { cost: 0.00000001 },
+            }),
+          ),
+      ),
+    });
+    const result = await provider.decide(observation);
+    const serialized = JSON.stringify(result.metadata);
+    expect(serialized).not.toContain('sk-or-secret-test-key');
+    expect(serialized).not.toContain(observation.personality);
+    expect(serialized).not.toContain('authorization');
+  });
+
+  it.each([
+    'not-json',
+    JSON.stringify({ requestedAction: { type: 'teleport' }, summary: 'No.' }),
+  ])(
+    'retains known safe usage when decision content is malformed or unsupported',
+    async (content) => {
+      const provider = new OpenRouterAgentProvider({
+        apiKey: 'secret-test-key',
+        fetchImplementation: vi.fn(async () => response(content)),
+      });
+      await expect(provider.decide(observation)).rejects.toMatchObject({
+        metadata: {
+          promptTokens: 20,
+          completionTokens: 12,
+        },
+      });
+    },
+  );
+
   it.each([
     ['not-json', 'malformed-response'],
     [
@@ -371,7 +497,13 @@ describe('ScriptedAgentProvider', () => {
     ]);
     await expect(provider.decide(observation)).resolves.toMatchObject({
       decision: { requestedAction: { type: 'wait' } },
-      metadata: { provider: 'scripted-test' },
+      metadata: {
+        provider: 'scripted-test',
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        costCredits: 0,
+      },
     });
     await expect(provider.decide(observation)).resolves.toMatchObject({
       decision: { requestedAction: { type: 'infect' } },

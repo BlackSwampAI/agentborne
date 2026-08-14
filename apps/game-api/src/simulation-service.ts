@@ -8,6 +8,9 @@ import {
   agentIdSchema,
   agentObservationSchema,
   agentTurnRecordSchema,
+  experimentIdSchema,
+  experimentExportDocumentSchema,
+  experimentExportPreviewSchema,
   h3CellSchema,
   PERSONALITY_MAX_LENGTH,
   personalitySchema,
@@ -16,6 +19,10 @@ import {
   type AgentId,
   type AgentObservation,
   type AgentTurnRecord,
+  type ExperimentExportDocument,
+  type ExperimentExportPreview,
+  type ExperimentId,
+  type PersonalityConfigurationEvent,
   type H3Cell,
   type ProviderFailure,
   type SimulationSnapshot,
@@ -29,10 +36,17 @@ import {
   toWorldState,
   type WorldState,
 } from '@agentborne/world-engine';
+import {
+  createExperimentExport,
+  createExperimentPreview,
+  type ExperimentSource,
+  ExperimentMetricAccumulator,
+} from './experiment-export';
 
 const RESET_GENERATED_AT = '2026-08-13T12:00:00.000Z';
 const MAX_TURN_HISTORY = 120;
 const MAX_WORLD_EVENT_HISTORY = 120;
+const DEFAULT_EXPERIMENT_RETENTION = 5_000;
 
 export class SimulationConflictError extends Error {
   constructor(message: string) {
@@ -58,12 +72,16 @@ export interface SimulationServiceOptions {
   provider: AgentProvider;
   now?: () => string;
   createEventId?: () => string;
+  createExperimentId?: () => string;
+  experimentRetentionLimit?: number;
 }
 
 export class SimulationService {
   readonly #provider: AgentProvider;
   readonly #now: () => string;
   readonly #createEventId: () => string;
+  readonly #createExperimentId: () => string;
+  readonly #experimentRetentionLimit: number;
   #state: WorldState;
   #turns: AgentTurnRecord[] = [];
   #completedTurnCount = 0;
@@ -71,32 +89,54 @@ export class SimulationService {
   #busy = false;
   #status: SimulationStatus;
   #activeAgentId: AgentId | null = null;
+  #experimentId: ExperimentId;
+  #experimentStartedAt: string;
+  #experimentTurns: AgentTurnRecord[] = [];
+  #initialExperimentAgents: Agent[];
+  #initialExperimentWorld: SimulationSnapshot['world'];
+  #configurationEvents: PersonalityConfigurationEvent[] = [];
+  #experimentMetrics: ExperimentMetricAccumulator;
 
   constructor({
     provider,
     now = () => new Date().toISOString(),
     createEventId = () => crypto.randomUUID(),
+    createExperimentId = () => crypto.randomUUID(),
+    experimentRetentionLimit = DEFAULT_EXPERIMENT_RETENTION,
   }: SimulationServiceOptions) {
+    if (
+      !Number.isInteger(experimentRetentionLimit) ||
+      experimentRetentionLimit < 1
+    )
+      throw new Error('Experiment retention limit must be a positive integer.');
     this.#provider = provider;
     this.#now = now;
     this.#createEventId = createEventId;
+    this.#createExperimentId = createExperimentId;
+    this.#experimentRetentionLimit = experimentRetentionLimit;
     this.#state = toWorldState(
       createDevelopmentWorld({ generatedAt: RESET_GENERATED_AT }),
     );
     this.#status = provider.configured ? 'paused' : 'configuration-error';
+    this.#experimentId = experimentIdSchema.parse(this.#createExperimentId());
+    this.#experimentStartedAt = this.#now();
+    this.#initialExperimentAgents = structuredClone([
+      ...this.#state.agents.values(),
+    ]);
+    this.#initialExperimentWorld = this.#worldSnapshot();
+    this.#experimentMetrics = new ExperimentMetricAccumulator([
+      ...this.#state.agents.keys(),
+    ]);
   }
 
   getSnapshot(): SimulationSnapshot {
     const agents = [...this.#state.agents.values()];
     const next = agents[this.#cursor % agents.length];
     if (!next) throw new Error('The development world has no agents.');
+    const droppedRecords =
+      this.#completedTurnCount - this.#experimentTurns.length;
     return simulationSnapshotSchema.parse({
-      world: {
-        generatedAt: RESET_GENERATED_AT,
-        hexes: [...this.#state.hexes].map(([cell, state]) => ({ cell, state })),
-        agents,
-        events: this.#state.events,
-      },
+      world: this.#worldSnapshot(),
       turnNumber: this.#completedTurnCount,
       nextAgentId: next.id,
       activeAgentId: this.#activeAgentId,
@@ -104,6 +144,17 @@ export class SimulationService {
       providerMode: this.#provider.mode,
       providerConfigured: this.#provider.configured,
       turns: this.#turns,
+      experiment: {
+        id: this.#experimentId,
+        startedAt: this.#experimentStartedAt,
+        totalCompletedTurns: this.#completedTurnCount,
+        retainedTurns: this.#experimentTurns.length,
+        firstRetainedTurn: this.#experimentTurns[0]?.turnNumber,
+        lastRetainedTurn: this.#experimentTurns.at(-1)?.turnNumber,
+        droppedRecords,
+        complete: droppedRecords === 0,
+        metrics: this.#experimentMetrics.snapshot(agents.map(({ id }) => id)),
+      },
     });
   }
 
@@ -136,6 +187,17 @@ export class SimulationService {
     this.#completedTurnCount = 0;
     this.#cursor = 0;
     this.#activeAgentId = null;
+    this.#experimentId = experimentIdSchema.parse(this.#createExperimentId());
+    this.#experimentStartedAt = this.#now();
+    this.#experimentTurns = [];
+    this.#configurationEvents = [];
+    this.#initialExperimentAgents = structuredClone([
+      ...this.#state.agents.values(),
+    ]);
+    this.#initialExperimentWorld = this.#worldSnapshot();
+    this.#experimentMetrics = new ExperimentMetricAccumulator([
+      ...this.#state.agents.keys(),
+    ]);
     this.#status = this.#provider.configured ? 'paused' : 'configuration-error';
     return this.getSnapshot();
   }
@@ -174,6 +236,18 @@ export class SimulationService {
     const agents = new Map(this.#state.agents);
     agents.set(agent.id, updated);
     this.#state = { ...this.#state, agents };
+    if (agent.personality !== updated.personality) {
+      this.#configurationEvents = [
+        ...this.#configurationEvents,
+        {
+          timestamp: this.#now(),
+          agentId: agent.id,
+          previousPersonality: agent.personality,
+          newPersonality: updated.personality,
+          operation: 'custom-edit',
+        },
+      ];
+    }
     return updated;
   }
 
@@ -189,16 +263,49 @@ export class SimulationService {
         personality,
       ]),
     );
+    const configurationEvents: PersonalityConfigurationEvent[] = [];
     this.#state = {
       ...this.#state,
       agents: new Map(
-        [...this.#state.agents].map(([id, agent]) => [
-          id,
-          { ...agent, personality: defaults.get(id) ?? agent.personality },
-        ]),
+        [...this.#state.agents].map(([id, agent]) => {
+          const personality = defaults.get(id) ?? agent.personality;
+          if (personality !== agent.personality)
+            configurationEvents.push({
+              timestamp: this.#now(),
+              agentId: id,
+              previousPersonality: agent.personality,
+              newPersonality: personality,
+              operation: 'restore-default',
+            });
+          return [id, { ...agent, personality }];
+        }),
       ),
     };
+    this.#configurationEvents = [
+      ...this.#configurationEvents,
+      ...configurationEvents,
+    ];
     return this.getSnapshot();
+  }
+
+  previewExperimentExport(request: unknown): ExperimentExportPreview {
+    if (this.#busy)
+      throw new SimulationConflictError(
+        'Export is unavailable while a model turn is in progress.',
+      );
+    return experimentExportPreviewSchema.parse(
+      createExperimentPreview(this.#experimentSource(), request, this.#now()),
+    );
+  }
+
+  generateExperimentExport(request: unknown): ExperimentExportDocument {
+    if (this.#busy)
+      throw new SimulationConflictError(
+        'Export is unavailable while a model turn is in progress.',
+      );
+    return experimentExportDocumentSchema.parse(
+      createExperimentExport(this.#experimentSource(), request, this.#now()),
+    );
   }
 
   async executeNextTurn(): Promise<AgentTurnRecord> {
@@ -308,8 +415,38 @@ export class SimulationService {
 
     this.#state = state;
     this.#turns = turns;
+    this.#experimentTurns = [
+      ...this.#experimentTurns,
+      structuredClone(record),
+    ].slice(-this.#experimentRetentionLimit);
+    this.#experimentMetrics.add(record);
     this.#completedTurnCount = record.turnNumber;
     this.#cursor = cursor;
+  }
+
+  #worldSnapshot(): SimulationSnapshot['world'] {
+    return {
+      generatedAt: RESET_GENERATED_AT,
+      hexes: [...this.#state.hexes].map(([cell, state]) => ({ cell, state })),
+      agents: structuredClone([...this.#state.agents.values()]),
+      events: structuredClone([...this.#state.events]),
+    };
+  }
+
+  #experimentSource(): ExperimentSource {
+    return {
+      id: this.#experimentId,
+      startedAt: this.#experimentStartedAt,
+      providerMode: this.#provider.mode,
+      retentionLimit: this.#experimentRetentionLimit,
+      totalCompletedTurns: this.#completedTurnCount,
+      turns: this.#experimentTurns,
+      initialAgents: this.#initialExperimentAgents,
+      currentAgents: [...this.#state.agents.values()],
+      configurationEvents: this.#configurationEvents,
+      initialWorld: this.#initialExperimentWorld,
+      currentWorld: this.#worldSnapshot(),
+    };
   }
 
   #buildObservation(agentId: AgentId): AgentObservation {

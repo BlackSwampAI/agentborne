@@ -27,6 +27,17 @@ textarea {
   font: inherit;
 }
 
+fieldset {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid #34433f;
+  border-radius: 6px;
+}
+legend {
+  color: #aebdb8;
+  font-size: 0.75rem;
+}
+
 .topbar {
   min-height: 88px;
   padding: 18px clamp(18px, 3vw, 42px);
@@ -178,6 +189,65 @@ h2 {
 .panel {
   padding: 22px;
   border-bottom: 1px solid #2d3835;
+}
+.usage-meter,
+.agent-usage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px solid #34433f;
+  border-radius: 6px;
+  color: #aebdb8;
+  font-size: 0.72rem;
+}
+.usage-meter strong,
+.agent-usage strong {
+  flex-basis: 100%;
+  color: #e6ece8;
+}
+.export-panel > summary {
+  cursor: pointer;
+  color: #e6ece8;
+  font-weight: 650;
+}
+.export-panel > .muted {
+  margin-top: 10px;
+}
+.export-panel > label,
+.range-row label {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: #9fb1ab;
+  font-size: 0.76rem;
+}
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 7px 0;
+  color: #c1cec9;
+  font-size: 0.76rem;
+}
+.selection-actions,
+.export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+.range-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.preview-grid {
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px solid #34433f;
+  border-radius: 6px;
 }
 .selected-panel h2 {
   font-size: 1.35rem;
