@@ -2,14 +2,23 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  PERSONALITY_MAX_LENGTH,
+  personalitySchema,
   resetSimulationResponseSchema,
+  restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
   singleTurnResponseSchema,
+  updateAgentPersonalityRequestSchema,
+  updateAgentPersonalityResponseSchema,
   type AgentId,
   type AgentTurnRecord,
   type H3Cell,
   type SimulationSnapshot,
 } from '@agentborne/shared';
+import {
+  matchingPersonalityPreset,
+  PERSONALITY_PRESETS,
+} from './personality-presets';
 import { WorldMap } from './world-map';
 
 const latitude = Number(process.env.NEXT_PUBLIC_DEV_MAP_LATITUDE ?? 41.6528);
@@ -25,6 +34,10 @@ export function WorldLab() {
   const [running, setRunning] = useState(false);
   const [inFlight, setInFlight] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [personalityPending, setPersonalityPending] = useState(false);
+  const [personalityNotice, setPersonalityNotice] = useState<string | null>(
+    null,
+  );
   const [speed, setSpeed] = useState(1_000);
   const [uiError, setUiError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
@@ -108,6 +121,89 @@ export function WorldLab() {
     }
   };
 
+  const updatePersonality = async (
+    agentId: AgentId,
+    personality: string,
+  ): Promise<boolean> => {
+    const request = updateAgentPersonalityRequestSchema.safeParse({
+      personality,
+    });
+    if (!request.success) return false;
+    setPersonalityPending(true);
+    setPersonalityNotice(null);
+    setUiError(null);
+    try {
+      const response = await fetch(`${apiBase}/agents/${agentId}/personality`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request.data),
+      });
+      if (response.status === 409) {
+        setUiError(
+          'Personality changes are unavailable until the current turn completes.',
+        );
+        return false;
+      }
+      if (!response.ok) {
+        setUiError('The personality was rejected safely by the Game API.');
+        return false;
+      }
+      const payload = updateAgentPersonalityResponseSchema.parse(
+        await response.json(),
+      );
+      applySnapshot(payload.snapshot);
+      setPersonalityNotice(`${payload.agent.name}'s personality was updated.`);
+      return true;
+    } catch {
+      setUiError(
+        'Personality update failed safely. The existing personality was left intact.',
+      );
+      return false;
+    } finally {
+      setPersonalityPending(false);
+    }
+  };
+
+  const restoreDefaultPersonalities = async () => {
+    if (
+      !window.confirm(
+        'Restore the original personalities for all six agents? World progress will be preserved.',
+      )
+    )
+      return;
+    setPersonalityPending(true);
+    setPersonalityNotice(null);
+    setUiError(null);
+    try {
+      const response = await fetch(
+        `${apiBase}/personalities/restore-defaults`,
+        {
+          method: 'POST',
+        },
+      );
+      if (response.status === 409) {
+        setUiError(
+          'Default personalities cannot be restored until the current turn completes.',
+        );
+        return;
+      }
+      if (!response.ok) throw new Error('restore personalities failed');
+      const payload = restoreDefaultPersonalitiesResponseSchema.parse(
+        await response.json(),
+      );
+      applySnapshot(payload.snapshot);
+      setPersonalityNotice(
+        'Default personalities restored. World progress was preserved.',
+      );
+    } catch {
+      setUiError(
+        'Restoring default personalities failed safely. Existing configuration was left intact.',
+      );
+    } finally {
+      setPersonalityPending(false);
+    }
+  };
+
   if (!snapshot) {
     return (
       <main className="loading-state">
@@ -139,6 +235,12 @@ export function WorldLab() {
   const nextAgent = snapshot.world.agents.find(
     ({ id }) => id === snapshot.nextAgentId,
   );
+  const personalityControlsDisabled =
+    running ||
+    inFlight ||
+    resetting ||
+    personalityPending ||
+    snapshot.activeAgentId !== null;
 
   return (
     <main>
@@ -193,7 +295,11 @@ export function WorldLab() {
                 </button>
               ) : (
                 <button
-                  disabled={inFlight || !snapshot.providerConfigured}
+                  disabled={
+                    inFlight ||
+                    personalityPending ||
+                    !snapshot.providerConfigured
+                  }
                   type="button"
                   onClick={() => setRunning(true)}
                 >
@@ -201,20 +307,33 @@ export function WorldLab() {
                 </button>
               )}
               <button
-                disabled={inFlight || running || !snapshot.providerConfigured}
+                disabled={
+                  inFlight ||
+                  running ||
+                  personalityPending ||
+                  !snapshot.providerConfigured
+                }
                 type="button"
                 onClick={() => void executeTurn()}
               >
                 Single turn
               </button>
               <button
-                disabled={inFlight || resetting}
+                disabled={inFlight || resetting || personalityPending}
                 type="button"
                 onClick={() => void reset()}
               >
-                Reset
+                Reset world
               </button>
             </div>
+            <button
+              className="secondary-action"
+              disabled={personalityControlsDisabled}
+              type="button"
+              onClick={() => void restoreDefaultPersonalities()}
+            >
+              Restore default personalities
+            </button>
             <label className="speed-control">
               Playback speed
               <select
@@ -238,10 +357,16 @@ export function WorldLab() {
                 {uiError}
               </p>
             )}
+            {personalityNotice && (
+              <p className="callout success" role="status">
+                {personalityNotice}
+              </p>
+            )}
           </section>
 
           {selectedAgent && (
             <AgentInspector
+              key={`${selectedAgent.id}:${selectedAgent.personality}`}
               agent={selectedAgent}
               cellState={
                 snapshot.world.hexes.find(
@@ -252,6 +377,9 @@ export function WorldLab() {
               turns={snapshot.turns.filter(
                 ({ agentId }) => agentId === selectedAgent.id,
               )}
+              mutationDisabled={personalityControlsDisabled}
+              mutationPending={personalityPending}
+              onApplyPersonality={updatePersonality}
             />
           )}
 
@@ -287,12 +415,40 @@ function AgentInspector({
   cellState,
   latestTurn,
   turns,
+  mutationDisabled,
+  mutationPending,
+  onApplyPersonality,
 }: {
   agent: SimulationSnapshot['world']['agents'][number];
   cellState: 'open' | 'infected';
   latestTurn?: AgentTurnRecord;
   turns: AgentTurnRecord[];
+  mutationDisabled: boolean;
+  mutationPending: boolean;
+  onApplyPersonality: (
+    agentId: AgentId,
+    personality: string,
+  ) => Promise<boolean>;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(agent.personality);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const draftPreset = matchingPersonalityPreset(draft);
+  const activePreset = matchingPersonalityPreset(agent.personality);
+
+  const apply = async () => {
+    const parsed = personalitySchema.safeParse(draft);
+    if (!parsed.success) {
+      setEditError(
+        `Enter a personality between 1 and ${PERSONALITY_MAX_LENGTH} characters.`,
+      );
+      return;
+    }
+    setEditError(null);
+    if (await onApplyPersonality(agent.id, parsed.data)) setEditing(false);
+  };
+
   return (
     <section className="panel agent-inspector" aria-label="Agent inspector">
       <p className="panel-kicker">Agent inspector</p>
@@ -318,8 +474,105 @@ function AgentInspector({
           <dd>{cellState}</dd>
         </div>
       </dl>
-      <h3>Personality</h3>
-      <p>{agent.personality}</p>
+      <div className="personality-heading">
+        <h3>Active personality</h3>
+        {!editing && (
+          <button
+            disabled={mutationDisabled}
+            type="button"
+            onClick={() => {
+              setDraft(agent.personality);
+              setEditError(null);
+              setEditing(true);
+            }}
+          >
+            Edit
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <div className="personality-editor">
+          <label>
+            Personality preset
+            <select
+              disabled={mutationDisabled}
+              value={draftPreset?.id ?? 'custom'}
+              onChange={(event) => {
+                const preset = PERSONALITY_PRESETS.find(
+                  ({ id }) => id === event.target.value,
+                );
+                if (preset) {
+                  setDraft(preset.personality);
+                  setEditError(null);
+                }
+              }}
+            >
+              <option value="custom">Custom</option>
+              {PERSONALITY_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Personality directive
+            <textarea
+              aria-describedby="personality-character-count personality-edit-help"
+              disabled={mutationDisabled}
+              maxLength={PERSONALITY_MAX_LENGTH}
+              rows={6}
+              value={draft}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                setEditError(null);
+              }}
+            />
+          </label>
+          <div className="editor-meta">
+            <span id="personality-edit-help">
+              Presets populate the editor; Apply commits the change.
+            </span>
+            <span id="personality-character-count">
+              {draft.length}/{PERSONALITY_MAX_LENGTH}
+            </span>
+          </div>
+          {editError && (
+            <p className="inline-error" role="alert">
+              {editError}
+            </p>
+          )}
+          <div className="editor-actions">
+            <button
+              disabled={mutationDisabled}
+              type="button"
+              onClick={() => void apply()}
+            >
+              {mutationPending ? 'Applying…' : 'Apply'}
+            </button>
+            <button
+              disabled={mutationPending}
+              type="button"
+              onClick={() => {
+                setEditing(false);
+                setDraft(agent.personality);
+                setEditError(null);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div
+          aria-label="Active personality configuration"
+          className="active-personality"
+          role="group"
+        >
+          <p>{agent.personality}</p>
+          <span>{activePreset?.name ?? 'Custom'}</span>
+        </div>
+      )}
       {latestTurn ? (
         <div className="turn-detail">
           <h3>Latest turn</h3>
@@ -361,6 +614,19 @@ function AgentInspector({
           )}
           <details>
             <summary>Latest structured observation</summary>
+            <p className="observation-note">
+              Immutable input supplied for turn {latestTurn.turnNumber}. It is
+              not rewritten when the active personality changes.
+            </p>
+            {latestTurn.observation.personality !== agent.personality && (
+              <p className="observation-difference">
+                The active personality has changed since this observation.
+              </p>
+            )}
+            <p>
+              <strong>Observed personality:</strong>{' '}
+              {latestTurn.observation.personality}
+            </p>
             <p>
               Current: {latestTurn.observation.currentCell.cell} (
               {latestTurn.observation.currentCell.state})

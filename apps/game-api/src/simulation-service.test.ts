@@ -6,14 +6,17 @@ import {
   type ProviderDecision,
 } from '@agentborne/agent-runtime';
 import {
+  PERSONALITY_MAX_LENGTH,
   h3CellSchema,
   type AgentObservation,
   type AgentTurnRecord,
   type WorldEvent,
 } from '@agentborne/shared';
+import { DEVELOPMENT_AGENT_BLUEPRINTS } from '@agentborne/world-engine';
 import {
   SimulationConflictError,
   SimulationService,
+  SimulationValidationError,
 } from './simulation-service';
 
 const now = () => '2026-08-13T12:00:01.000Z';
@@ -115,6 +118,140 @@ describe('SimulationService', () => {
     const second = await simulation.executeNextTurn();
     expect(second.observation.recentEvents).toHaveLength(1);
     expect(second.observation.recentEvents[0]?.type).toBe('hex-infected');
+  });
+
+  it('updates an existing agent and uses the trimmed personality on its next turn', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'Use the edit.' },
+      ]),
+    );
+    const agent = simulation.getSnapshot().world.agents[0]!;
+    const updated = simulation.updateAgentPersonality(
+      agent.id,
+      '  Prioritize adjacent open cells.  ',
+    );
+    expect(updated).toMatchObject({
+      id: agent.id,
+      personality: 'Prioritize adjacent open cells.',
+    });
+    expect((await simulation.executeNextTurn()).observation.personality).toBe(
+      'Prioritize adjacent open cells.',
+    );
+  });
+
+  it('rejects unknown agents and invalid personalities without mutation, then recovers', () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+      ]),
+    );
+    const before = simulation.getSnapshot();
+    expect(() =>
+      simulation.updateAgentPersonality(
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        'Valid personality.',
+      ),
+    ).toThrow(SimulationValidationError);
+    expect(() =>
+      simulation.updateAgentPersonality(before.world.agents[0]!.id, '   '),
+    ).toThrow(SimulationValidationError);
+    expect(() =>
+      simulation.updateAgentPersonality(
+        before.world.agents[0]!.id,
+        'x'.repeat(PERSONALITY_MAX_LENGTH + 1),
+      ),
+    ).toThrow(SimulationValidationError);
+    expect(simulation.getSnapshot()).toEqual(before);
+
+    simulation.updateAgentPersonality(
+      before.world.agents[0]!.id,
+      'Recovered personality.',
+    );
+    expect(simulation.getSnapshot().world.agents[0]!.personality).toBe(
+      'Recovered personality.',
+    );
+  });
+
+  it('edits personality without changing world progress or historical observations', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+      ]),
+    );
+    await simulation.executeNextTurn();
+    const before = simulation.getSnapshot();
+    const agent = before.world.agents[0]!;
+    simulation.updateAgentPersonality(agent.id, 'A new active personality.');
+    const after = simulation.getSnapshot();
+
+    expect(after.world.hexes).toEqual(before.world.hexes);
+    expect(after.world.events).toEqual(before.world.events);
+    expect(after.world.agents.map(({ currentCell }) => currentCell)).toEqual(
+      before.world.agents.map(({ currentCell }) => currentCell),
+    );
+    expect(
+      after.world.agents.map(({ id, name, color }) => ({ id, name, color })),
+    ).toEqual(
+      before.world.agents.map(({ id, name, color }) => ({ id, name, color })),
+    );
+    expect(after.turns).toEqual(before.turns);
+    expect(after.turns[0]!.observation.personality).toBe(agent.personality);
+    expect(after.turnNumber).toBe(before.turnNumber);
+    expect(after.nextAgentId).toBe(before.nextAgentId);
+  });
+
+  it('reset preserves active personality edits while restoring deterministic progress', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+      ]),
+    );
+    const initial = simulation.getSnapshot();
+    for (const agent of initial.world.agents) {
+      simulation.updateAgentPersonality(
+        agent.id,
+        `Preserve ${agent.name}'s edit.`,
+      );
+    }
+    await simulation.executeNextTurn();
+    const reset = simulation.reset();
+
+    expect(reset).toMatchObject({ turnNumber: 0, turns: [] });
+    expect(reset.world.events).toEqual([]);
+    expect(reset.world.hexes).toEqual(initial.world.hexes);
+    expect(reset.world.agents.map(({ currentCell }) => currentCell)).toEqual(
+      initial.world.agents.map(({ currentCell }) => currentCell),
+    );
+    expect(reset.world.agents.map(({ personality }) => personality)).toEqual(
+      initial.world.agents.map(({ name }) => `Preserve ${name}'s edit.`),
+    );
+  });
+
+  it('restores all six defaults without resetting current world progress', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+      ]),
+    );
+    for (const agent of simulation.getSnapshot().world.agents) {
+      simulation.updateAgentPersonality(agent.id, `Custom ${agent.name}.`);
+    }
+    await simulation.executeNextTurn();
+    const before = simulation.getSnapshot();
+    const restored = simulation.restoreDefaultPersonalities();
+
+    expect(restored.world.agents.map(({ personality }) => personality)).toEqual(
+      DEVELOPMENT_AGENT_BLUEPRINTS.map(({ personality }) => personality),
+    );
+    expect(restored.world.hexes).toEqual(before.world.hexes);
+    expect(restored.world.events).toEqual(before.world.events);
+    expect(restored.turns).toEqual(before.turns);
+    expect(restored.turnNumber).toBe(before.turnNumber);
+    expect(restored.nextAgentId).toBe(before.nextAgentId);
+    expect(restored.world.agents.map(({ currentCell }) => currentCell)).toEqual(
+      before.world.agents.map(({ currentCell }) => currentCell),
+    );
   });
 
   it('records accepted and rejected actions without mutating on rejection', async () => {
@@ -332,6 +469,15 @@ describe('SimulationService', () => {
       SimulationConflictError,
     );
     expect(() => simulation.reset()).toThrow(SimulationConflictError);
+    expect(() =>
+      simulation.updateAgentPersonality(
+        simulation.getSnapshot().world.agents[0]!.id,
+        'Blocked edit.',
+      ),
+    ).toThrow(SimulationConflictError);
+    expect(() => simulation.restoreDefaultPersonalities()).toThrow(
+      SimulationConflictError,
+    );
     release({
       decision: { requestedAction: { type: 'wait' }, summary: 'Done.' },
       metadata: {

@@ -8,6 +8,7 @@ import {
 } from '@agentborne/shared';
 import { createDevelopmentWorld } from '@agentborne/world-engine';
 import { WorldLab } from './world-lab';
+import { PERSONALITY_PRESETS } from './personality-presets';
 
 const mapLibreMock = vi.hoisted(() => ({
   renderMode: 'complete' as 'complete' | 'incomplete',
@@ -235,6 +236,22 @@ function jsonResponse(value: unknown) {
   return Promise.resolve(new Response(JSON.stringify(value), { status: 200 }));
 }
 
+function withPersonality(
+  snapshot: SimulationSnapshot,
+  agentId: string,
+  personality: string,
+): SimulationSnapshot {
+  return simulationSnapshotSchema.parse({
+    ...snapshot,
+    world: {
+      ...snapshot.world,
+      agents: snapshot.world.agents.map((agent) =>
+        agent.id === agentId ? { ...agent, personality } : agent,
+      ),
+    },
+  });
+}
+
 beforeEach(() => {
   mapLibreMock.renderMode = 'complete';
   mapLibreMock.rejectSource = false;
@@ -276,7 +293,10 @@ describe('WorldLab', () => {
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Single turn' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Reset' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Reset world' })).toBeEnabled();
+    expect(
+      screen.getByRole('button', { name: 'Restore default personalities' }),
+    ).toBeEnabled();
     expect(screen.getByLabelText('Playback speed')).toBeInTheDocument();
     expect(
       screen.getAllByRole('button', { name: /Select agent/ }),
@@ -451,7 +471,7 @@ describe('WorldLab', () => {
     expect(
       await screen.findByText('Infection · ' + world.agents[0]!.currentCell),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Reset' }));
+    await user.click(screen.getByRole('button', { name: 'Reset world' }));
     await waitFor(() =>
       expect(
         screen.getByText('Development world loaded with six agents.'),
@@ -497,4 +517,248 @@ describe('WorldLab', () => {
     expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Single turn' })).toBeDisabled();
   });
+
+  it('enters and cancels explicit personality editing without a request', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const textarea = screen.getByRole('textbox', {
+      name: 'Personality directive',
+    });
+    expect(textarea).toHaveValue(world.agents[0]!.personality);
+    await user.type(textarea, ' unsaved');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(screen.getByText(world.agents[0]!.personality)).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies a trimmed custom personality only after Apply', async () => {
+    const custom = 'Choose open adjacent cells before waiting.';
+    const changed = withPersonality(initial, world.agents[0]!.id, custom);
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementationOnce(() => jsonResponse(initial))
+        .mockImplementationOnce(() =>
+          jsonResponse({ snapshot: changed, agent: changed.world.agents[0] }),
+        ),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const textarea = screen.getByRole('textbox', {
+      name: 'Personality directive',
+    });
+    await user.clear(textarea);
+    await user.type(textarea, `  ${custom}  `);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(await screen.findByText(custom)).toBeInTheDocument();
+    expect(screen.getByText('Custom')).toBeInTheDocument();
+    expect(fetch).toHaveBeenLastCalledWith(
+      `${apiBaseForTest()}/agents/${world.agents[0]!.id}/personality`,
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ personality: custom }),
+      }),
+    );
+  });
+
+  it.each(PERSONALITY_PRESETS)(
+    'selects and applies the $name preset explicitly',
+    async (preset) => {
+      const changed = withPersonality(
+        initial,
+        world.agents[0]!.id,
+        preset.personality,
+      );
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockImplementationOnce(() => jsonResponse(initial))
+          .mockImplementationOnce(() =>
+            jsonResponse({
+              snapshot: changed,
+              agent: changed.world.agents[0],
+            }),
+          ),
+      );
+      const user = userEvent.setup();
+      render(<WorldLab />);
+      await user.click(await screen.findByRole('button', { name: 'Edit' }));
+      await user.selectOptions(
+        screen.getByLabelText('Personality preset'),
+        preset.id,
+      );
+      expect(
+        screen.getByRole('textbox', { name: 'Personality directive' }),
+      ).toHaveValue(preset.personality);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await user.click(screen.getByRole('button', { name: 'Apply' }));
+      expect(await screen.findByText(preset.personality)).toBeInTheDocument();
+      expect(screen.getByText(preset.name)).toBeInTheDocument();
+    },
+  );
+
+  it('shows character count, empty validation, and Custom preset state', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const textarea = screen.getByRole('textbox', {
+      name: 'Personality directive',
+    });
+    expect(
+      screen.getByText(`${world.agents[0]!.personality.length}/600`),
+    ).toBeInTheDocument();
+    expect(textarea).toHaveAttribute('maxlength', '600');
+    expect(screen.getByLabelText('Personality preset')).toHaveValue('custom');
+    await user.clear(textarea);
+    expect(screen.getByText('0/600')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Enter a personality between 1 and 600 characters.',
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables personality mutations during playback and pending requests', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    await user.click(screen.getByRole('button', { name: 'Start' }));
+    expect(
+      screen.getByRole('textbox', { name: 'Personality directive' }),
+    ).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Restore default personalities' }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Pause' }));
+
+    let resolveUpdate!: (response: Response) => void;
+    vi.mocked(fetch).mockImplementationOnce(
+      () => new Promise((resolve) => (resolveUpdate = resolve)),
+    );
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(screen.getByRole('button', { name: 'Applying…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reset world' })).toBeDisabled();
+    resolveUpdate(
+      new Response(
+        JSON.stringify({ snapshot: initial, agent: initial.world.agents[0] }),
+        { status: 200 },
+      ),
+    );
+    await screen.findByRole('button', { name: 'Edit' });
+  });
+
+  it('keeps an edited personality through world reset', async () => {
+    const edited = withPersonality(
+      afterInfection(),
+      world.agents[0]!.id,
+      'Persistent lab edit.',
+    );
+    const resetWithEdit = withPersonality(
+      initial,
+      world.agents[0]!.id,
+      'Persistent lab edit.',
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementationOnce(() => jsonResponse(edited))
+        .mockImplementationOnce(() =>
+          jsonResponse({ snapshot: resetWithEdit }),
+        ),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Reset world' }),
+    );
+    expect(await screen.findByText('Persistent lab edit.')).toBeInTheDocument();
+    expect(screen.getByText('Turn 0')).toBeInTheDocument();
+  });
+
+  it('confirms restoring defaults and preserves current world progress', async () => {
+    const progressed = withPersonality(
+      afterInfection(),
+      world.agents[0]!.id,
+      'Temporary edit.',
+    );
+    const restored = simulationSnapshotSchema.parse({
+      ...progressed,
+      world: {
+        ...progressed.world,
+        agents: progressed.world.agents.map((agent, index) => ({
+          ...agent,
+          personality: world.agents[index]!.personality,
+        })),
+      },
+    });
+    const confirm = vi
+      .fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    vi.stubGlobal('confirm', confirm);
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementationOnce(() => jsonResponse(progressed))
+        .mockImplementationOnce(() => jsonResponse({ snapshot: restored })),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    const restore = await screen.findByRole('button', {
+      name: 'Restore default personalities',
+    });
+    await user.click(restore);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await user.click(restore);
+    expect(
+      await screen.findByRole('group', {
+        name: 'Active personality configuration',
+      }),
+    ).toHaveTextContent(world.agents[0]!.personality);
+    expect(screen.getByText('Turn 1')).toBeInTheDocument();
+    expect(screen.getByTestId('infected-count')).toHaveTextContent(
+      '1 rendered infected',
+    );
+    expect(confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('distinguishes an active edit from the immutable latest observation', async () => {
+    const changed = withPersonality(
+      afterInfection(),
+      world.agents[0]!.id,
+      'New active personality.',
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(changed)),
+    );
+    render(<WorldLab />);
+    expect(
+      await screen.findByText('New active personality.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(world.agents[0]!.personality, { exact: true }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Immutable input supplied for turn 1/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'The active personality has changed since this observation.',
+      ),
+    ).toBeInTheDocument();
+  });
 });
+
+function apiBaseForTest() {
+  return process.env.NEXT_PUBLIC_GAME_API_BASE_URL ?? '/api/game/simulation';
+}
