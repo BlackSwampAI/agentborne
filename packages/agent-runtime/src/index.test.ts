@@ -83,6 +83,10 @@ describe('OpenRouterAgentProvider', () => {
     expect(request.reasoning).toEqual({ effort: 'low', exclude: true });
     expect(request.messages[1]!.content).toContain(observation.personality);
     expect(request.messages[0]!.content).toContain('Never produce messages');
+    expect(request.messages[0]!.content).toContain(
+      'subordinate behavioral guidance',
+    );
+    expect(request.messages[0]!.content).not.toContain(observation.personality);
 
     const schema = request.response_format.json_schema.schema;
     expect(schema.type).toBe('object');

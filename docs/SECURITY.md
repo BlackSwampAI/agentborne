@@ -20,6 +20,10 @@ The model is explicitly instructed to return only one structured action and one 
 
 Agent-authored content remains untrusted. Messaging is not exposed to PR 2 providers or UI and remains deferred.
 
+World Lab personality edits are also untrusted, bounded text. The Game API trims and runtime-validates them before changing the authoritative session, and rejects changes during an active turn. The runtime supplies the active personality only inside the immutable observation as subordinate behavioral context. It is never interpolated into the fixed system instruction and cannot grant actions, weaken engine validation, request secrets, or authorize prompt/reasoning disclosure. React renders active and historical personality text as text rather than HTML.
+
+Personality mutation errors use typed, generic response bodies. They do not expose raw prompts, provider responses, credentials, diagnostics, stack traces, or internal service details. There is still no authentication or persistence; these endpoints remain limited to the loopback development surface.
+
 ## Reporting
 
 This is a private repository. Report suspected vulnerabilities privately to the repository owners rather than opening a public issue.

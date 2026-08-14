@@ -5,10 +5,14 @@ import {
   type ProviderDecision,
 } from '@agentborne/agent-runtime';
 import {
+  agentIdSchema,
   agentObservationSchema,
   agentTurnRecordSchema,
   h3CellSchema,
+  PERSONALITY_MAX_LENGTH,
+  personalitySchema,
   simulationSnapshotSchema,
+  type Agent,
   type AgentId,
   type AgentObservation,
   type AgentTurnRecord,
@@ -21,6 +25,7 @@ import {
 import {
   applyRequestedAction,
   createDevelopmentWorld,
+  DEVELOPMENT_AGENT_BLUEPRINTS,
   toWorldState,
   type WorldState,
 } from '@agentborne/world-engine';
@@ -33,6 +38,19 @@ export class SimulationConflictError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'SimulationConflictError';
+  }
+}
+
+export type SimulationValidationCode =
+  'invalid_agent_id' | 'unknown_agent' | 'invalid_personality';
+
+export class SimulationValidationError extends Error {
+  constructor(
+    readonly code: SimulationValidationCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SimulationValidationError';
   }
 }
 
@@ -96,14 +114,90 @@ export class SimulationService {
       );
     }
     this.#status = 'resetting';
-    this.#state = toWorldState(
+    const activePersonalities = new Map(
+      [...this.#state.agents].map(([id, agent]) => [id, agent.personality]),
+    );
+    const resetState = toWorldState(
       createDevelopmentWorld({ generatedAt: RESET_GENERATED_AT }),
     );
+    this.#state = {
+      ...resetState,
+      agents: new Map(
+        [...resetState.agents].map(([id, agent]) => [
+          id,
+          {
+            ...agent,
+            personality: activePersonalities.get(id) ?? agent.personality,
+          },
+        ]),
+      ),
+    };
     this.#turns = [];
     this.#completedTurnCount = 0;
     this.#cursor = 0;
     this.#activeAgentId = null;
     this.#status = this.#provider.configured ? 'paused' : 'configuration-error';
+    return this.getSnapshot();
+  }
+
+  updateAgentPersonality(
+    agentIdInput: unknown,
+    personalityInput: unknown,
+  ): Agent {
+    if (this.#busy) {
+      throw new SimulationConflictError(
+        'Personality changes are unavailable while a model turn is in progress.',
+      );
+    }
+    const agentIdResult = agentIdSchema.safeParse(agentIdInput);
+    if (!agentIdResult.success) {
+      throw new SimulationValidationError(
+        'invalid_agent_id',
+        'The agent ID is invalid.',
+      );
+    }
+    const personalityResult = personalitySchema.safeParse(personalityInput);
+    if (!personalityResult.success) {
+      throw new SimulationValidationError(
+        'invalid_personality',
+        `Personality must contain 1 to ${PERSONALITY_MAX_LENGTH} characters.`,
+      );
+    }
+    const agent = this.#state.agents.get(agentIdResult.data);
+    if (!agent) {
+      throw new SimulationValidationError(
+        'unknown_agent',
+        'The requested agent does not exist.',
+      );
+    }
+    const updated = { ...agent, personality: personalityResult.data };
+    const agents = new Map(this.#state.agents);
+    agents.set(agent.id, updated);
+    this.#state = { ...this.#state, agents };
+    return updated;
+  }
+
+  restoreDefaultPersonalities(): SimulationSnapshot {
+    if (this.#busy) {
+      throw new SimulationConflictError(
+        'Personality changes are unavailable while a model turn is in progress.',
+      );
+    }
+    const defaults = new Map(
+      DEVELOPMENT_AGENT_BLUEPRINTS.map(({ id, personality }) => [
+        agentIdSchema.parse(id),
+        personality,
+      ]),
+    );
+    this.#state = {
+      ...this.#state,
+      agents: new Map(
+        [...this.#state.agents].map(([id, agent]) => [
+          id,
+          { ...agent, personality: defaults.get(id) ?? agent.personality },
+        ]),
+      ),
+    };
     return this.getSnapshot();
   }
 

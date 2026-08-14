@@ -8,15 +8,20 @@ import {
 } from '@agentborne/agent-runtime';
 import {
   apiErrorSchema,
+  PERSONALITY_MAX_LENGTH,
   resetSimulationResponseSchema,
+  restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
   singleTurnResponseSchema,
+  updateAgentPersonalityRequestSchema,
+  updateAgentPersonalityResponseSchema,
   worldSnapshotSchema,
 } from '@agentborne/shared';
 import { createDevelopmentWorld } from '@agentborne/world-engine';
 import {
   SimulationConflictError,
   SimulationService,
+  SimulationValidationError,
 } from './simulation-service';
 
 export const healthResponseSchema = worldSnapshotSchema
@@ -107,6 +112,73 @@ export function createApp(options: AppOptions = {}) {
         return context.json(
           apiErrorSchema.parse({
             error: { code: 'reset_conflict', message: error.message },
+          }),
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
+  app.post('/api/simulation/agents/:agentId/personality', async (context) => {
+    const request = updateAgentPersonalityRequestSchema.safeParse(
+      await context.req.json().catch(() => undefined),
+    );
+    if (!request.success) {
+      return context.json(
+        apiErrorSchema.parse({
+          error: {
+            code: 'invalid_personality',
+            message: `Personality must contain 1 to ${PERSONALITY_MAX_LENGTH} characters.`,
+          },
+        }),
+        400,
+      );
+    }
+    try {
+      const agent = service.updateAgentPersonality(
+        context.req.param('agentId'),
+        request.data.personality,
+      );
+      return context.json(
+        updateAgentPersonalityResponseSchema.parse({
+          snapshot: service.getSnapshot(),
+          agent,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SimulationConflictError) {
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'personality_conflict', message: error.message },
+          }),
+          409,
+        );
+      }
+      if (error instanceof SimulationValidationError) {
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: error.code, message: error.message },
+          }),
+          error.code === 'unknown_agent' ? 404 : 400,
+        );
+      }
+      throw error;
+    }
+  });
+
+  app.post('/api/simulation/personalities/restore-defaults', (context) => {
+    try {
+      return context.json(
+        restoreDefaultPersonalitiesResponseSchema.parse({
+          snapshot: service.restoreDefaultPersonalities(),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SimulationConflictError) {
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'personality_conflict', message: error.message },
           }),
           409,
         );

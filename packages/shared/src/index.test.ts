@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   MODEL_SUMMARY_MAX_LENGTH,
+  PERSONALITY_MAX_LENGTH,
+  apiErrorSchema,
   agentDecisionSchema,
   agentObservationSchema,
   agentTurnRecordSchema,
+  restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
+  updateAgentPersonalityRequestSchema,
+  updateAgentPersonalityResponseSchema,
 } from '.';
 
 const agentId = '128f3f38-6b7d-4db7-9e95-751b4ce2681e';
@@ -37,6 +42,28 @@ const event = {
   occurredAt: '2026-08-13T12:00:01.000Z',
   type: 'hex-infected',
   cell,
+};
+const worldAgent = {
+  id: agentId,
+  name: 'Ember',
+  color: '#ff6b57',
+  personality: 'Prefer infection.',
+  currentCell: cell,
+};
+const snapshot = {
+  world: {
+    generatedAt: '2026-08-13T12:00:00.000Z',
+    hexes: [{ cell, state: 'open' }],
+    agents: [worldAgent],
+    events: [],
+  },
+  turnNumber: 0,
+  nextAgentId: agentId,
+  activeAgentId: null,
+  status: 'paused',
+  providerMode: 'openrouter',
+  providerConfigured: true,
+  turns: [],
 };
 
 describe('agent observation and decision schemas', () => {
@@ -124,28 +151,6 @@ describe('turn and snapshot schemas', () => {
   });
 
   it('validates a complete API snapshot and rejects unbounded histories', () => {
-    const worldAgent = {
-      id: agentId,
-      name: 'Ember',
-      color: '#ff6b57',
-      personality: 'Prefer infection.',
-      currentCell: cell,
-    };
-    const snapshot = {
-      world: {
-        generatedAt: '2026-08-13T12:00:00.000Z',
-        hexes: [{ cell, state: 'open' }],
-        agents: [worldAgent],
-        events: [],
-      },
-      turnNumber: 0,
-      nextAgentId: agentId,
-      activeAgentId: null,
-      status: 'paused',
-      providerMode: 'openrouter',
-      providerConfigured: true,
-      turns: [],
-    };
     const validTurn = {
       ...baseTurn,
       outcome: 'accepted',
@@ -169,6 +174,53 @@ describe('turn and snapshot schemas', () => {
           ...snapshot.world,
           events: Array(121).fill(event),
         },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('personality mutation contracts', () => {
+  it('trims a valid update and validates its response', () => {
+    const request = updateAgentPersonalityRequestSchema.parse({
+      personality: '  Seek open adjacent cells.  ',
+    });
+    expect(request).toEqual({ personality: 'Seek open adjacent cells.' });
+    expect(
+      updateAgentPersonalityResponseSchema.safeParse({
+        snapshot,
+        agent: { ...worldAgent, personality: request.personality },
+      }).success,
+    ).toBe(true);
+  });
+
+  it.each([
+    { personality: '' },
+    { personality: '   ' },
+    { personality: 'x'.repeat(PERSONALITY_MAX_LENGTH + 1) },
+    { personality: 42 },
+    { personality: 'Valid.', unexpected: true },
+    null,
+  ])('rejects empty, oversized, or malformed updates', (request) => {
+    expect(updateAgentPersonalityRequestSchema.safeParse(request).success).toBe(
+      false,
+    );
+  });
+
+  it('validates restore-default responses and typed safe errors', () => {
+    expect(
+      restoreDefaultPersonalitiesResponseSchema.safeParse({ snapshot }).success,
+    ).toBe(true);
+    expect(
+      apiErrorSchema.safeParse({
+        error: {
+          code: 'personality_conflict',
+          message: 'A turn is active.',
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      apiErrorSchema.safeParse({
+        error: { code: 'provider_secret', message: 'unsafe' },
       }).success,
     ).toBe(false);
   });

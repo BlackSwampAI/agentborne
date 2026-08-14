@@ -22,7 +22,8 @@ body {
 }
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -264,6 +265,19 @@ dd {
   color: #71807b;
   cursor: not-allowed;
 }
+.secondary-action {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid #394642;
+  border-radius: 5px;
+  color: #bdcbc6;
+  background: transparent;
+  cursor: pointer;
+}
+.secondary-action:disabled {
+  color: #71807b;
+  cursor: not-allowed;
+}
 .next-agent {
   color: #9aaba5;
   font-size: 0.8rem;
@@ -296,6 +310,11 @@ dd {
   background: #3c2421;
   color: #ffc2b8;
 }
+.callout.success {
+  border: 1px solid #35684f;
+  background: #203d31;
+  color: #a9e7c4;
+}
 .agent-inspector h2 {
   display: flex;
   align-items: center;
@@ -309,6 +328,89 @@ dd {
   font-size: 0.74rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+.personality-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 17px;
+}
+.personality-heading h3 {
+  margin: 0;
+}
+.personality-heading button,
+.editor-actions button {
+  padding: 5px 9px;
+  border: 1px solid #465752;
+  border-radius: 5px;
+  color: #dbe7e3;
+  background: #202927;
+  cursor: pointer;
+}
+.personality-heading button:disabled,
+.editor-actions button:disabled {
+  color: #71807b;
+  cursor: not-allowed;
+}
+.active-personality {
+  margin-top: 8px;
+}
+.active-personality p {
+  color: #d1dcd8;
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+.active-personality span {
+  display: inline-block;
+  margin-top: 7px;
+  padding: 2px 7px;
+  border: 1px solid #3c4b47;
+  border-radius: 999px;
+  color: #91a59f;
+  font-size: 0.68rem;
+}
+.personality-editor {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+.personality-editor label {
+  display: grid;
+  gap: 5px;
+  color: #aab9b4;
+  font-size: 0.74rem;
+}
+.personality-editor select,
+.personality-editor textarea {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #43524e;
+  border-radius: 5px;
+  background: #111816;
+  color: #e0e9e6;
+}
+.personality-editor textarea {
+  resize: vertical;
+  line-height: 1.45;
+}
+.editor-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #81928c;
+  font-size: 0.68rem;
+}
+.editor-meta span:last-child {
+  flex: 0 0 auto;
+}
+.editor-actions {
+  display: flex;
+  gap: 7px;
+}
+.inline-error {
+  color: #ffafa3 !important;
+  font-size: 0.74rem !important;
 }
 .agent-inspector > p,
 .turn-detail p,
@@ -351,6 +453,13 @@ dd {
 .turn-detail details p {
   margin-top: 6px;
   overflow-wrap: anywhere;
+}
+.observation-note {
+  color: #8fa19b !important;
+  font-style: italic;
+}
+.observation-difference {
+  color: #ffd58a !important;
 }
 .compact-history {
   margin: 0;

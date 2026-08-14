@@ -1,6 +1,6 @@
 # Architecture
 
-The PR 2 vertical slice preserves a one-way trust boundary:
+The PR 3 Personality Lab slice preserves a one-way trust boundary:
 
 ```text
 World Lab → Game API / simulation service → agent runtime → requested action
@@ -17,12 +17,18 @@ World Lab → Game API / simulation service → agent runtime → requested acti
 - `GET /api/simulation` — current authoritative snapshot
 - `POST /api/simulation/turn` — one agent observation, one provider decision, one engine application
 - `POST /api/simulation/reset` — deterministic reset, rejected while a turn is active
+- `POST /api/simulation/agents/:agentId/personality` — trim, validate, and replace one active personality
+- `POST /api/simulation/personalities/restore-defaults` — restore all six original personality directives without resetting progress
 
 The legacy `GET /api/development-world` and `GET /health` endpoints remain for low-level diagnostics.
+
+The Game API is authoritative for session personality configuration. The browser never patches a snapshot locally: it displays only a schema-validated mutation response. World reset reconstructs deterministic positions, cells, histories, cursor, and completed-turn count, then reapplies the six current personality values. Restoring personality defaults changes only those six values. Both personality mutations are rejected while the service's turn lock is active.
 
 ## Turn flow
 
 The development world is an H3 radius-four disk (61 cells) around Toledo with six fixed profiles and starting cells. One agent acts per turn in stable array order. The service reads the latest state, constructs and clones a bounded observation, requests one structured decision, validates it with Zod, and passes only the requested action to the world engine.
+
+Names, colors, stable IDs, and starting cells remain fixed. Personality text is mutable session configuration, but each observation copies the active value at turn start. Completed observations and turn records remain immutable, so a newly edited active personality can intentionally differ from the latest historical observation until that agent acts again.
 
 The engine alone accepts or rejects actions and creates world events. Rejections do not mutate state and are not replaced by heuristics. The service schema-validates a complete accepted or rejected turn record before atomically committing its candidate world state, turn record, completed-turn count, and round-robin cursor. Unexpected engine, schema, or internal failures propagate as internal API errors and commit none of those changes; cleanup always returns the service to a coherent idle state.
 
@@ -30,7 +36,7 @@ Only failures thrown by the provider decision call become sanitized provider-fai
 
 ## Packages
 
-`packages/shared` owns all public schemas: profiles, observations, PR 2 decisions, provider metadata/failures, turn outcomes, snapshots, and API responses. Types are inferred from Zod.
+`packages/shared` owns all public schemas: profiles, personality mutation requests/responses, observations, PR 2 decisions, provider metadata/failures, turn outcomes, snapshots, and API responses. Types are inferred from Zod.
 
 `packages/world-engine` remains deterministic and has no model, HTTP, UI, storage, or credential dependency. Its broader domain action union retains range-limited messaging for the established boundary, but PR 2's model decision schema excludes messaging entirely.
 
@@ -39,3 +45,4 @@ Only failures thrown by the provider decision call become sanitized provider-fai
 The provider abort timeout covers the complete response lifecycle, including body reading, JSON decoding, response extraction, and schema validation, and is cleared after every outcome. Non-success responses retain only bounded, sanitized in-process diagnostics for the opt-in CLI smoke; those details do not enter simulation records or API responses. Scripted providers are explicit deterministic seams selected only by tests or `AGENTBORNE_PROVIDER=scripted`; there is no automatic fallback.
 
 The rationale and deferrals are recorded in [ADR 0002](adr/0002-first-visible-llm-invasion.md).
+Personality ownership and reset semantics are recorded in [ADR 0003](adr/0003-session-personality-configuration.md).

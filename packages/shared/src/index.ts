@@ -19,11 +19,17 @@ export type H3Cell = z.infer<typeof h3CellSchema>;
 export const hexStateSchema = z.enum(['open', 'infected']);
 export type HexState = z.infer<typeof hexStateSchema>;
 
+export const personalitySchema = z
+  .string()
+  .trim()
+  .min(1, 'Personality must not be empty.')
+  .max(PERSONALITY_MAX_LENGTH);
+
 export const agentProfileSchema = z.object({
   id: agentIdSchema,
   name: z.string().trim().min(1).max(80),
   color: z.string().regex(/^#[0-9a-f]{6}$/i),
-  personality: z.string().trim().min(1).max(PERSONALITY_MAX_LENGTH),
+  personality: personalitySchema,
   currentCell: h3CellSchema,
 });
 export type AgentProfile = z.infer<typeof agentProfileSchema>;
@@ -252,9 +258,44 @@ export type ResetSimulationResponse = z.infer<
   typeof resetSimulationResponseSchema
 >;
 
+export const updateAgentPersonalityRequestSchema = z
+  .object({ personality: personalitySchema })
+  .strict();
+export type UpdateAgentPersonalityRequest = z.infer<
+  typeof updateAgentPersonalityRequestSchema
+>;
+
+export const updateAgentPersonalityResponseSchema = z.object({
+  snapshot: simulationSnapshotSchema,
+  agent: agentSchema,
+});
+export type UpdateAgentPersonalityResponse = z.infer<
+  typeof updateAgentPersonalityResponseSchema
+>;
+
+export const restoreDefaultPersonalitiesResponseSchema = z.object({
+  snapshot: simulationSnapshotSchema,
+});
+export type RestoreDefaultPersonalitiesResponse = z.infer<
+  typeof restoreDefaultPersonalitiesResponseSchema
+>;
+
+export const apiErrorCodeSchema = z.enum([
+  'turn_conflict',
+  'reset_conflict',
+  'personality_conflict',
+  'invalid_agent_id',
+  'unknown_agent',
+  'invalid_personality',
+  'invalid_request',
+  'not_found',
+  'internal_error',
+]);
+export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
+
 export const apiErrorSchema = z.object({
   error: z.object({
-    code: z.string().min(1).max(80),
+    code: apiErrorCodeSchema,
     message: z.string().min(1).max(300),
   }),
 });
