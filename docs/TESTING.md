@@ -2,6 +2,8 @@
 
 Default validation is deterministic, offline except for dependency/browser installation and the World Lab basemap requested during manual viewing. No test calls a model provider.
 
+Coding agents write and update appropriate tests, configure automatic GitHub CI, and provide exact validation commands. The repository owner runs local formatting, lint, type checking, tests, builds, and Playwright unless they explicitly request an agent to run validation in that session. Agents may inspect automatic CI after a branch is pushed, but must not claim local checks passed unless the owner supplied the results.
+
 ## Local sequence
 
 ```bash
@@ -22,6 +24,8 @@ development server on another port, run for example
 `PLAYWRIGHT_BASE_URL=http://127.0.0.1:3001 pnpm test:e2e`.
 
 `pnpm validate` aggregates formatting, lint, type checking, unit/integration tests, and builds. Browser smoke coverage remains separate because it installs and starts Chromium.
+
+The World Lab typecheck runs `next typegen` before TypeScript. Next.js manages `apps/world-lab/next-env.d.ts`; the file remains in `tsconfig.json` but is ignored by Git so development, builds, and type generation can recreate it without dirtying the working tree.
 
 ## Layers
 

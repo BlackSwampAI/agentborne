@@ -29,4 +29,7 @@ These instructions apply throughout the repository.
 - Update architecture, security, testing, and roadmap docs when changing the corresponding contract.
 - Do not commit `.env` files, credentials, generated build output, test reports, or caches.
 - Use Conventional Commit messages. Keep pull requests within one roadmap milestone.
-- Before handing off a change, run `pnpm validate`; run `pnpm test:e2e` for World Lab behavior changes.
+- Coding agents write and update appropriate tests, configure automatic GitHub CI, and provide the exact local validation commands for the repository owner to run.
+- The repository owner runs local formatting checks, lint, type checking, tests, builds, and Playwright. Coding agents must not run local validation unless the owner explicitly requests it in that session.
+- Automatic GitHub CI may run after a branch is pushed. Coding agents may inspect CI status and failure logs.
+- Coding agents must never claim local tests passed unless the repository owner supplied the results.

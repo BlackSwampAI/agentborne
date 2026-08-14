@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "start": "next start",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
     "@agentborne/shared": "workspace:*",
