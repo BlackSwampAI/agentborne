@@ -31,14 +31,26 @@ test('runs the complete deterministic World Lab browser flow', async ({
   }
 
   await expect(page.getByRole('heading', { name: 'World Lab' })).toBeVisible();
-  await expect(page.getByTestId('world-map')).toBeVisible();
+  const worldMap = page.getByTestId('world-map');
+  await expect(worldMap).toBeVisible();
+  await expect(worldMap).toHaveAttribute('data-overlay-status', 'ready');
+  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '61');
+  await expect(worldMap).toHaveAttribute(
+    'data-rendered-infected-cell-count',
+    '0',
+  );
   await expect(
-    page.getByText(/H3 overlay ready · 61 cells · 6 agents/),
+    page.getByText(/H3 overlay ready · 61\/61 rendered cells · 6 agents/),
   ).toBeVisible();
-  await expect(page.getByTestId('infected-count')).toHaveText('0 infected');
+  await expect(page.getByTestId('infected-count')).toHaveText(
+    '0 rendered infected',
+  );
 
   const markers = page.getByRole('button', { name: /Select agent/ });
   await expect(markers).toHaveCount(6);
+  for (let index = 0; index < 6; index += 1) {
+    await expect(markers.nth(index)).toBeVisible();
+  }
   await page.getByRole('button', { name: 'Select agent Rook' }).click();
   await expect(page.getByRole('heading', { name: /Rook/ })).toBeVisible();
   await expect(
@@ -47,7 +59,14 @@ test('runs the complete deterministic World Lab browser flow', async ({
 
   await page.getByRole('button', { name: 'Single turn' }).click();
   await expect(page.getByText(/Infection ·/)).toBeVisible();
-  await expect(page.getByTestId('infected-count')).toHaveText('1 infected');
+  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '61');
+  await expect(worldMap).toHaveAttribute(
+    'data-rendered-infected-cell-count',
+    '1',
+  );
+  await expect(page.getByTestId('infected-count')).toHaveText(
+    '1 rendered infected',
+  );
 
   await page.getByRole('button', { name: 'Start' }).click();
   await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible();
@@ -59,7 +78,18 @@ test('runs the complete deterministic World Lab browser flow', async ({
 
   await page.getByRole('button', { name: 'Reset' }).click();
   await expect(page.getByText('Turn 0')).toBeVisible();
-  await expect(page.getByTestId('infected-count')).toHaveText('0 infected');
+  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '61');
+  await expect(worldMap).toHaveAttribute(
+    'data-rendered-infected-cell-count',
+    '0',
+  );
+  await expect(page.getByTestId('infected-count')).toHaveText(
+    '0 rendered infected',
+  );
+  await expect(markers).toHaveCount(6);
+  for (let index = 0; index < 6; index += 1) {
+    await expect(markers.nth(index)).toBeVisible();
+  }
   await expect(
     page.getByText('Development world loaded with six agents.'),
   ).toBeVisible();

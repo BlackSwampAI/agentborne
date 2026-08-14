@@ -29,7 +29,7 @@ pnpm test:e2e
 - Simulation-service tests cover deterministic reset, round robin beyond retained history, monotonic total turn numbering, exactly one call per turn, latest-state observations, 120-record turn retention, 120-event retention, accepted/rejected/failure records, atomic rollback on internal validation failure, recovery, and turn/reset concurrency.
 - API integration tests validate snapshot, turn, reset, missing configuration, provider failure, internal-failure propagation and recovery, rejection, and typed conflict responses.
 - React tests cover controls/statuses, playback configuration, single turn, reset, agent/hex selection, inspector output, H3 readiness, and safe configuration errors.
-- Playwright verifies 61 visible H3 cells are reported ready, six markers, marker/inspector interaction, infection layer data changes, Start/Pause, reset, and the explicit automated-test provider.
+- Playwright uses real MapLibre feature inspection to verify 61 unique rendered H3 cells, rendered infection counts through a turn and reset, six markers, marker/inspector interaction, Start/Pause, and the explicit automated-test provider.
 
 ## Real-provider smoke
 
