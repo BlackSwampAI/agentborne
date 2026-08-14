@@ -8,6 +8,8 @@ import {
   type ProviderMetadata,
 } from '@agentborne/shared';
 
+export { applyProviderEnvironmentFile } from './provider-environment';
+
 export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.7-flash';
 export const OPENROUTER_ENDPOINT =
   'https://openrouter.ai/api/v1/chat/completions';

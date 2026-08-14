@@ -1,8 +1,13 @@
+import { readFileSync } from 'node:fs';
 import { serve } from '@hono/node-server';
+import { applyProviderEnvironmentFile } from '@agentborne/agent-runtime';
 import { createApp } from './app';
 
 try {
-  process.loadEnvFile('../../.env.local');
+  process.loadEnvFile('../../.env');
+  applyProviderEnvironmentFile(
+    readFileSync(new URL('../../../.env', import.meta.url), 'utf8'),
+  );
 } catch (error) {
   const code =
     error instanceof Error && 'code' in error ? error.code : undefined;

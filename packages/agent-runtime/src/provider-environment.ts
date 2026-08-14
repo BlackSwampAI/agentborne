@@ -1,11 +1,11 @@
 import { parseEnv } from 'node:util';
 
-const smokeEnvironmentNames = [
+const providerEnvironmentNames = [
   'OPENROUTER_API_KEY',
   'AGENTBORNE_MODEL',
 ] as const;
 
-export function applySmokeEnvironmentFile(
+export function applyProviderEnvironmentFile(
   contents: string,
   environment: Record<string, string | undefined> = process.env,
 ): void {
@@ -16,7 +16,7 @@ export function applySmokeEnvironmentFile(
     throw new Error('The repository .env file could not be parsed.');
   }
 
-  for (const name of smokeEnvironmentNames) {
+  for (const name of providerEnvironmentNames) {
     if (fileEnvironment[name] !== undefined) {
       environment[name] = fileEnvironment[name];
     }

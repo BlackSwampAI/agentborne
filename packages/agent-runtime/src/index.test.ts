@@ -7,7 +7,7 @@ import {
   ScriptedAgentProvider,
   buildOpenRouterRequest,
 } from '.';
-import { applySmokeEnvironmentFile } from './smoke-environment';
+import { applyProviderEnvironmentFile } from './provider-environment';
 
 const observation = agentObservationSchema.parse({
   agentId: '128f3f38-6b7d-4db7-9e95-751b4ce2681e',
@@ -339,12 +339,12 @@ describe('OpenRouterAgentProvider', () => {
   });
 });
 
-describe('OpenRouter smoke environment', () => {
+describe('OpenRouter provider environment', () => {
   it('loads only server provider values and overrides stale exports', () => {
     const environment: Record<string, string | undefined> = {
       OPENROUTER_API_KEY: 'exported-key',
     };
-    applySmokeEnvironmentFile(
+    applyProviderEnvironmentFile(
       [
         'OPENROUTER_API_KEY=file-key',
         'AGENTBORNE_MODEL=google/gemini-3.7-flash',

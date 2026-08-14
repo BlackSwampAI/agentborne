@@ -5,11 +5,14 @@ import {
   agentObservationSchema,
   h3CellSchema,
 } from '@agentborne/shared';
-import { AgentProviderError, OpenRouterAgentProvider } from './index';
-import { applySmokeEnvironmentFile } from './smoke-environment';
+import {
+  AgentProviderError,
+  OpenRouterAgentProvider,
+  applyProviderEnvironmentFile,
+} from './index';
 
 try {
-  applySmokeEnvironmentFile(
+  applyProviderEnvironmentFile(
     readFileSync(new URL('../../../.env', import.meta.url), 'utf8'),
   );
 } catch (error) {
