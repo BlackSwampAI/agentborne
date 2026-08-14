@@ -13,6 +13,7 @@ import {
   type ExperimentExportWorldState,
   type ExperimentId,
   type ExperimentMetrics,
+  type ExportedCommunication,
   type PersonalityConfigurationEvent,
   type ProviderMetadata,
   type WorldSnapshot,
@@ -52,9 +53,13 @@ export class ExperimentMetricAccumulator {
   }
 
   add(turn: AgentTurnRecord): void {
-    addToMutable(this.#records.get('aggregate')!, turn);
+    addToMutable(this.#records.get('aggregate')!, turn, true);
     const agent = this.#records.get(turn.agentId);
     if (agent) addToMutable(agent, turn);
+    if (turn.outcome === 'accepted' && turn.event.type === 'agent-messaged') {
+      const recipient = this.#records.get(turn.event.recipientId);
+      if (recipient) recipient.receivedCommunications += 1;
+    }
   }
 
   snapshot(agentIds: readonly AgentId[]): ExperimentMetrics {
@@ -86,9 +91,13 @@ interface MutableMetrics {
   providerErrors: number;
   requestedMoves: number;
   requestedInfections: number;
+  requestedMessages: number;
   requestedWaits: number;
   acceptedMovements: number;
   infections: number;
+  deliveredMessages: number;
+  sentCommunications: number;
+  receivedCommunications: number;
   latencyTotal: number;
   latencyCount: number;
   tokens: Record<(typeof metricTokenFields)[number], number>;
@@ -106,9 +115,13 @@ function mutableMetrics(): MutableMetrics {
     providerErrors: 0,
     requestedMoves: 0,
     requestedInfections: 0,
+    requestedMessages: 0,
     requestedWaits: 0,
     acceptedMovements: 0,
     infections: 0,
+    deliveredMessages: 0,
+    sentCommunications: 0,
+    receivedCommunications: 0,
     latencyTotal: 0,
     latencyCount: 0,
     tokens: Object.fromEntries(
@@ -123,7 +136,11 @@ function mutableMetrics(): MutableMetrics {
   };
 }
 
-function addToMutable(metrics: MutableMetrics, turn: AgentTurnRecord): void {
+function addToMutable(
+  metrics: MutableMetrics,
+  turn: AgentTurnRecord,
+  aggregate = false,
+): void {
   metrics.turns += 1;
   metrics[
     turn.outcome === 'provider-error' ? 'providerErrors' : turn.outcome
@@ -133,6 +150,7 @@ function addToMutable(metrics: MutableMetrics, turn: AgentTurnRecord): void {
     if (turn.requestedAction.type === 'move') metrics.requestedMoves += 1;
     if (turn.requestedAction.type === 'infect')
       metrics.requestedInfections += 1;
+    if (turn.requestedAction.type === 'message') metrics.requestedMessages += 1;
     if (turn.requestedAction.type === 'wait') metrics.requestedWaits += 1;
   }
   if (turn.outcome === 'accepted' && turn.event.type === 'agent-moved') {
@@ -141,6 +159,11 @@ function addToMutable(metrics: MutableMetrics, turn: AgentTurnRecord): void {
   }
   if (turn.outcome === 'accepted' && turn.event.type === 'hex-infected')
     metrics.infections += 1;
+  if (turn.outcome === 'accepted' && turn.event.type === 'agent-messaged') {
+    metrics.deliveredMessages += 1;
+    metrics.sentCommunications += 1;
+    if (aggregate) metrics.receivedCommunications += 1;
+  }
   if (turn.provider) {
     metrics.latencyTotal += turn.provider.latencyMs;
     metrics.latencyCount += 1;
@@ -172,9 +195,13 @@ function finalizeMutable(metrics: MutableMetrics) {
     providerErrors: metrics.providerErrors,
     requestedMoves: metrics.requestedMoves,
     requestedInfections: metrics.requestedInfections,
+    requestedMessages: metrics.requestedMessages,
     requestedWaits: metrics.requestedWaits,
     acceptedMovements: metrics.acceptedMovements,
     successfullyInfectedCells: metrics.infections,
+    deliveredMessages: metrics.deliveredMessages,
+    sentCommunications: metrics.sentCommunications,
+    receivedCommunications: metrics.receivedCommunications,
     uniqueVisitedCells: metrics.visited.size,
     ...(metrics.latencyCount > 0
       ? { averageLatencyMs: metrics.latencyTotal / metrics.latencyCount }
@@ -201,6 +228,7 @@ export function createExperimentExport(
   const selectedAgentIds = resolveAgentIds(source, request);
   const selectedSet = new Set<AgentId>(selectedAgentIds);
   const filtered = filterTurns(source, request, selectedSet);
+  const communications = filterCommunications(source, request, selectedSet);
   const firstRetainedTurn = source.turns[0]?.turnNumber;
   const lastRetainedTurn = source.turns.at(-1)?.turnNumber;
   const requestedRangeExtendsBeyondRetention = rangeExtendsBeyondRetention(
@@ -234,7 +262,7 @@ export function createExperimentExport(
           },
     );
   const document: ExperimentExportDocument = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt,
     experiment: {
       id: source.id,
@@ -249,6 +277,7 @@ export function createExperimentExport(
     selection: {
       selectedAgentIds,
       matchingRecordCount: filtered.length,
+      matchingCommunicationCount: communications.length,
       firstMatchingTurn: filtered[0]?.turnNumber,
       lastMatchingTurn: filtered.at(-1)?.turnNumber,
     },
@@ -261,7 +290,13 @@ export function createExperimentExport(
         }
       : {}),
     ...(include.metrics
-      ? { metrics: calculateExperimentMetrics(filtered, selectedAgentIds) }
+      ? {
+          metrics: calculateExperimentMetrics(
+            filtered,
+            selectedAgentIds,
+            communications,
+          ),
+        }
       : {}),
     ...(include.initialWorld
       ? { initialWorld: exportWorldState(source.initialWorld) }
@@ -271,15 +306,18 @@ export function createExperimentExport(
       : {}),
     ...(request.level === 'full-safe'
       ? {
-          worldEvents: filtered
-            .filter(
-              (
-                turn,
-              ): turn is Extract<AgentTurnRecord, { outcome: 'accepted' }> =>
-                turn.outcome === 'accepted',
+          worldEvents: filtered.flatMap((turn) => {
+            if (
+              turn.outcome !== 'accepted' ||
+              turn.event.type === 'agent-messaged'
             )
-            .map(({ event }) => structuredClone(event)),
+              return [];
+            return [structuredClone(turn.event)];
+          }),
         }
+      : {}),
+    ...(include.communications
+      ? { communications: structuredClone(communications) }
       : {}),
     turns: filtered.map((turn) => exportTurn(turn, request)),
   };
@@ -309,10 +347,16 @@ export function createExperimentPreview(
       new Set(document.selection.selectedAgentIds),
     ),
     document.selection.selectedAgentIds,
+    filterCommunications(
+      source,
+      document.filters,
+      new Set(document.selection.selectedAgentIds),
+    ),
   );
   return experimentExportPreviewSchema.parse({
     experimentId: source.id,
     matchingRecordCount: document.selection.matchingRecordCount,
+    matchingCommunicationCount: document.selection.matchingCommunicationCount,
     selectedAgentCount: document.selection.selectedAgentIds.length,
     firstMatchingTurn: document.selection.firstMatchingTurn,
     lastMatchingTurn: document.selection.lastMatchingTurn,
@@ -367,6 +411,39 @@ function filterTurns(
   return turns.map((turn) => structuredClone(turn));
 }
 
+function filterCommunications(
+  source: ExperimentSource,
+  request: ExperimentExportRequest,
+  selected: Set<AgentId>,
+): ExportedCommunication[] {
+  if (
+    !request.outcomes.includes('accepted') ||
+    !request.actions.includes('message')
+  )
+    return [];
+  let communications = source.turns.flatMap((turn) => {
+    if (
+      turn.outcome !== 'accepted' ||
+      turn.event.type !== 'agent-messaged' ||
+      (!selected.has(turn.agentId) && !selected.has(turn.event.recipientId))
+    )
+      return [];
+    return [
+      { ...structuredClone(turn.event), originatingTurn: turn.turnNumber },
+    ];
+  });
+  if (request.turns.mode === 'range') {
+    const range = request.turns;
+    communications = communications.filter(
+      ({ originatingTurn }) =>
+        originatingTurn >= range.fromTurn && originatingTurn <= range.toTurn,
+    );
+  } else if (request.turns.mode === 'latest') {
+    communications = communications.slice(-request.turns.count);
+  }
+  return communications;
+}
+
 function rangeExtendsBeyondRetention(
   request: ExperimentExportRequest,
   source: ExperimentSource,
@@ -388,6 +465,7 @@ function inclusionsFor(request: ExperimentExportRequest) {
       metrics: true,
       initialWorld: true,
       currentWorld: true,
+      communications: true,
     };
   if (request.level === 'custom') {
     const custom = request.custom!;
@@ -397,6 +475,7 @@ function inclusionsFor(request: ExperimentExportRequest) {
       metrics: custom.computedMetrics,
       initialWorld: custom.initialWorldState,
       currentWorld: custom.currentWorldState,
+      communications: custom.communications,
     };
   }
   return {
@@ -405,6 +484,7 @@ function inclusionsFor(request: ExperimentExportRequest) {
     metrics: true,
     initialWorld: false,
     currentWorld: false,
+    communications: true,
   };
 }
 
@@ -474,6 +554,8 @@ function exportTurn(
     if (!includePersonality) delete observation.personality;
     if (custom && !custom.nearbyAgents) delete observation.nearbyAgents;
     if (custom && !custom.recentEvents) delete observation.recentEvents;
+    if (custom && !custom.recentCommunications)
+      delete observation.recentCommunications;
     base.observation = observation;
   }
   if (turn.outcome !== 'provider-error' && includeValidation)
@@ -493,14 +575,21 @@ function summarizeEvent(
   if (event.type === 'agent-moved')
     return `Moved from ${event.fromCell} to ${event.toCell}.`;
   if (event.type === 'hex-infected') return `Infected ${event.cell}.`;
+  if (event.type === 'agent-messaged')
+    return `Messaged ${event.recipientId} from distance ${event.distance}.`;
   return 'Waited.';
 }
 
 export function calculateExperimentMetrics(
   turns: readonly AgentTurnRecord[],
   agentIds: readonly AgentId[],
+  communications: readonly ExportedCommunication[] = [],
 ): ExperimentMetrics {
-  const metricFor = (records: readonly AgentTurnRecord[]) => {
+  const metricFor = (
+    records: readonly AgentTurnRecord[],
+    relevantCommunications: readonly ExportedCommunication[],
+    agentId?: AgentId,
+  ) => {
     const latencies = records.flatMap(({ provider }) =>
       provider ? [provider.latencyMs] : [],
     );
@@ -538,6 +627,11 @@ export function calculateExperimentMetrics(
           turn.outcome !== 'provider-error' &&
           turn.requestedAction.type === 'infect',
       ).length,
+      requestedMessages: records.filter(
+        (turn) =>
+          turn.outcome !== 'provider-error' &&
+          turn.requestedAction.type === 'message',
+      ).length,
       requestedWaits: records.filter(
         (turn) =>
           turn.outcome !== 'provider-error' &&
@@ -551,6 +645,25 @@ export function calculateExperimentMetrics(
         (turn) =>
           turn.outcome === 'accepted' && turn.event.type === 'hex-infected',
       ).length,
+      deliveredMessages: agentId
+        ? relevantCommunications.filter(
+            ({ agentId: senderId }) => senderId === agentId,
+          ).length
+        : relevantCommunications.length,
+      sentCommunications: agentId
+        ? relevantCommunications.filter(
+            ({ agentId: senderId }) => senderId === agentId,
+          ).length
+        : relevantCommunications.filter(({ agentId: senderId }) =>
+            agentIds.includes(senderId),
+          ).length,
+      receivedCommunications: agentId
+        ? relevantCommunications.filter(
+            ({ recipientId }) => recipientId === agentId,
+          ).length
+        : relevantCommunications.filter(({ recipientId }) =>
+            agentIds.includes(recipientId),
+          ).length,
       uniqueVisitedCells: visited.size,
       ...(latencies.length > 0
         ? {
@@ -567,10 +680,14 @@ export function calculateExperimentMetrics(
     };
   };
   return experimentMetricsSchema.parse({
-    aggregate: metricFor(turns),
+    aggregate: metricFor(turns, communications),
     byAgent: agentIds.map((agentId) => ({
       agentId,
-      metrics: metricFor(turns.filter((turn) => turn.agentId === agentId)),
+      metrics: metricFor(
+        turns.filter((turn) => turn.agentId === agentId),
+        communications,
+        agentId,
+      ),
     })),
   });
 }

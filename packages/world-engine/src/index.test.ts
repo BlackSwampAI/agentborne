@@ -14,6 +14,7 @@ const adjacent = h3CellSchema.parse(gridDisk(center, 1)[1]);
 const distant = h3CellSchema.parse(
   gridDisk(center, 2).find((cell) => gridDistance(center, cell) === 2),
 );
+const recipientId = agentIdSchema.parse('2507bb46-7ae4-45ca-8dda-644c4f85ca14');
 const agent: Agent = {
   id: agentId,
   name: 'Morrow',
@@ -31,6 +32,30 @@ function stateWithAgent() {
     createDevelopmentWorld({ generatedAt: '2026-08-13T12:00:00.000Z' }),
   );
   return { ...base, agents: new Map([[agentId, agent]]) };
+}
+
+function stateWithRecipientAt(distance: number) {
+  const before = stateWithAgent();
+  const recipientCell = h3CellSchema.parse(
+    gridDisk(center, distance).find(
+      (cell) => gridDistance(center, cell) === distance,
+    ),
+  );
+  return {
+    ...before,
+    agents: new Map([
+      [agentId, agent],
+      [
+        recipientId,
+        {
+          ...agent,
+          id: recipientId,
+          name: 'Rook',
+          currentCell: recipientCell,
+        },
+      ],
+    ]),
+  };
 }
 
 describe('H3 movement', () => {
@@ -126,6 +151,70 @@ describe('infection', () => {
     );
     expect(moved.state.hexes.get(center)).toBe('infected');
     expect(moved.state.agents.get(agentId)?.currentCell).toBe(adjacent);
+  });
+});
+
+describe('nearby messaging', () => {
+  it.each([0, 1, 3])(
+    'delivers at inclusive grid distance %s without moving or infecting',
+    (distance) => {
+      const before = stateWithRecipientAt(distance);
+      const result = applyRequestedAction(
+        before,
+        agentId,
+        {
+          type: 'message',
+          recipientId,
+          message: '  Hold this position.  ',
+        },
+        context,
+      );
+      expect(result.result).toMatchObject({
+        accepted: true,
+        event: {
+          type: 'agent-messaged',
+          agentId,
+          recipientId,
+          message: 'Hold this position.',
+          distance,
+        },
+      });
+      expect(result.state.agents).toBe(before.agents);
+      expect(result.state.hexes).toBe(before.hexes);
+      expect(result.state.events).toHaveLength(1);
+    },
+  );
+
+  it('rejects distance four without creating or delivering an event', () => {
+    const before = stateWithRecipientAt(4);
+    const result = applyRequestedAction(
+      before,
+      agentId,
+      { type: 'message', recipientId, message: 'Too far.' },
+      context,
+    );
+    expect(result.state).toBe(before);
+    expect(result.result).toMatchObject({
+      accepted: false,
+      reason: 'out-of-range',
+    });
+    expect(result.state.events).toHaveLength(0);
+  });
+
+  it.each([
+    [agentId, 'self-message'],
+    ['6b58a30d-5d47-4ea3-8c1c-43edcc919553', 'unknown-recipient'],
+  ] as const)('rejects invalid recipient %s as %s', (target, reason) => {
+    const before = stateWithRecipientAt(1);
+    const result = applyRequestedAction(
+      before,
+      agentId,
+      { type: 'message', recipientId: target, message: 'Hello.' },
+      context,
+    );
+    expect(result.state).toBe(before);
+    expect(result.result).toMatchObject({ accepted: false, reason });
+    expect(result.state.events).toHaveLength(0);
   });
 });
 

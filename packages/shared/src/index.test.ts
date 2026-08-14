@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   MODEL_SUMMARY_MAX_LENGTH,
+  MESSAGE_MAX_LENGTH,
   PERSONALITY_MAX_LENGTH,
   apiErrorSchema,
   agentDecisionSchema,
   agentObservationSchema,
   agentTurnRecordSchema,
+  acceptedMessageEventSchema,
   experimentExportRequestSchema,
   experimentIdSchema,
   personalityConfigurationEventSchema,
@@ -27,6 +29,7 @@ const observation = {
   adjacentCells: [{ cell: adjacent, state: 'open' }],
   nearbyAgents: [],
   recentEvents: [],
+  recentCommunications: [],
 };
 const baseTurn = {
   turnNumber: 1,
@@ -83,9 +86,13 @@ const snapshot = {
         providerErrors: 0,
         requestedMoves: 0,
         requestedInfections: 0,
+        requestedMessages: 0,
         requestedWaits: 0,
         acceptedMovements: 0,
         successfullyInfectedCells: 0,
+        deliveredMessages: 0,
+        sentCommunications: 0,
+        receivedCommunications: 0,
         uniqueVisitedCells: 0,
         tokens: {},
         knownCostCredits: 0,
@@ -125,6 +132,14 @@ describe('agent observation and decision schemas', () => {
       summary: 'Move.',
     },
     { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+    {
+      requestedAction: {
+        type: 'message',
+        recipientId: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
+        message: 'Coordinate here.',
+      },
+      summary: 'Message.',
+    },
     { requestedAction: { type: 'wait' }, summary: 'Wait.' },
   ])('accepts a PR 2 decision', (decision) => {
     expect(agentDecisionSchema.safeParse(decision).success).toBe(true);
@@ -136,19 +151,76 @@ describe('agent observation and decision schemas', () => {
       summary: 'No.',
     },
     {
-      requestedAction: {
-        type: 'message',
-        recipientId: agentId,
-        message: 'No.',
-      },
-      summary: 'No.',
-    },
-    {
       requestedAction: { type: 'wait' },
       summary: 'x'.repeat(MODEL_SUMMARY_MAX_LENGTH + 1),
     },
   ])('rejects forbidden actions and oversized model text', (decision) => {
     expect(agentDecisionSchema.safeParse(decision).success).toBe(false);
+  });
+
+  it('trims message content and enforces recipient and 280-character boundaries', () => {
+    const recipientId = '2507bb46-7ae4-45ca-8dda-644c4f85ca14';
+    const parsed = agentDecisionSchema.parse({
+      requestedAction: {
+        type: 'message',
+        recipientId,
+        message: `  ${'x'.repeat(MESSAGE_MAX_LENGTH)}  `,
+      },
+      summary: 'Send.',
+    });
+    expect(parsed.requestedAction).toMatchObject({
+      type: 'message',
+      message: 'x'.repeat(MESSAGE_MAX_LENGTH),
+    });
+    for (const requestedAction of [
+      { type: 'message', recipientId, message: '   ' },
+      {
+        type: 'message',
+        recipientId,
+        message: 'x'.repeat(MESSAGE_MAX_LENGTH + 1),
+      },
+      { type: 'message', recipientId: 'not-an-agent', message: 'Hello.' },
+    ])
+      expect(
+        agentDecisionSchema.safeParse({ requestedAction, summary: 'Send.' })
+          .success,
+      ).toBe(false);
+  });
+
+  it('validates typed messages and caps directional conversation context at six', () => {
+    const recipientId = '2507bb46-7ae4-45ca-8dda-644c4f85ca14';
+    const messageEvent = acceptedMessageEventSchema.parse({
+      id: '67aa21b9-fc78-4b04-9f92-9862bf346f96',
+      type: 'agent-messaged',
+      agentId,
+      recipientId,
+      occurredAt: '2026-08-13T12:00:01.000Z',
+      message: 'Hello.',
+      distance: 3,
+    });
+    const communication = {
+      eventId: messageEvent.id,
+      senderId: agentId,
+      senderName: 'Ember',
+      recipientId,
+      recipientName: 'Rook',
+      direction: 'outbound',
+      message: messageEvent.message,
+      occurredAt: messageEvent.occurredAt,
+      distance: messageEvent.distance,
+    };
+    expect(
+      agentObservationSchema.safeParse({
+        ...observation,
+        recentCommunications: Array(6).fill(communication),
+      }).success,
+    ).toBe(true);
+    expect(
+      agentObservationSchema.safeParse({
+        ...observation,
+        recentCommunications: Array(7).fill(communication),
+      }).success,
+    ).toBe(false);
   });
 });
 
@@ -246,7 +318,7 @@ describe('experiment telemetry and export contracts', () => {
       agents: { mode: 'selected', agentIds: [agentId] },
       turns: { mode: 'entire-retained' },
       outcomes: ['accepted'],
-      actions: ['wait'],
+      actions: ['message', 'wait'],
     };
     for (const level of ['minimal', 'standard', 'full-safe'])
       expect(
@@ -272,12 +344,14 @@ describe('experiment telemetry and export contracts', () => {
           personalityTextHistory: false,
           nearbyAgents: false,
           recentEvents: false,
+          recentCommunications: false,
           validationDetails: false,
           resultingEvents: false,
           providerUsageMetadata: false,
           initialWorldState: false,
           currentWorldState: false,
           computedMetrics: false,
+          communications: true,
         },
       }).success,
     ).toBe(true);
