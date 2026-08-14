@@ -1,10 +1,27 @@
+import { readFileSync } from 'node:fs';
 import { latLngToCell, gridDisk } from 'h3-js';
 import {
   agentIdSchema,
   agentObservationSchema,
   h3CellSchema,
 } from '@agentborne/shared';
-import { OpenRouterAgentProvider } from './index';
+import { AgentProviderError, OpenRouterAgentProvider } from './index';
+import { applySmokeEnvironmentFile } from './smoke-environment';
+
+try {
+  applySmokeEnvironmentFile(
+    readFileSync(new URL('../../../.env', import.meta.url), 'utf8'),
+  );
+} catch (error) {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    !('code' in error) ||
+    error.code !== 'ENOENT'
+  ) {
+    throw error;
+  }
+}
 
 const currentCell = h3CellSchema.parse(latLngToCell(41.6528, -83.5379, 9));
 const adjacentCells = gridDisk(currentCell, 1)
@@ -25,16 +42,32 @@ const observation = agentObservationSchema.parse({
   recentEvents: [],
 });
 
-const result = await provider.decide(observation);
-console.log(
-  JSON.stringify(
-    {
-      valid: true,
-      decision: result.decision,
-      provider: result.metadata.provider,
-      model: result.metadata.model,
-    },
-    null,
-    2,
-  ),
-);
+try {
+  const result = await provider.decide(observation);
+  console.log(
+    JSON.stringify(
+      {
+        valid: true,
+        decision: result.decision,
+        provider: result.metadata.provider,
+        model: result.metadata.model,
+      },
+      null,
+      2,
+    ),
+  );
+} catch (error) {
+  if (!(error instanceof AgentProviderError)) throw error;
+  console.error(
+    JSON.stringify(
+      {
+        valid: false,
+        failure: error.failure,
+        diagnostics: error.diagnostics,
+      },
+      null,
+      2,
+    ),
+  );
+  process.exitCode = 1;
+}

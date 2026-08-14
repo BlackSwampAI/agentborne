@@ -66,11 +66,19 @@ describe('game API simulation boundary', () => {
       model: 'failure-test',
       configured: true,
       async decide() {
-        throw new AgentProviderError({
-          code: 'network',
-          message: 'The model provider could not be reached.',
-          retryable: true,
-        });
+        throw new AgentProviderError(
+          {
+            code: 'network',
+            message: 'The model provider could not be reached.',
+            retryable: true,
+          },
+          undefined,
+          {
+            httpStatus: 400,
+            providerMessage: 'internal-diagnostic-marker',
+            model: 'google/gemini-3.7-flash',
+          },
+        );
       },
     };
     const failed = singleTurnResponseSchema.parse(
@@ -82,6 +90,7 @@ describe('game API simulation boundary', () => {
       ).json(),
     );
     expect(failed.turn.outcome).toBe('provider-error');
+    expect(JSON.stringify(failed)).not.toContain('internal-diagnostic-marker');
 
     const missing = createApp({ provider: new OpenRouterAgentProvider() });
     const snapshot = simulationSnapshotSchema.parse(

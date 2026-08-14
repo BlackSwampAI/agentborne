@@ -8,9 +8,12 @@ import {
   type ProviderMetadata,
 } from '@agentborne/shared';
 
-export const DEFAULT_OPENROUTER_MODEL = 'openai/gpt-5-mini';
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.7-flash';
 export const OPENROUTER_ENDPOINT =
   'https://openrouter.ai/api/v1/chat/completions';
+
+const OPENROUTER_ERROR_BODY_MAX_BYTES = 16_384;
+const OPENROUTER_DIAGNOSTIC_MESSAGE_MAX_LENGTH = 240;
 
 export interface ProviderDecision {
   decision: AgentDecision;
@@ -29,10 +32,19 @@ export class AgentProviderError extends Error {
   constructor(
     readonly failure: ProviderFailure,
     readonly metadata?: ProviderMetadata,
+    readonly diagnostics?: OpenRouterFailureDiagnostics,
   ) {
     super(failure.message);
     this.name = 'AgentProviderError';
   }
+}
+
+export interface OpenRouterFailureDiagnostics {
+  httpStatus: number;
+  providerCode?: string;
+  providerMessage?: string;
+  requestId?: string;
+  model: string;
 }
 
 const decisionJsonSchema = {
@@ -40,17 +52,14 @@ const decisionJsonSchema = {
   additionalProperties: false,
   properties: {
     requestedAction: {
-      oneOf: [
+      anyOf: [
         {
           type: 'object',
           additionalProperties: false,
           properties: {
-            type: { const: 'move' },
+            type: { type: 'string', enum: ['move'] },
             targetCell: {
               type: 'string',
-              pattern: '^[0-9a-fA-F]{15}$',
-              description:
-                'One target H3 index copied exactly from adjacentCells.',
             },
           },
           required: ['type', 'targetCell'],
@@ -58,23 +67,23 @@ const decisionJsonSchema = {
         {
           type: 'object',
           additionalProperties: false,
-          properties: { type: { const: 'infect' } },
+          properties: {
+            type: { type: 'string', enum: ['infect'] },
+          },
           required: ['type'],
         },
         {
           type: 'object',
           additionalProperties: false,
-          properties: { type: { const: 'wait' } },
+          properties: {
+            type: { type: 'string', enum: ['wait'] },
+          },
           required: ['type'],
         },
       ],
     },
     summary: {
       type: 'string',
-      minLength: 1,
-      maxLength: 240,
-      description:
-        'A concise user-visible decision summary, not hidden reasoning.',
     },
   },
   required: ['requestedAction', 'summary'],
@@ -110,7 +119,11 @@ export function buildOpenRouterRequest(
       },
     },
     provider: { require_parameters: true },
-    max_completion_tokens: 180,
+    max_tokens: 1024,
+    reasoning: {
+      effort: 'low' as const,
+      exclude: true,
+    },
     stream: false,
   };
 }
@@ -173,6 +186,8 @@ export class OpenRouterAgentProvider implements AgentProvider {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
+      const providerRequest = buildOpenRouterRequest(observation, this.model);
+      const requestBody = JSON.stringify(providerRequest);
       let response: Response;
       try {
         response = await this.#fetch(OPENROUTER_ENDPOINT, {
@@ -181,7 +196,7 @@ export class OpenRouterAgentProvider implements AgentProvider {
             Authorization: `Bearer ${this.#apiKey}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(buildOpenRouterRequest(observation, this.model)),
+          body: requestBody,
           signal: controller.signal,
         });
       } catch {
@@ -189,17 +204,29 @@ export class OpenRouterAgentProvider implements AgentProvider {
       }
 
       if (!response.ok) {
+        const sensitiveValues = collectSensitiveValues({
+          apiKey: this.#apiKey,
+          observation,
+          additionalValues: [
+            requestBody,
+            ...providerRequest.messages.map(({ content }) => content),
+          ],
+        });
+        const diagnostics = await readOpenRouterFailureDiagnostics({
+          response,
+          model: this.model,
+          sensitiveValues,
+        }).catch(() => undefined);
+        if (controller.signal.aborted) throw requestFailure(true);
+        const failure = httpFailure(response.status);
         throw new AgentProviderError(
-          {
-            code: 'provider-http',
-            message: `The model provider returned HTTP ${response.status}.`,
-            retryable: response.status === 429 || response.status >= 500,
-          },
-          {
-            provider: 'openrouter',
-            model: this.model,
-            requestId: response.headers.get('x-request-id') ?? undefined,
-            latencyMs: Date.now() - started,
+          failure,
+          undefined,
+          diagnostics ?? {
+            httpStatus: response.status,
+            model:
+              sanitizeDiagnosticMessage(this.model, sensitiveValues, 120) ??
+              '[redacted]',
           },
         );
       }
@@ -280,6 +307,188 @@ function requestFailure(timedOut: boolean): AgentProviderError {
       : 'The model provider could not be reached.',
     retryable: true,
   });
+}
+
+function httpFailure(status: number): ProviderFailure {
+  if (status === 400) {
+    return {
+      code: 'provider-http',
+      message: 'The model provider rejected the request configuration.',
+      retryable: false,
+    };
+  }
+  if (status === 404) {
+    return {
+      code: 'provider-http',
+      message:
+        'The selected model is unavailable or no endpoint supports all required parameters.',
+      retryable: false,
+    };
+  }
+  if (status === 429) {
+    return {
+      code: 'provider-http',
+      message: 'The model provider rate limited the request.',
+      retryable: true,
+    };
+  }
+  if (status >= 500) {
+    return {
+      code: 'provider-http',
+      message: 'The model provider is unavailable.',
+      retryable: true,
+    };
+  }
+  return {
+    code: 'provider-http',
+    message: `The model provider returned HTTP ${status}.`,
+    retryable: false,
+  };
+}
+
+async function readOpenRouterFailureDiagnostics({
+  response,
+  model,
+  sensitiveValues,
+}: {
+  response: Response;
+  model: string;
+  sensitiveValues: string[];
+}): Promise<OpenRouterFailureDiagnostics> {
+  const rawText = await readBoundedText(
+    response,
+    OPENROUTER_ERROR_BODY_MAX_BYTES,
+  );
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawText);
+  } catch {
+    payload = undefined;
+  }
+  const root = asRecord(payload);
+  const error = asRecord(root?.error);
+  const metadata = asRecord(error?.metadata);
+  const providerCode = sanitizeDiagnosticCode(error?.code, sensitiveValues);
+  const providerMessage = sanitizeDiagnosticMessage(
+    error?.message,
+    sensitiveValues,
+  );
+  const requestId = sanitizeDiagnosticCode(
+    response.headers.get('x-request-id') ??
+      root?.request_id ??
+      metadata?.request_id,
+    sensitiveValues,
+    160,
+  );
+  return {
+    httpStatus: response.status,
+    providerCode,
+    providerMessage,
+    requestId,
+    model:
+      sanitizeDiagnosticMessage(model, sensitiveValues, 120) ??
+      DEFAULT_OPENROUTER_MODEL,
+  };
+}
+
+async function readBoundedText(
+  response: Response,
+  maximumBytes: number,
+): Promise<string> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let remaining = maximumBytes;
+  let output = '';
+  try {
+    while (remaining > 0) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const accepted = value.subarray(0, remaining);
+      output += decoder.decode(accepted, { stream: true });
+      remaining -= accepted.byteLength;
+      if (accepted.byteLength < value.byteLength) {
+        await reader.cancel();
+        remaining = -1;
+        break;
+      }
+    }
+    if (remaining === 0) await reader.cancel();
+    output += decoder.decode();
+    return output;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function collectSensitiveValues({
+  apiKey,
+  observation,
+  additionalValues,
+}: {
+  apiKey: string;
+  observation: AgentObservation;
+  additionalValues: string[];
+}): string[] {
+  const values = new Set<string>([apiKey]);
+  const visit = (value: unknown) => {
+    if (typeof value === 'string') {
+      if (value.length >= 4) values.add(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (typeof value === 'object' && value !== null) {
+      Object.values(value).forEach(visit);
+    }
+  };
+  visit(observation);
+  visit(additionalValues);
+  return [...values].toSorted((left, right) => right.length - left.length);
+}
+
+function sanitizeDiagnosticCode(
+  value: unknown,
+  sensitiveValues: string[],
+  maximumLength = 80,
+): string | undefined {
+  const sanitized = sanitizeDiagnosticMessage(
+    typeof value === 'number' ? String(value) : value,
+    sensitiveValues,
+    maximumLength,
+  );
+  if (!sanitized) return undefined;
+  return /^[a-zA-Z0-9_.:/-]+$/.test(sanitized) ? sanitized : undefined;
+}
+
+function sanitizeDiagnosticMessage(
+  value: unknown,
+  sensitiveValues: string[],
+  maximumLength = OPENROUTER_DIAGNOSTIC_MESSAGE_MAX_LENGTH,
+): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  let sanitized = value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  sanitized = sanitized.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]');
+  sanitized = sanitized.replace(/sk-or-[a-zA-Z0-9_-]+/g, '[redacted]');
+  for (const sensitiveValue of sensitiveValues) {
+    sanitized = sanitized.replaceAll(sensitiveValue, '[redacted]');
+  }
+  if (/"(?:authorization|messages|observation)"\s*:/i.test(sanitized)) {
+    return 'Provider diagnostic details were redacted.';
+  }
+  const bounded = sanitized.slice(0, maximumLength).trim();
+  return bounded || undefined;
 }
 
 export class ScriptedAgentProvider implements AgentProvider {

@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { agentObservationSchema } from '@agentborne/shared';
 import {
   AgentProviderError,
+  DEFAULT_OPENROUTER_MODEL,
   OpenRouterAgentProvider,
   ScriptedAgentProvider,
   buildOpenRouterRequest,
 } from '.';
+import { applySmokeEnvironmentFile } from './smoke-environment';
 
 const observation = agentObservationSchema.parse({
   agentId: '128f3f38-6b7d-4db7-9e95-751b4ce2681e',
@@ -21,7 +23,7 @@ function response(content: string, status = 200) {
   return new Response(
     JSON.stringify({
       id: 'request-safe-id',
-      model: 'openai/gpt-5-mini',
+      model: 'google/gemini-3.7-flash',
       choices: [{ message: { content } }],
       usage: { prompt_tokens: 20, completion_tokens: 12 },
     }),
@@ -29,18 +31,82 @@ function response(content: string, status = 200) {
   );
 }
 
+function errorResponse({
+  status,
+  code,
+  message,
+  requestId = 'safe-request-id',
+}: {
+  status: number;
+  code?: string | number;
+  message?: string;
+  requestId?: string;
+}) {
+  return new Response(JSON.stringify({ error: { code, message } }), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'x-request-id': requestId,
+    },
+  });
+}
+
+function visitJsonValues(
+  value: unknown,
+  visitor: (value: Record<string, unknown>) => void,
+) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => visitJsonValues(item, visitor));
+    return;
+  }
+  if (typeof value !== 'object' || value === null) return;
+  const record = value as Record<string, unknown>;
+  visitor(record);
+  Object.values(record).forEach((item) => visitJsonValues(item, visitor));
+}
+
 describe('OpenRouterAgentProvider', () => {
-  it('constructs a strict structured-output request with personality and observation data', () => {
+  it('constructs a Gemini-compatible strict structured-output request', () => {
     const request = buildOpenRouterRequest(observation);
+    expect(request.model).toBe('google/gemini-3.7-flash');
+    expect(DEFAULT_OPENROUTER_MODEL).toBe('google/gemini-3.7-flash');
     expect(request.response_format).toMatchObject({
       type: 'json_schema',
       json_schema: { strict: true },
     });
     expect(request.provider).toEqual({ require_parameters: true });
+    expect(request.stream).toBe(false);
+    expect(request.max_tokens).toBe(1024);
+    expect(request).not.toHaveProperty('max_completion_tokens');
+    expect(request).not.toHaveProperty('include_reasoning');
+    expect(request).not.toHaveProperty('reasoning_effort');
+    expect(request.reasoning).toEqual({ effort: 'low', exclude: true });
     expect(request.messages[1]!.content).toContain(observation.personality);
     expect(request.messages[0]!.content).toContain('Never produce messages');
-    expect(request.max_completion_tokens).toBe(180);
-    expect(request).not.toHaveProperty('max_tokens');
+
+    const schema = request.response_format.json_schema.schema;
+    expect(schema.type).toBe('object');
+    expect(schema.properties.requestedAction).toHaveProperty('anyOf');
+    expect(schema.properties.requestedAction.anyOf).toHaveLength(3);
+
+    visitJsonValues(schema, (schemaNode) => {
+      expect(schemaNode).not.toHaveProperty('oneOf');
+      expect(schemaNode).not.toHaveProperty('const');
+      if (schemaNode.type !== 'object') return;
+      expect(schemaNode.additionalProperties).toBe(false);
+      const properties = schemaNode.properties as
+        Record<string, unknown> | undefined;
+      expect(properties).toBeDefined();
+      expect([...(schemaNode.required as string[])].sort()).toEqual(
+        Object.keys(properties!).sort(),
+      );
+    });
+  });
+
+  it('preserves an explicit model override', () => {
+    expect(
+      buildOpenRouterRequest(observation, 'custom/provider-model').model,
+    ).toBe('custom/provider-model');
   });
 
   it('parses and runtime-validates a structured decision', async () => {
@@ -67,6 +133,7 @@ describe('OpenRouterAgentProvider', () => {
     expect(JSON.parse(String(capturedInit?.body))).toMatchObject({
       provider: { require_parameters: true },
     });
+    expect(fetchImplementation).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -95,11 +162,58 @@ describe('OpenRouterAgentProvider', () => {
     },
   );
 
-  it('sanitizes HTTP and network errors without leaking the key', async () => {
+  it.each([
+    [400, 'The model provider rejected the request configuration.', false],
+    [
+      404,
+      'The selected model is unavailable or no endpoint supports all required parameters.',
+      false,
+    ],
+    [429, 'The model provider rate limited the request.', true],
+    [503, 'The model provider is unavailable.', true],
+  ])(
+    'maps HTTP %i to a clear sanitized public failure',
+    async (status, message, retryable) => {
+      const provider = new OpenRouterAgentProvider({
+        apiKey: 'secret-test-key',
+        fetchImplementation: vi.fn(async () =>
+          errorResponse({
+            status,
+            code: 'provider_error',
+            message: 'Safe provider detail.',
+          }),
+        ),
+      });
+      await expect(provider.decide(observation)).rejects.toMatchObject({
+        failure: { code: 'provider-http', message, retryable },
+        diagnostics: {
+          httpStatus: status,
+          providerCode: 'provider_error',
+          providerMessage: 'Safe provider detail.',
+          requestId: 'safe-request-id',
+          model: 'google/gemini-3.7-flash',
+        },
+      });
+    },
+  );
+
+  it('sanitizes HTTP diagnostics and network errors without leaking sensitive data', async () => {
     const key = 'highly-sensitive-key';
+    const injectedSensitiveString = 'injected-sensitive-observation';
+    const sensitiveObservation = agentObservationSchema.parse({
+      ...observation,
+      personality: injectedSensitiveString,
+    });
     const httpProvider = new OpenRouterAgentProvider({
       apiKey: key,
-      fetchImplementation: vi.fn(async () => response('{}', 500)),
+      fetchImplementation: vi.fn(async () =>
+        errorResponse({
+          status: 400,
+          code: `invalid-${key}`,
+          message: `Authorization: Bearer ${key}; observation=${injectedSensitiveString}`,
+          requestId: `request-${key}`,
+        }),
+      ),
     });
     const networkProvider = new OpenRouterAgentProvider({
       apiKey: key,
@@ -109,12 +223,37 @@ describe('OpenRouterAgentProvider', () => {
     });
     for (const provider of [httpProvider, networkProvider]) {
       try {
-        await provider.decide(observation);
+        await provider.decide(
+          provider === httpProvider ? sensitiveObservation : observation,
+        );
       } catch (error) {
         expect(error).toBeInstanceOf(AgentProviderError);
         expect(String(error)).not.toContain(key);
         expect(JSON.stringify(error)).not.toContain(key);
+        expect(JSON.stringify(error)).not.toContain(injectedSensitiveString);
       }
+    }
+  });
+
+  it('reads only a bounded OpenRouter error body', async () => {
+    const oversizedMessage = 'safe-detail '.repeat(4_000);
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () =>
+        errorResponse({
+          status: 400,
+          code: 'invalid_request',
+          message: oversizedMessage,
+        }),
+      ),
+    });
+    try {
+      await provider.decide(observation);
+    } catch (error) {
+      expect(error).toBeInstanceOf(AgentProviderError);
+      expect((error as AgentProviderError).diagnostics?.providerMessage).toBe(
+        undefined,
+      );
     }
   });
 
@@ -196,6 +335,26 @@ describe('OpenRouterAgentProvider', () => {
     const provider = new OpenRouterAgentProvider();
     await expect(provider.decide(observation)).rejects.toMatchObject({
       failure: { code: 'configuration' },
+    });
+  });
+});
+
+describe('OpenRouter smoke environment', () => {
+  it('loads only server provider values and overrides stale exports', () => {
+    const environment: Record<string, string | undefined> = {
+      OPENROUTER_API_KEY: 'exported-key',
+    };
+    applySmokeEnvironmentFile(
+      [
+        'OPENROUTER_API_KEY=file-key',
+        'AGENTBORNE_MODEL=google/gemini-3.7-flash',
+        'NEXT_PUBLIC_GAME_API_BASE_URL=https://browser.example',
+      ].join('\n'),
+      environment,
+    );
+    expect(environment).toEqual({
+      OPENROUTER_API_KEY: 'file-key',
+      AGENTBORNE_MODEL: 'google/gemini-3.7-flash',
     });
   });
 });

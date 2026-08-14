@@ -28,7 +28,7 @@ const baseTurn = {
 };
 const provider = {
   provider: 'openrouter',
-  model: 'openai/gpt-5-mini',
+  model: 'google/gemini-3.7-flash',
   latencyMs: 100,
 };
 const event = {

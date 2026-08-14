@@ -14,17 +14,17 @@ Agentborne is the working title for an agent-first GPS containment game. The cur
 
 ## Local development
 
-Requirements are Node.js 24.18.0 and pnpm 11.21.0. Copy the example environment file, replace only the placeholder key, install dependencies, and start both applications:
+Requirements are Node.js 24.18.0 and pnpm 11.21.0. Copy the example environment file to the repository-root `.env`, replace only the placeholder key, install dependencies, and start both applications:
 
 ```bash
-cp .env.example .env.local
-# Edit .env.local and set OPENROUTER_API_KEY.
+cp .env.example .env
+# Edit .env and set OPENROUTER_API_KEY.
 corepack enable
 pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Open the World Lab at <http://localhost:3000>. The Game API binds to <http://127.0.0.1:8787>; Next.js narrowly proxies `/api/game/*` to it. `AGENTBORNE_MODEL` defaults to `openai/gpt-5-mini`.
+Open the World Lab at <http://localhost:3000>. The Game API binds to <http://127.0.0.1:8787>; Next.js narrowly proxies `/api/game/*` to it. `AGENTBORNE_MODEL` defaults to `google/gemini-3.7-flash`.
 
 Each Single turn or completed playback interval makes one third-party OpenRouter request and may incur cost. Start is deliberately disabled when the server has no key. This development API has no authentication or cost controls and is not suitable for an unauthenticated public deployment.
 
@@ -35,11 +35,10 @@ State is held only in the Game API process. Restarting the API or pressing Reset
 The smoke command performs exactly one bounded real decision request and validates it. It is never part of default tests or CI:
 
 ```bash
-set -a
-. ./.env.local
-set +a
 pnpm smoke:openrouter
 ```
+
+The command uses Node 24's built-in environment parser to read only `OPENROUTER_API_KEY` and `AGENTBORNE_MODEL` from the repository-root `.env`. Values in that file override stale exported values for the smoke process.
 
 ## Development map source
 
