@@ -14,7 +14,13 @@ const adjacent = h3CellSchema.parse(gridDisk(center, 1)[1]);
 const distant = h3CellSchema.parse(
   gridDisk(center, 2).find((cell) => gridDistance(center, cell) === 2),
 );
-const agent: Agent = { id: agentId, name: 'Morrow', currentCell: center };
+const agent: Agent = {
+  id: agentId,
+  name: 'Morrow',
+  color: '#ff6b57',
+  personality: 'Moves deliberately.',
+  currentCell: center,
+};
 const context = {
   createEventId: () => '67aa21b9-fc78-4b04-9f92-9862bf346f96',
   now: () => '2026-08-13T12:00:00.000Z',
@@ -86,8 +92,14 @@ describe('infection', () => {
   });
 
   it('rejects repeated infection', () => {
-    const result = applyRequestedAction(
+    const infected = applyRequestedAction(
       stateWithAgent(),
+      agentId,
+      { type: 'infect' },
+      context,
+    );
+    const result = applyRequestedAction(
+      infected.state,
       agentId,
       { type: 'infect' },
       context,
@@ -96,5 +108,43 @@ describe('infection', () => {
       accepted: false,
       reason: 'already-infected',
     });
+  });
+
+  it('persists infection after the agent moves away', () => {
+    const before = stateWithAgent();
+    const infected = applyRequestedAction(
+      before,
+      agentId,
+      { type: 'infect' },
+      context,
+    );
+    const moved = applyRequestedAction(
+      infected.state,
+      agentId,
+      { type: 'move', targetCell: adjacent },
+      context,
+    );
+    expect(moved.state.hexes.get(center)).toBe('infected');
+    expect(moved.state.agents.get(agentId)?.currentCell).toBe(adjacent);
+  });
+});
+
+describe('wait and deterministic development world', () => {
+  it('records a wait without changing cells or hex states', () => {
+    const before = stateWithAgent();
+    const result = applyRequestedAction(before, agentId, { type: 'wait' }, context);
+    expect(result.result).toMatchObject({ accepted: true, event: { type: 'agent-waited' } });
+    expect(result.state.hexes).toBe(before.hexes);
+    expect(result.state.agents).toBe(before.agents);
+  });
+
+  it('constructs the same 61 cells and six valid named agents', () => {
+    const first = createDevelopmentWorld({ generatedAt: context.now() });
+    const second = createDevelopmentWorld({ generatedAt: context.now() });
+    expect(first).toEqual(second);
+    expect(first.hexes).toHaveLength(61);
+    expect(first.agents).toHaveLength(6);
+    expect(new Set(first.agents.map(({ id }) => id)).size).toBe(6);
+    expect(first.agents.every(({ currentCell }) => first.hexes.some(({ cell }) => cell === currentCell))).toBe(true);
   });
 });

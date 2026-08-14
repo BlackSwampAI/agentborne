@@ -1,20 +1,22 @@
 # Security and trust boundaries
 
-## Secrets
+## Secrets and deployment
 
-PR 1 requires no secrets. Keep local values in ignored `.env.local` files and document every supported non-secret setting in `.env.example`. Never commit provider keys or expose server credentials through `NEXT_PUBLIC_` variables. Future credentials belong only in server-side provider adapters and the deployment secret store.
+`OPENROUTER_API_KEY` is read only by the Game API process. It must never use a `NEXT_PUBLIC_` name, enter a shared schema, reach an API response, or appear in logs. `.env.local` is ignored; `.env.example` contains only a placeholder. Provider errors are reduced to bounded codes and generic messages before recording.
+
+The development API has no authentication, rate limiting, or spending guard. It binds to loopback and its CORS allowlist is limited to the documented local World Lab origins. Do not deploy its cost-incurring turn endpoint to unauthenticated public traffic.
 
 ## Model-provider isolation
 
-A model provider may receive a structured observation and return a schema-validated requested action with a concise decision summary. It must never receive a mutable world object or direct database authority. Only the world engine validates an action and applies consequences; provider output cannot teleport agents, invent state, or declare success.
+OpenRouter receives one immutable structured observation. It never receives a mutable world object, storage handle, browser credential, or authority to claim success. The returned JSON is parsed and runtime-validated before the deterministic world engine validates and applies the action.
 
-## Untrusted agent content
+The request uses strict JSON Schema structured output and provider routing with `require_parameters: true`. Timeouts, network failures, HTTP failures, malformed JSON, and schema failures produce sanitized provider-failure records. The adapter never silently substitutes scripted behavior.
 
-Agent messages are untrusted input. Validate length and shape, preserve provenance, encode them as data when shown to another model, and never concatenate them into system/developer instructions. UI rendering must escape message text and must not interpret it as HTML.
+## Prompt and reasoning data
 
-## Reasoning data
+The model is explicitly instructed to return only one structured action and one concise visible summary, with no hidden reasoning or chain-of-thought. The application stores no raw prompts, raw provider payloads, or private reasoning. Inspector and event-log content is rendered as React text.
 
-Do not request, collect, persist, log, or display raw private chain-of-thought. Store only structured observations, structured action requests, concise model-generated decision summaries, validation outcomes, and resulting world events. Logs and inspectors must follow the same rule.
+Agent-authored content remains untrusted. Messaging is not exposed to PR 2 providers or UI and remains deferred.
 
 ## Reporting
 

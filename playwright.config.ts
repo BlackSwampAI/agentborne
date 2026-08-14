@@ -13,7 +13,7 @@ export default defineConfig({
     trace: 'on-first-retry',
   },
   webServer: {
-    command: 'pnpm --filter @agentborne/world-lab dev',
+    command: 'pnpm dev:test-provider',
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

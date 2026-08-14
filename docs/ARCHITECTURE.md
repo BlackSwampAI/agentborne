@@ -1,30 +1,37 @@
 # Architecture
 
-Agentborne begins as a TypeScript monorepo with two deployable applications and three domain packages. The split keeps the world rules independent of frameworks while leaving clean seams for the model-backed work in PR 2.
+The PR 2 vertical slice preserves a one-way trust boundary:
 
 ```text
-World Lab ─────┐
-               ├── shared schemas
-Game API ──────┤
-               ├── world engine ── H3
-Agent runtime ─┘        ▲
-                        │ structured action request only
+World Lab → Game API / simulation service → agent runtime → requested action
+                                                        ↓
+                      snapshot / turn record ← world engine validation
 ```
 
 ## Applications
 
-`apps/world-lab` is a Next.js App Router application. It renders a MapLibre basemap and an H3 GeoJSON overlay. The current development snapshot is created locally so the shell has no service-start dependency. As API-backed state arrives, the UI should consume the same shared response schemas rather than duplicate contracts.
+`apps/world-lab` is a Next.js App Router developer/admin surface. It fetches runtime-validated simulation snapshots through a local rewrite, controls one turn at a time, and updates MapLibre's existing H3 GeoJSON source without recreating the map. Agent markers are fully visible and use deterministic offsets when sharing cells.
 
-`apps/game-api` is a Hono service on Node. It currently proves the process and HTTP boundary with health, development-world, not-found, and error shapes. It has no persistence, authentication, scheduler, or player routes.
+`apps/game-api` is a Hono service bound conservatively to loopback. Its single in-memory `SimulationService` owns the development session, turn cursor, bounded turn history, and overlap lock. It exposes:
 
-## Packages and flow
+- `GET /api/simulation` — current authoritative snapshot
+- `POST /api/simulation/turn` — one agent observation, one provider decision, one engine application
+- `POST /api/simulation/reset` — deterministic reset, rejected while a turn is active
 
-`packages/shared` owns branded identifiers, action/event schemas, snapshots, and error envelopes. These are runtime Zod schemas first, with TypeScript types inferred from them.
+The legacy `GET /api/development-world` and `GET /health` endpoints remain for low-level diagnostics.
 
-`packages/world-engine` validates requested actions and returns a new world state plus either a world event or a machine-readable rejection. It owns consequences; callers and model providers do not. The package has no network, UI, model, or database dependency.
+## Turn flow
 
-`packages/agent-runtime` defines structured observations and decisions. A provider receives an immutable observation and returns a requested action plus a concise summary. The included scripted provider is a deterministic test seam, not a simulation and not a substitute for PR 2's genuine model-backed agents.
+The development world is an H3 radius-four disk (61 cells) around Toledo with six fixed profiles and starting cells. One agent acts per turn in stable array order. The service reads the latest state, constructs and clones a bounded observation, requests one structured decision, validates it with Zod, and passes only the requested action to the world engine.
 
-## Current state model
+The engine alone accepts or rejects actions and creates world events. Rejections do not mutate state and are not replaced by heuristics. Provider failures produce sanitized records, do not mutate the world, advance round robin, and do not prevent later turns.
 
-The in-memory world contains H3 cells (`open` or `infected`), named agents with a current cell, and append-only world events. Infection persists independently from an agent's position. Messages are validated for recipient and range, but inboxes and relationship memory are intentionally deferred to PR 4.
+## Packages
+
+`packages/shared` owns all public schemas: profiles, observations, PR 2 decisions, provider metadata/failures, turn outcomes, snapshots, and API responses. Types are inferred from Zod.
+
+`packages/world-engine` remains deterministic and has no model, HTTP, UI, storage, or credential dependency. Its broader domain action union retains range-limited messaging for the established boundary, but PR 2's model decision schema excludes messaging entirely.
+
+`packages/agent-runtime` contains the OpenRouter adapter. The interactive provider uses strict JSON Schema structured output and requires provider parameter support. Scripted providers are explicit deterministic seams selected only by tests or `AGENTBORNE_PROVIDER=scripted`; there is no automatic fallback.
+
+The rationale and deferrals are recorded in [ADR 0002](adr/0002-first-visible-llm-invasion.md).

@@ -21,6 +21,8 @@ Produce the first video-worthy result:
 
 By the end of PR 2, a human must be able to watch real agents independently move around and infect the map.
 
+Implementation scope: six fixed agent profiles, a 61-cell Toledo development world, server-owned in-memory round-robin turns, OpenRouter strict structured decisions, live World Lab controls/markers/inspector, and deterministic offline automation. Persistence, autonomous scheduling, messaging, and player systems remain explicitly out of scope.
+
 ## PR 3 — Personality Lab
 
 Prompt/personality editing, presets, cloning, respawning, reproducible starting worlds, provider/model configuration, and cost visibility.
