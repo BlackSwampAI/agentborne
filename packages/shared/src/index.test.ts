@@ -42,13 +42,24 @@ describe('agent observation and decision schemas', () => {
   it.each([
     { ...observation, adjacentCells: [] },
     { ...observation, currentCell: { cell, state: 'unknown' } },
-    { ...observation, nearbyAgents: Array(6).fill({ id: agentId, name: 'x', currentCell: cell, distance: 1 }) },
+    {
+      ...observation,
+      nearbyAgents: Array(6).fill({
+        id: agentId,
+        name: 'x',
+        currentCell: cell,
+        distance: 1,
+      }),
+    },
   ])('rejects invalid or oversized observations', (value) => {
     expect(agentObservationSchema.safeParse(value).success).toBe(false);
   });
 
   it.each([
-    { requestedAction: { type: 'move', targetCell: adjacent }, summary: 'Move.' },
+    {
+      requestedAction: { type: 'move', targetCell: adjacent },
+      summary: 'Move.',
+    },
     { requestedAction: { type: 'infect' }, summary: 'Infect.' },
     { requestedAction: { type: 'wait' }, summary: 'Wait.' },
   ])('accepts a PR 2 decision', (decision) => {
@@ -56,9 +67,22 @@ describe('agent observation and decision schemas', () => {
   });
 
   it.each([
-    { requestedAction: { type: 'teleport', targetCell: adjacent }, summary: 'No.' },
-    { requestedAction: { type: 'message', recipientId: agentId, message: 'No.' }, summary: 'No.' },
-    { requestedAction: { type: 'wait' }, summary: 'x'.repeat(MODEL_SUMMARY_MAX_LENGTH + 1) },
+    {
+      requestedAction: { type: 'teleport', targetCell: adjacent },
+      summary: 'No.',
+    },
+    {
+      requestedAction: {
+        type: 'message',
+        recipientId: agentId,
+        message: 'No.',
+      },
+      summary: 'No.',
+    },
+    {
+      requestedAction: { type: 'wait' },
+      summary: 'x'.repeat(MODEL_SUMMARY_MAX_LENGTH + 1),
+    },
   ])('rejects forbidden actions and oversized model text', (decision) => {
     expect(agentDecisionSchema.safeParse(decision).success).toBe(false);
   });

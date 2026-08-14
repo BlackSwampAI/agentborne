@@ -149,7 +149,9 @@ h2 {
 .agent-marker:hover,
 .agent-marker.selected {
   border-color: #fff5d8;
-  box-shadow: 0 0 0 4px #fff5d855, 0 2px 8px #000b;
+  box-shadow:
+    0 0 0 4px #fff5d855,
+    0 2px 8px #000b;
   transform: scale(1.12);
 }
 .map-caption {

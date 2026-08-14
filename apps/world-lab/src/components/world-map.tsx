@@ -128,20 +128,14 @@ export function WorldMap(props: WorldMapProps) {
         type: 'line',
         source: sourceId,
         paint: {
-          'line-color': [
-            'case',
-            ['get', 'selected'],
-            '#fff2c9',
-            '#b8d4cc',
-          ],
+          'line-color': ['case', ['get', 'selected'], '#fff2c9', '#b8d4cc'],
           'line-opacity': 0.95,
           'line-width': ['case', ['get', 'selected'], 4, 1.25],
         },
       });
       map.on('click', fillLayerId, (event) => {
         const cell = event.features?.[0]?.properties?.cell;
-        if (typeof cell === 'string')
-          onSelectCellRef.current(cell as H3Cell);
+        if (typeof cell === 'string') onSelectCellRef.current(cell as H3Cell);
       });
       map.on('mouseenter', fillLayerId, () => {
         map.getCanvas().style.cursor = 'pointer';
@@ -152,7 +146,8 @@ export function WorldMap(props: WorldMapProps) {
 
       const bounds = new LngLatBounds();
       for (const { cell } of initialHexes.current) {
-        for (const [lat, lng] of cellToBoundary(cell)) bounds.extend([lng, lat]);
+        for (const [lat, lng] of cellToBoundary(cell))
+          bounds.extend([lng, lat]);
       }
       map.fitBounds(bounds, { padding: 56, maxZoom: 14, duration: 0 });
       setOverlayReady(true);
@@ -168,8 +163,7 @@ export function WorldMap(props: WorldMapProps) {
 
   useEffect(() => {
     const source = mapRef.current?.getSource(sourceId) as
-      | GeoJSONSource
-      | undefined;
+      GeoJSONSource | undefined;
     source?.setData(asGeoJson(hexes, selectedCell));
   }, [hexes, selectedCell]);
 

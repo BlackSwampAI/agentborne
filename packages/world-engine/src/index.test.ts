@@ -132,8 +132,16 @@ describe('infection', () => {
 describe('wait and deterministic development world', () => {
   it('records a wait without changing cells or hex states', () => {
     const before = stateWithAgent();
-    const result = applyRequestedAction(before, agentId, { type: 'wait' }, context);
-    expect(result.result).toMatchObject({ accepted: true, event: { type: 'agent-waited' } });
+    const result = applyRequestedAction(
+      before,
+      agentId,
+      { type: 'wait' },
+      context,
+    );
+    expect(result.result).toMatchObject({
+      accepted: true,
+      event: { type: 'agent-waited' },
+    });
     expect(result.state.hexes).toBe(before.hexes);
     expect(result.state.agents).toBe(before.agents);
   });
@@ -145,6 +153,10 @@ describe('wait and deterministic development world', () => {
     expect(first.hexes).toHaveLength(61);
     expect(first.agents).toHaveLength(6);
     expect(new Set(first.agents.map(({ id }) => id)).size).toBe(6);
-    expect(first.agents.every(({ currentCell }) => first.hexes.some(({ cell }) => cell === currentCell))).toBe(true);
+    expect(
+      first.agents.every(({ currentCell }) =>
+        first.hexes.some(({ cell }) => cell === currentCell),
+      ),
+    ).toBe(true);
   });
 });

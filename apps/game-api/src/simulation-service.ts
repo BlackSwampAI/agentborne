@@ -99,17 +99,13 @@ export class SimulationService {
     this.#turns = [];
     this.#cursor = 0;
     this.#activeAgentId = null;
-    this.#status = this.#provider.configured
-      ? 'paused'
-      : 'configuration-error';
+    this.#status = this.#provider.configured ? 'paused' : 'configuration-error';
     return this.getSnapshot();
   }
 
   async executeNextTurn(): Promise<AgentTurnRecord> {
     if (this.#busy) {
-      throw new SimulationConflictError(
-        'A model turn is already in progress.',
-      );
+      throw new SimulationConflictError('A model turn is already in progress.');
     }
     const agents = [...this.#state.agents.values()];
     const agent = agents[this.#cursor % agents.length];
@@ -252,8 +248,7 @@ function summarizeEvent(
 ): string {
   const name = state.agents.get(event.agentId)?.name ?? 'An agent';
   if (event.type === 'agent-moved') return `${name} moved to ${event.toCell}.`;
-  if (event.type === 'hex-infected')
-    return `${name} infected ${event.cell}.`;
+  if (event.type === 'hex-infected') return `${name} infected ${event.cell}.`;
   return `${name} waited.`;
 }
 

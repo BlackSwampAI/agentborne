@@ -4,13 +4,13 @@ Agentborne is the working title for an agent-first GPS containment game. The cur
 
 ## Workspace
 
-| Path | Responsibility |
-| --- | --- |
-| `apps/world-lab` | Next.js developer/admin map, controls, inspector, and event log |
-| `apps/game-api` | Hono HTTP boundary and in-memory simulation service |
-| `packages/world-engine` | Pure world validation and consequence application |
+| Path                     | Responsibility                                                   |
+| ------------------------ | ---------------------------------------------------------------- |
+| `apps/world-lab`         | Next.js developer/admin map, controls, inspector, and event log  |
+| `apps/game-api`          | Hono HTTP boundary and in-memory simulation service              |
+| `packages/world-engine`  | Pure world validation and consequence application                |
 | `packages/agent-runtime` | OpenRouter provider boundary and explicit scripted testing seams |
-| `packages/shared` | Runtime-validated schemas and inferred domain types |
+| `packages/shared`        | Runtime-validated schemas and inferred domain types              |
 
 ## Local development
 

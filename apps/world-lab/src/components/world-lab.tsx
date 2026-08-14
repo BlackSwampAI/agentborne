@@ -15,7 +15,8 @@ import { WorldMap } from './world-map';
 const latitude = Number(process.env.NEXT_PUBLIC_DEV_MAP_LATITUDE ?? 41.6528);
 const longitude = Number(process.env.NEXT_PUBLIC_DEV_MAP_LONGITUDE ?? -83.5379);
 const resolution = Number(process.env.NEXT_PUBLIC_DEV_MAP_H3_RESOLUTION ?? 9);
-const apiBase = '/api/game/simulation';
+const apiBase =
+  process.env.NEXT_PUBLIC_GAME_API_BASE_URL ?? '/api/game/simulation';
 
 export function WorldLab() {
   const [snapshot, setSnapshot] = useState<SimulationSnapshot | null>(null);
@@ -94,7 +95,9 @@ export function WorldLab() {
         return;
       }
       if (!response.ok) throw new Error('reset request failed');
-      const payload = resetSimulationResponseSchema.parse(await response.json());
+      const payload = resetSimulationResponseSchema.parse(
+        await response.json(),
+      );
       setSnapshot(payload.snapshot);
       setSelectedCell(payload.snapshot.world.hexes[0]!.cell);
       setSelectedAgentId(payload.snapshot.world.agents[0]!.id);
@@ -359,11 +362,24 @@ function AgentInspector({
           <details>
             <summary>Latest structured observation</summary>
             <p>
-              Current: {latestTurn.observation.currentCell.cell} ({latestTurn.observation.currentCell.state})
+              Current: {latestTurn.observation.currentCell.cell} (
+              {latestTurn.observation.currentCell.state})
             </p>
-            <p>Adjacent: {latestTurn.observation.adjacentCells.map(({ cell, state }) => `${cell} (${state})`).join(', ')}</p>
-            <p>Nearby: {latestTurn.observation.nearbyAgents.map(({ name, distance }) => `${name} (${distance})`).join(', ') || 'none'}</p>
-            <p>Recent public events: {latestTurn.observation.recentEvents.length}</p>
+            <p>
+              Adjacent:{' '}
+              {latestTurn.observation.adjacentCells
+                .map(({ cell, state }) => `${cell} (${state})`)
+                .join(', ')}
+            </p>
+            <p>
+              Nearby:{' '}
+              {latestTurn.observation.nearbyAgents
+                .map(({ name, distance }) => `${name} (${distance})`)
+                .join(', ') || 'none'}
+            </p>
+            <p>
+              Recent public events: {latestTurn.observation.recentEvents.length}
+            </p>
           </details>
         </div>
       ) : (
@@ -371,11 +387,14 @@ function AgentInspector({
       )}
       <h3>Recent records</h3>
       <ol className="compact-history">
-        {turns.slice(-5).toReversed().map((turn) => (
-          <li key={turn.turnNumber}>
-            Turn {turn.turnNumber}: {turn.outcome}
-          </li>
-        ))}
+        {turns
+          .slice(-5)
+          .toReversed()
+          .map((turn) => (
+            <li key={turn.turnNumber}>
+              Turn {turn.turnNumber}: {turn.outcome}
+            </li>
+          ))}
       </ol>
     </section>
   );
@@ -393,19 +412,27 @@ function EventLog({ turns }: { turns: AgentTurnRecord[] }) {
             <span>Development world loaded with six agents.</span>
           </li>
         ) : (
-          turns.slice(-20).toReversed().map((turn) => (
-            <li data-outcome={turn.outcome} key={turn.turnNumber}>
-              <time>#{turn.turnNumber}</time>
-              <span>{formatTurn(turn)}</span>
-            </li>
-          ))
+          turns
+            .slice(-20)
+            .toReversed()
+            .map((turn) => (
+              <li data-outcome={turn.outcome} key={turn.turnNumber}>
+                <time>#{turn.turnNumber}</time>
+                <span>{formatTurn(turn)}</span>
+              </li>
+            ))
         )}
       </ol>
     </section>
   );
 }
 
-function formatAction(action: Extract<AgentTurnRecord, { outcome: 'accepted' | 'rejected' }>['requestedAction']) {
+function formatAction(
+  action: Extract<
+    AgentTurnRecord,
+    { outcome: 'accepted' | 'rejected' }
+  >['requestedAction'],
+) {
   return action.type === 'move' ? `move → ${action.targetCell}` : action.type;
 }
 
@@ -414,7 +441,9 @@ function formatTurn(turn: AgentTurnRecord) {
     return `Provider failure · ${turn.failure.message}`;
   if (turn.outcome === 'rejected')
     return `Rejected ${formatAction(turn.requestedAction)} · ${turn.validation.reason}`;
-  if (turn.event.type === 'agent-moved') return `Movement · ${turn.event.toCell}`;
-  if (turn.event.type === 'hex-infected') return `Infection · ${turn.event.cell}`;
+  if (turn.event.type === 'agent-moved')
+    return `Movement · ${turn.event.toCell}`;
+  if (turn.event.type === 'hex-infected')
+    return `Infection · ${turn.event.cell}`;
   return 'Waited';
 }

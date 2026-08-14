@@ -7,6 +7,7 @@ import {
   type ProviderDecision,
 } from '@agentborne/agent-runtime';
 import {
+  h3CellSchema,
   resetSimulationResponseSchema,
   simulationSnapshotSchema,
   singleTurnResponseSchema,
@@ -34,20 +35,27 @@ describe('game API simulation boundary', () => {
       ]),
     });
     const accepted = singleTurnResponseSchema.parse(
-      await (await acceptedApp.request('/api/simulation/turn', { method: 'POST' })).json(),
+      await (
+        await acceptedApp.request('/api/simulation/turn', { method: 'POST' })
+      ).json(),
     );
     expect(accepted.turn.outcome).toBe('accepted');
 
     const rejectedApp = createApp({
       provider: new ScriptedAgentProvider([
         {
-          requestedAction: { type: 'move', targetCell: '8928308280fffff' },
+          requestedAction: {
+            type: 'move',
+            targetCell: h3CellSchema.parse('8928308280fffff'),
+          },
           summary: 'Move far away.',
         },
       ]),
     });
     const rejected = singleTurnResponseSchema.parse(
-      await (await rejectedApp.request('/api/simulation/turn', { method: 'POST' })).json(),
+      await (
+        await rejectedApp.request('/api/simulation/turn', { method: 'POST' })
+      ).json(),
     );
     expect(rejected.turn.outcome).toBe('rejected');
   });
@@ -92,7 +100,9 @@ describe('game API simulation boundary', () => {
       ]),
     });
     await app.request('/api/simulation/turn', { method: 'POST' });
-    const response = await app.request('/api/simulation/reset', { method: 'POST' });
+    const response = await app.request('/api/simulation/reset', {
+      method: 'POST',
+    });
     const reset = resetSimulationResponseSchema.parse(await response.json());
     expect(reset.snapshot.turnNumber).toBe(0);
     expect(reset.snapshot.world.events).toEqual([]);
@@ -104,15 +114,26 @@ describe('game API simulation boundary', () => {
       mode: 'scripted-test',
       model: 'deferred-test',
       configured: true,
-      decide: () => new Promise((resolve) => { release = resolve; }),
+      decide: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
     };
     const app = createApp({ provider });
     const pending = app.request('/api/simulation/turn', { method: 'POST' });
-    expect((await app.request('/api/simulation/turn', { method: 'POST' })).status).toBe(409);
-    expect((await app.request('/api/simulation/reset', { method: 'POST' })).status).toBe(409);
+    expect(
+      (await app.request('/api/simulation/turn', { method: 'POST' })).status,
+    ).toBe(409);
+    expect(
+      (await app.request('/api/simulation/reset', { method: 'POST' })).status,
+    ).toBe(409);
     release({
       decision: { requestedAction: { type: 'wait' }, summary: 'Done.' },
-      metadata: { provider: 'scripted-test', model: 'deferred-test', latencyMs: 0 },
+      metadata: {
+        provider: 'scripted-test',
+        model: 'deferred-test',
+        latencyMs: 0,
+      },
     });
     expect((await pending).status).toBe(200);
   });

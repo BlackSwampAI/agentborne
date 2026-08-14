@@ -128,7 +128,10 @@ export function createApp(options: AppOptions = {}) {
   );
 
   app.onError((error, context) => {
-    console.error('Unhandled API error', error instanceof Error ? error.name : 'unknown');
+    console.error(
+      'Unhandled API error',
+      error instanceof Error ? error.name : 'unknown',
+    );
     return context.json(
       apiErrorSchema.parse({
         error: {

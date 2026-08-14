@@ -37,14 +37,23 @@ describe('OpenRouterAgentProvider', () => {
       json_schema: { strict: true },
     });
     expect(request.provider).toEqual({ require_parameters: true });
-    expect(request.messages[1].content).toContain(observation.personality);
-    expect(request.messages[0].content).toContain('Never produce messages');
+    expect(request.messages[1]!.content).toContain(observation.personality);
+    expect(request.messages[0]!.content).toContain('Never produce messages');
     expect(request.max_tokens).toBeLessThanOrEqual(200);
   });
 
   it('parses and runtime-validates a structured decision', async () => {
-    const fetchImplementation = vi.fn(async () =>
-      response(JSON.stringify({ requestedAction: { type: 'infect' }, summary: 'Claiming this cell.' })),
+    let capturedInit: RequestInit | undefined;
+    const fetchImplementation: typeof fetch = vi.fn(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        capturedInit = init;
+        return response(
+          JSON.stringify({
+            requestedAction: { type: 'infect' },
+            summary: 'Claiming this cell.',
+          }),
+        );
+      },
     );
     const provider = new OpenRouterAgentProvider({
       apiKey: 'secret-test-key',
@@ -54,25 +63,36 @@ describe('OpenRouterAgentProvider', () => {
       decision: { requestedAction: { type: 'infect' } },
       metadata: { provider: 'openrouter' },
     });
-    const init = fetchImplementation.mock.calls[0]?.[1];
-    expect(JSON.parse(String(init?.body))).toMatchObject({
+    expect(JSON.parse(String(capturedInit?.body))).toMatchObject({
       provider: { require_parameters: true },
     });
   });
 
   it.each([
     ['not-json', 'malformed-response'],
-    [JSON.stringify({ requestedAction: { type: 'teleport' }, summary: 'No.' }), 'unsupported-response'],
-    [JSON.stringify({ requestedAction: { type: 'wait' }, summary: 'x'.repeat(241) }), 'unsupported-response'],
-  ])('rejects invalid provider content without fallback', async (content, code) => {
-    const provider = new OpenRouterAgentProvider({
-      apiKey: 'secret-test-key',
-      fetchImplementation: vi.fn(async () => response(content)),
-    });
-    await expect(provider.decide(observation)).rejects.toMatchObject({
-      failure: { code },
-    });
-  });
+    [
+      JSON.stringify({ requestedAction: { type: 'teleport' }, summary: 'No.' }),
+      'unsupported-response',
+    ],
+    [
+      JSON.stringify({
+        requestedAction: { type: 'wait' },
+        summary: 'x'.repeat(241),
+      }),
+      'unsupported-response',
+    ],
+  ])(
+    'rejects invalid provider content without fallback',
+    async (content, code) => {
+      const provider = new OpenRouterAgentProvider({
+        apiKey: 'secret-test-key',
+        fetchImplementation: vi.fn(async () => response(content)),
+      });
+      await expect(provider.decide(observation)).rejects.toMatchObject({
+        failure: { code },
+      });
+    },
+  );
 
   it('sanitizes HTTP and network errors without leaking the key', async () => {
     const key = 'highly-sensitive-key';
@@ -139,6 +159,8 @@ describe('ScriptedAgentProvider', () => {
   });
 
   it('rejects an empty script', () => {
-    expect(() => new ScriptedAgentProvider([])).toThrow(/at least one decision/);
+    expect(() => new ScriptedAgentProvider([])).toThrow(
+      /at least one decision/,
+    );
   });
 });

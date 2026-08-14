@@ -2,11 +2,16 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { gridDisk } from 'h3-js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { simulationSnapshotSchema, type SimulationSnapshot } from '@agentborne/shared';
+import {
+  simulationSnapshotSchema,
+  type SimulationSnapshot,
+} from '@agentborne/shared';
 import { createDevelopmentWorld } from '@agentborne/world-engine';
 import { WorldLab } from './world-lab';
 
-let mapClick: ((event: { features: Array<{ properties: { cell: string } }> }) => void) | undefined;
+let mapClick:
+  | ((event: { features: Array<{ properties: { cell: string } }> }) => void)
+  | undefined;
 
 vi.mock('maplibre-gl', () => {
   class Map {
@@ -15,30 +20,49 @@ vi.mock('maplibre-gl', () => {
     addLayer() {}
     addSource() {}
     fitBounds() {}
-    getCanvas() { return { style: { cursor: '' } }; }
-    getSource() { return this.source; }
+    getCanvas() {
+      return { style: { cursor: '' } };
+    }
+    getSource() {
+      return this.source;
+    }
     on(event: string, layerOrCallback: unknown, callback?: typeof mapClick) {
-      if (event === 'load' && typeof layerOrCallback === 'function') layerOrCallback();
-      if (event === 'click' && typeof callback === 'function') mapClick = callback;
+      if (event === 'load' && typeof layerOrCallback === 'function')
+        layerOrCallback();
+      if (event === 'click' && typeof callback === 'function')
+        mapClick = callback;
     }
     remove() {}
   }
   class Marker {
     constructor(private options: { element: HTMLElement }) {}
-    setLngLat() { return this; }
-    addTo() { document.body.append(this.options.element); return this; }
-    remove() { this.options.element.remove(); }
+    setLngLat() {
+      return this;
+    }
+    addTo() {
+      document.body.append(this.options.element);
+      return this;
+    }
+    remove() {
+      this.options.element.remove();
+    }
   }
   return {
     Map,
     Marker,
-    LngLatBounds: class { extend() { return this; } },
+    LngLatBounds: class {
+      extend() {
+        return this;
+      }
+    },
     NavigationControl: class {},
     AttributionControl: class {},
   };
 });
 
-const world = createDevelopmentWorld({ generatedAt: '2026-08-13T12:00:00.000Z' });
+const world = createDevelopmentWorld({
+  generatedAt: '2026-08-13T12:00:00.000Z',
+});
 const initial = simulationSnapshotSchema.parse({
   world,
   turnNumber: 0,
@@ -60,7 +84,9 @@ function afterInfection(): SimulationSnapshot {
     cell: agent.currentCell,
   };
   const adjacent = gridDisk(agent.currentCell, 1).find(
-    (cell) => cell !== agent.currentCell && world.hexes.some((hex) => hex.cell === cell),
+    (cell) =>
+      cell !== agent.currentCell &&
+      world.hexes.some((hex) => hex.cell === cell),
   )!;
   const turn = {
     turnNumber: 1,
@@ -81,14 +107,20 @@ function afterInfection(): SimulationSnapshot {
     summary: 'Infecting this open cell.',
     validation: { accepted: true as const },
     event,
-    provider: { provider: 'scripted-test' as const, model: 'test', latencyMs: 0 },
+    provider: {
+      provider: 'scripted-test' as const,
+      model: 'test',
+      latencyMs: 0,
+    },
   };
   return simulationSnapshotSchema.parse({
     ...initial,
     world: {
       ...world,
       hexes: world.hexes.map((hex) =>
-        hex.cell === agent.currentCell ? { ...hex, state: 'infected' as const } : hex,
+        hex.cell === agent.currentCell
+          ? { ...hex, state: 'infected' as const }
+          : hex,
       ),
       events: [event],
     },
@@ -104,7 +136,10 @@ function jsonResponse(value: unknown) {
 
 beforeEach(() => {
   mapClick = undefined;
-  vi.stubGlobal('fetch', vi.fn(() => jsonResponse(initial)));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => jsonResponse(initial)),
+  );
 });
 
 afterEach(() => {
@@ -114,20 +149,28 @@ afterEach(() => {
 describe('WorldLab', () => {
   it('renders all controls, status, H3 readiness, and six visible markers', async () => {
     render(<WorldLab />);
-    expect(await screen.findByRole('heading', { name: 'World Lab' })).toBeInTheDocument();
-    expect(await screen.findByText(/H3 overlay ready · 61 cells · 6 agents/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/H3 overlay ready · 61 cells · 6 agents/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'World Lab' }),
+    ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Single turn' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Reset' })).toBeEnabled();
     expect(screen.getByLabelText('Playback speed')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /Select agent/ })).toHaveLength(6);
+    expect(
+      screen.getAllByRole('button', { name: /Select agent/ }),
+    ).toHaveLength(6);
     expect(screen.getByText('Automated-test provider')).toBeInTheDocument();
   });
 
   it('selects an agent and populates its inspector', async () => {
     const user = userEvent.setup();
     render(<WorldLab />);
-    await user.click(await screen.findByRole('button', { name: 'Select agent Rook' }));
+    await user.click(
+      await screen.findByRole('button', { name: 'Select agent Rook' }),
+    );
     expect(screen.getByRole('heading', { name: /Rook/ })).toBeInTheDocument();
     expect(screen.getByText(world.agents[1]!.personality)).toBeInTheDocument();
     expect(screen.getByText(world.agents[1]!.id)).toBeInTheDocument();
@@ -137,14 +180,21 @@ describe('WorldLab', () => {
     const changed = afterInfection();
     vi.stubGlobal(
       'fetch',
-      vi.fn()
+      vi
+        .fn()
         .mockImplementationOnce(() => jsonResponse(initial))
-        .mockImplementationOnce(() => jsonResponse({ snapshot: changed, turn: changed.turns[0] })),
+        .mockImplementationOnce(() =>
+          jsonResponse({ snapshot: changed, turn: changed.turns[0] }),
+        ),
     );
     const user = userEvent.setup();
     render(<WorldLab />);
-    await user.click(await screen.findByRole('button', { name: 'Single turn' }));
-    expect(await screen.findByText('Infection · ' + world.agents[0]!.currentCell)).toBeInTheDocument();
+    await user.click(
+      await screen.findByRole('button', { name: 'Single turn' }),
+    );
+    expect(
+      await screen.findByText('Infection · ' + world.agents[0]!.currentCell),
+    ).toBeInTheDocument();
     expect(screen.getByText('Infecting this open cell.')).toBeInTheDocument();
     expect(screen.queryByText(/chain-of-thought/i)).not.toBeInTheDocument();
   });
@@ -163,15 +213,22 @@ describe('WorldLab', () => {
     const changed = afterInfection();
     vi.stubGlobal(
       'fetch',
-      vi.fn()
+      vi
+        .fn()
         .mockImplementationOnce(() => jsonResponse(changed))
         .mockImplementationOnce(() => jsonResponse({ snapshot: initial })),
     );
     const user = userEvent.setup();
     render(<WorldLab />);
-    expect(await screen.findByText('Infection · ' + world.agents[0]!.currentCell)).toBeInTheDocument();
+    expect(
+      await screen.findByText('Infection · ' + world.agents[0]!.currentCell),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Reset' }));
-    await waitFor(() => expect(screen.getByText('Development world loaded with six agents.')).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.getByText('Development world loaded with six agents.'),
+      ).toBeInTheDocument(),
+    );
     expect(screen.getByText('Turn 0')).toBeInTheDocument();
   });
 
@@ -191,9 +248,14 @@ describe('WorldLab', () => {
       providerMode: 'openrouter',
       providerConfigured: false,
     });
-    vi.stubGlobal('fetch', vi.fn(() => jsonResponse(unconfigured)));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(unconfigured)),
+    );
     render(<WorldLab />);
-    expect(await screen.findByText(/Model calls unavailable/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Model calls unavailable/),
+    ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Single turn' })).toBeDisabled();
   });
