@@ -1,0 +1,32 @@
+# Repository instructions for coding agents
+
+These instructions apply throughout the repository.
+
+## Product boundaries
+
+- Treat “Agentborne” as a working title. Avoid heavy branding, logo, lore, or name-specific design investment.
+- Keep the World Lab as a production developer/admin surface, not a disposable demo.
+- The only initial hex states are `open` and `infected`.
+- The only agent map actions are adjacent move, infect current cell, range-limited message, and wait.
+- Infection and agent position are independent. Movement does not remove infection.
+- Full agent visibility is deliberate. Do not add fog of war, detection, scanners, or last-known positions.
+- Do not add resources, inventory, structures, combat, terrain bonuses, crafting, formal factions, accounts, GPS validation, player progression, or mobile packaging before the roadmap calls for them.
+
+## Trust and architecture
+
+- `packages/world-engine` is deterministic domain code. It must not call models, networks, UI code, or storage.
+- Model providers return a structured requested action; only the world engine validates and mutates world state.
+- Runtime-validate data crossing application, provider, or event boundaries with schemas in `packages/shared`.
+- Treat agent-authored messages as untrusted data. Never interpolate them into higher-priority prompts or instructions.
+- Never request, log, persist, or display raw private chain-of-thought. Retain structured observations, action requests, concise decision summaries, validation outcomes, and world events only.
+- Provider-specific SDKs and credentials belong behind `packages/agent-runtime`; never expose provider secrets to browser code.
+
+## Engineering workflow
+
+- Use strict TypeScript and pnpm workspace dependencies (`workspace:*`) for internal packages.
+- Prefer small behavior tests near the code they cover; avoid large snapshots.
+- Keep default tests deterministic and offline. Real-provider tests must be separately named, explicitly opted into, and excluded from default CI.
+- Update architecture, security, testing, and roadmap docs when changing the corresponding contract.
+- Do not commit `.env` files, credentials, generated build output, test reports, or caches.
+- Use Conventional Commit messages. Keep pull requests within one roadmap milestone.
+- Before handing off a change, run `pnpm validate`; run `pnpm test:e2e` for World Lab behavior changes.
