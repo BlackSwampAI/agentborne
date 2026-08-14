@@ -4,6 +4,7 @@ export const MODEL_SUMMARY_MAX_LENGTH = 240;
 export const MESSAGE_MAX_LENGTH = 280;
 export const MESSAGE_RANGE = 3;
 export const RECENT_COMMUNICATION_LIMIT = 6;
+export const RECENT_CONTROL_CHANGE_LIMIT = 6;
 export const PERSONALITY_MAX_LENGTH = 600;
 export const PROVIDER_ERROR_MAX_LENGTH = 240;
 
@@ -21,6 +22,20 @@ export type H3Cell = z.infer<typeof h3CellSchema>;
 
 export const hexStateSchema = z.enum(['open', 'infected']);
 export type HexState = z.infer<typeof hexStateSchema>;
+
+export const hexSchema = z.discriminatedUnion('state', [
+  z.object({
+    cell: h3CellSchema,
+    state: z.literal('open'),
+    controllerAgentId: z.null(),
+  }),
+  z.object({
+    cell: h3CellSchema,
+    state: z.literal('infected'),
+    controllerAgentId: agentIdSchema,
+  }),
+]);
+export type Hex = z.infer<typeof hexSchema>;
 
 export const personalitySchema = z
   .string()
@@ -45,6 +60,9 @@ export const moveActionSchema = z.object({
   targetCell: h3CellSchema,
 });
 export const infectActionSchema = z.object({ type: z.literal('infect') });
+export const captureActionSchema = z
+  .object({ type: z.literal('capture') })
+  .strict();
 export const messageContentSchema = z
   .string()
   .trim()
@@ -60,6 +78,7 @@ export const waitActionSchema = z.object({ type: z.literal('wait') });
 export const requestedActionSchema = z.discriminatedUnion('type', [
   moveActionSchema,
   infectActionSchema,
+  captureActionSchema,
   messageActionSchema,
   waitActionSchema,
 ]);
@@ -89,7 +108,15 @@ const agentMovedWorldEventSchema = worldEventBaseSchema.extend({
 const hexInfectedWorldEventSchema = worldEventBaseSchema.extend({
   type: z.literal('hex-infected'),
   cell: h3CellSchema,
+  controllerAgentId: agentIdSchema,
 });
+export const hexCapturedWorldEventSchema = worldEventBaseSchema.extend({
+  type: z.literal('hex-captured'),
+  cell: h3CellSchema,
+  controllerAgentId: agentIdSchema,
+  previousControllerAgentId: agentIdSchema,
+});
+export type HexCapturedWorldEvent = z.infer<typeof hexCapturedWorldEventSchema>;
 const agentWaitedWorldEventSchema = worldEventBaseSchema.extend({
   type: z.literal('agent-waited'),
 });
@@ -97,6 +124,7 @@ const agentWaitedWorldEventSchema = worldEventBaseSchema.extend({
 export const nonCommunicationWorldEventSchema = z.discriminatedUnion('type', [
   agentMovedWorldEventSchema,
   hexInfectedWorldEventSchema,
+  hexCapturedWorldEventSchema,
   agentWaitedWorldEventSchema,
 ]);
 export type NonCommunicationWorldEvent = z.infer<
@@ -106,6 +134,7 @@ export type NonCommunicationWorldEvent = z.infer<
 export const worldEventSchema = z.discriminatedUnion('type', [
   agentMovedWorldEventSchema,
   hexInfectedWorldEventSchema,
+  hexCapturedWorldEventSchema,
   acceptedMessageEventSchema,
   agentWaitedWorldEventSchema,
 ]);
@@ -117,11 +146,32 @@ export const invalidActionReasonSchema = z.enum([
   'not-adjacent',
   'cell-not-in-world',
   'already-infected',
+  'capture-open-cell',
+  'already-controller',
+  'controller-present',
   'unknown-recipient',
   'self-message',
   'out-of-range',
 ]);
 export type InvalidActionReason = z.infer<typeof invalidActionReasonSchema>;
+
+export const captureBlockedReasonSchema = z.enum([
+  'capture-open-cell',
+  'already-controller',
+  'controller-present',
+]);
+export type CaptureBlockedReason = z.infer<typeof captureBlockedReasonSchema>;
+
+export const captureEligibilitySchema = z.discriminatedUnion('eligible', [
+  z.object({ eligible: z.literal(true) }).strict(),
+  z
+    .object({
+      eligible: z.literal(false),
+      blockedReason: captureBlockedReasonSchema,
+    })
+    .strict(),
+]);
+export type CaptureEligibility = z.infer<typeof captureEligibilitySchema>;
 
 export const actionResultSchema = z.discriminatedUnion('accepted', [
   z.object({ accepted: z.literal(true), event: worldEventSchema }),
@@ -133,18 +183,34 @@ export const actionResultSchema = z.discriminatedUnion('accepted', [
 ]);
 export type ActionResult = z.infer<typeof actionResultSchema>;
 
-export const worldSnapshotSchema = z.object({
+const worldSnapshotObjectSchema = z.object({
   generatedAt: z.iso.datetime(),
-  hexes: z.array(z.object({ cell: h3CellSchema, state: hexStateSchema })),
+  hexes: z.array(hexSchema),
   agents: z.array(agentSchema),
   events: z.array(worldEventSchema).max(120),
 });
+
+function validateWorldControllers(
+  world: Pick<z.infer<typeof worldSnapshotObjectSchema>, 'hexes' | 'agents'>,
+  context: z.RefinementCtx,
+): void {
+  const agentIds = new Set(world.agents.map(({ id }) => id));
+  for (const [index, hex] of world.hexes.entries()) {
+    if (hex.state === 'infected' && !agentIds.has(hex.controllerAgentId))
+      context.addIssue({
+        code: 'custom',
+        path: ['hexes', index, 'controllerAgentId'],
+        message: 'An infected hex controller must be a world agent.',
+      });
+  }
+}
+
+export const worldSnapshotSchema = worldSnapshotObjectSchema.superRefine(
+  validateWorldControllers,
+);
 export type WorldSnapshot = z.infer<typeof worldSnapshotSchema>;
 
-export const cellObservationSchema = z.object({
-  cell: h3CellSchema,
-  state: hexStateSchema,
-});
+export const cellObservationSchema = hexSchema;
 export type CellObservation = z.infer<typeof cellObservationSchema>;
 
 export const nearbyAgentObservationSchema = z.object({
@@ -155,7 +221,7 @@ export const nearbyAgentObservationSchema = z.object({
 });
 
 export const publicEventObservationSchema = z.object({
-  type: z.enum(['agent-moved', 'hex-infected', 'agent-waited']),
+  type: z.enum(['agent-moved', 'hex-infected', 'hex-captured', 'agent-waited']),
   agentId: agentIdSchema,
   occurredAt: z.iso.datetime(),
   summary: z.string().trim().min(1).max(180),
@@ -174,17 +240,47 @@ export const observedCommunicationSchema = z.object({
 });
 export type ObservedCommunication = z.infer<typeof observedCommunicationSchema>;
 
+export const territoryScoreboardEntrySchema = z.object({
+  agentId: agentIdSchema,
+  name: z.string().trim().min(1).max(80),
+  color: z.string().regex(/^#[0-9a-f]{6}$/i),
+  controlledCellCount: z.number().int().nonnegative().max(61),
+});
+export const territoryScoreboardSchema = z
+  .array(territoryScoreboardEntrySchema)
+  .length(6)
+  .refine(
+    (entries) => new Set(entries.map(({ agentId }) => agentId)).size === 6,
+    { message: 'Territory scoreboard agent IDs must be unique.' },
+  );
+export type TerritoryScoreboard = z.infer<typeof territoryScoreboardSchema>;
+
+export const observedControlChangeSchema = z.object({
+  eventId: eventIdSchema,
+  direction: z.enum(['gained', 'lost']),
+  otherAgentId: agentIdSchema,
+  otherAgentName: z.string().trim().min(1).max(80),
+  cell: h3CellSchema,
+  occurredAt: z.iso.datetime(),
+});
+export type ObservedControlChange = z.infer<typeof observedControlChangeSchema>;
+
 export const agentObservationSchema = z.object({
   agentId: agentIdSchema,
   agentName: z.string().trim().min(1).max(80),
   personality: z.string().trim().min(1).max(PERSONALITY_MAX_LENGTH),
   currentCell: cellObservationSchema,
+  captureEligibility: captureEligibilitySchema,
   adjacentCells: z.array(cellObservationSchema).min(1).max(6),
   nearbyAgents: z.array(nearbyAgentObservationSchema).max(5),
   recentEvents: z.array(publicEventObservationSchema).max(8),
   recentCommunications: z
     .array(observedCommunicationSchema)
     .max(RECENT_COMMUNICATION_LIMIT),
+  territoryScoreboard: territoryScoreboardSchema,
+  recentControlChanges: z
+    .array(observedControlChangeSchema)
+    .max(RECENT_CONTROL_CHANGE_LIMIT),
 });
 export type AgentObservation = z.infer<typeof agentObservationSchema>;
 
@@ -274,27 +370,66 @@ export const simulationStatusSchema = z.enum([
 ]);
 export type SimulationStatus = z.infer<typeof simulationStatusSchema>;
 
-export const simulationSnapshotSchema = z.object({
-  world: worldSnapshotSchema,
-  turnNumber: z.number().int().nonnegative(),
-  nextAgentId: agentIdSchema,
-  activeAgentId: agentIdSchema.nullable(),
-  status: simulationStatusSchema,
-  providerMode: providerModeSchema,
-  providerConfigured: z.boolean(),
-  turns: z.array(agentTurnRecordSchema).max(120),
-  experiment: z.object({
-    id: z.uuid().brand<'ExperimentId'>(),
-    startedAt: z.iso.datetime(),
-    totalCompletedTurns: z.number().int().nonnegative(),
-    retainedTurns: z.number().int().nonnegative(),
-    firstRetainedTurn: z.number().int().positive().optional(),
-    lastRetainedTurn: z.number().int().positive().optional(),
-    droppedRecords: z.number().int().nonnegative(),
-    complete: z.boolean(),
-    metrics: z.lazy(() => experimentMetricsSchema),
-  }),
-});
+export const simulationSnapshotSchema = z
+  .object({
+    world: worldSnapshotSchema,
+    turnNumber: z.number().int().nonnegative(),
+    nextAgentId: agentIdSchema,
+    activeAgentId: agentIdSchema.nullable(),
+    status: simulationStatusSchema,
+    providerMode: providerModeSchema,
+    providerConfigured: z.boolean(),
+    turns: z.array(agentTurnRecordSchema).max(120),
+    experiment: z.object({
+      id: z.uuid().brand<'ExperimentId'>(),
+      startedAt: z.iso.datetime(),
+      totalCompletedTurns: z.number().int().nonnegative(),
+      retainedTurns: z.number().int().nonnegative(),
+      firstRetainedTurn: z.number().int().positive().optional(),
+      lastRetainedTurn: z.number().int().positive().optional(),
+      droppedRecords: z.number().int().nonnegative(),
+      complete: z.boolean(),
+      metrics: z.lazy(() => experimentMetricsSchema),
+      currentTerritory: territoryScoreboardSchema,
+    }),
+  })
+  .superRefine((snapshot, context) => {
+    const authoritative = new Map<AgentId, number>(
+      snapshot.world.agents.map(({ id }) => [id, 0]),
+    );
+    for (const hex of snapshot.world.hexes) {
+      if (hex.state === 'infected')
+        authoritative.set(
+          hex.controllerAgentId,
+          (authoritative.get(hex.controllerAgentId) ?? 0) + 1,
+        );
+    }
+    for (const [
+      index,
+      entry,
+    ] of snapshot.experiment.currentTerritory.entries()) {
+      const agent = snapshot.world.agents.find(
+        ({ id }) => id === entry.agentId,
+      );
+      if (!agent || agent.name !== entry.name || agent.color !== entry.color)
+        context.addIssue({
+          code: 'custom',
+          path: ['experiment', 'currentTerritory', index],
+          message: 'Current territory identity must match a world agent.',
+        });
+      if (authoritative.get(entry.agentId) !== entry.controlledCellCount)
+        context.addIssue({
+          code: 'custom',
+          path: [
+            'experiment',
+            'currentTerritory',
+            index,
+            'controlledCellCount',
+          ],
+          message: 'Current territory must match authoritative world control.',
+        });
+    }
+  });
 export type SimulationSnapshot = z.infer<typeof simulationSnapshotSchema>;
 
 export const singleTurnResponseSchema = z.object({
@@ -331,6 +466,12 @@ export const restoreDefaultPersonalitiesResponseSchema = z.object({
 export type RestoreDefaultPersonalitiesResponse = z.infer<
   typeof restoreDefaultPersonalitiesResponseSchema
 >;
+
+export const healthResponseSchema = z.object({
+  status: z.literal('ok'),
+  checkedAt: z.iso.datetime(),
+});
+export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
 export const apiErrorCodeSchema = z.enum([
   'turn_conflict',
@@ -407,10 +548,15 @@ export const metricCountsSchema = z.object({
   providerErrors: z.number().int().nonnegative(),
   requestedMoves: z.number().int().nonnegative(),
   requestedInfections: z.number().int().nonnegative(),
+  requestedCaptures: z.number().int().nonnegative(),
   requestedMessages: z.number().int().nonnegative(),
   requestedWaits: z.number().int().nonnegative(),
   acceptedMovements: z.number().int().nonnegative(),
   successfullyInfectedCells: z.number().int().nonnegative(),
+  successfulCaptures: z.number().int().nonnegative(),
+  territoryGainedThroughInfection: z.number().int().nonnegative(),
+  territoryGainedThroughCapture: z.number().int().nonnegative(),
+  territoryLostThroughCapture: z.number().int().nonnegative(),
   deliveredMessages: z.number().int().nonnegative(),
   sentCommunications: z.number().int().nonnegative(),
   receivedCommunications: z.number().int().nonnegative(),
@@ -435,7 +581,13 @@ export const exportOutcomeSchema = z.enum([
   'rejected',
   'provider-error',
 ]);
-export const exportActionSchema = z.enum(['move', 'infect', 'message', 'wait']);
+export const exportActionSchema = z.enum([
+  'move',
+  'infect',
+  'capture',
+  'message',
+  'wait',
+]);
 export const exportLevelSchema = z.enum([
   'minimal',
   'standard',
@@ -451,6 +603,7 @@ export const customExportOptionsSchema = z
     nearbyAgents: z.boolean(),
     recentEvents: z.boolean(),
     recentCommunications: z.boolean(),
+    recentControlChanges: z.boolean(),
     validationDetails: z.boolean(),
     resultingEvents: z.boolean(),
     providerUsageMetadata: z.boolean(),
@@ -458,17 +611,21 @@ export const customExportOptionsSchema = z
     currentWorldState: z.boolean(),
     computedMetrics: z.boolean(),
     communications: z.boolean(),
+    controlChanges: z.boolean(),
   })
   .strict()
   .superRefine((value, context) => {
     if (
       !value.turnObservations &&
-      (value.nearbyAgents || value.recentEvents || value.recentCommunications)
+      (value.nearbyAgents ||
+        value.recentEvents ||
+        value.recentCommunications ||
+        value.recentControlChanges)
     ) {
       context.addIssue({
         code: 'custom',
         message:
-          'Nearby agents, recent events, and recent communications require turn observations.',
+          'Nearby agents, recent events, recent communications, and recent control changes require turn observations.',
       });
     }
   });
@@ -517,7 +674,7 @@ export const experimentExportRequestSchema = z
     agents: exportSelectionSchema,
     turns: exportTurnSelectionSchema,
     outcomes: z.array(exportOutcomeSchema).min(1).max(3),
-    actions: z.array(exportActionSchema).min(1).max(4),
+    actions: z.array(exportActionSchema).min(1).max(5),
     level: exportLevelSchema,
     serialization: exportSerializationSchema.default('compact'),
     custom: customExportOptionsSchema.optional(),
@@ -547,6 +704,7 @@ export const experimentExportPreviewSchema = z.object({
   experimentId: experimentIdSchema,
   matchingRecordCount: z.number().int().nonnegative(),
   matchingCommunicationCount: z.number().int().nonnegative(),
+  matchingControlChangeCount: z.number().int().nonnegative(),
   selectedAgentCount: z.number().int().positive().max(6),
   firstMatchingTurn: z.number().int().positive().optional(),
   lastMatchingTurn: z.number().int().positive().optional(),
@@ -588,13 +746,17 @@ export const experimentExportTurnSchema = z.object({
   provider: providerMetadataSchema.optional(),
 });
 
-export const experimentExportWorldStateSchema = worldSnapshotSchema.omit({
-  events: true,
-});
+export const experimentExportWorldStateSchema = worldSnapshotObjectSchema
+  .omit({ events: true })
+  .superRefine(validateWorldControllers);
 
 export const exportedCommunicationSchema = acceptedMessageEventSchema.extend({
   originatingTurn: z.number().int().positive(),
 });
+export const exportedControlChangeSchema = hexCapturedWorldEventSchema.extend({
+  originatingTurn: z.number().int().positive(),
+});
+export type ExportedControlChange = z.infer<typeof exportedControlChangeSchema>;
 export type ExportedCommunication = z.infer<typeof exportedCommunicationSchema>;
 export type ExperimentExportWorldState = z.infer<
   typeof experimentExportWorldStateSchema
@@ -602,7 +764,7 @@ export type ExperimentExportWorldState = z.infer<
 
 export const experimentExportDocumentSchema = z
   .object({
-    schemaVersion: z.literal(2),
+    schemaVersion: z.literal(3),
     generatedAt: z.iso.datetime(),
     experiment: experimentManifestSchema,
     retention: experimentRetentionSchema,
@@ -611,6 +773,7 @@ export const experimentExportDocumentSchema = z
       selectedAgentIds: z.array(agentIdSchema).min(1).max(6),
       matchingRecordCount: z.number().int().nonnegative(),
       matchingCommunicationCount: z.number().int().nonnegative(),
+      matchingControlChangeCount: z.number().int().nonnegative(),
       firstMatchingTurn: z.number().int().positive().optional(),
       lastMatchingTurn: z.number().int().positive().optional(),
     }),
@@ -626,10 +789,12 @@ export const experimentExportDocumentSchema = z
       .array(personalityConfigurationEventSchema)
       .optional(),
     metrics: experimentMetricsSchema.optional(),
+    currentTerritory: territoryScoreboardSchema.optional(),
     initialWorld: experimentExportWorldStateSchema.optional(),
     currentWorld: experimentExportWorldStateSchema.optional(),
     worldEvents: z.array(nonCommunicationWorldEventSchema).optional(),
     communications: z.array(exportedCommunicationSchema).optional(),
+    controlChanges: z.array(exportedControlChangeSchema).optional(),
     turns: z.array(experimentExportTurnSchema),
   })
   .superRefine((document, context) => {
@@ -640,6 +805,11 @@ export const experimentExportDocumentSchema = z
       context.addIssue({
         code: 'custom',
         message: 'Metrics inclusion does not match the export level.',
+      });
+    if (Boolean(document.currentTerritory) !== Boolean(requiresMetrics))
+      context.addIssue({
+        code: 'custom',
+        message: 'Current territory inclusion does not match the export level.',
       });
     const personalityHistory =
       level === 'full-safe' || custom?.personalityTextHistory;
@@ -669,6 +839,12 @@ export const experimentExportDocumentSchema = z
       context.addIssue({
         code: 'custom',
         message: 'Communication inclusion does not match the export level.',
+      });
+    const controlChanges = level !== 'custom' || custom?.controlChanges;
+    if (Boolean(document.controlChanges) !== Boolean(controlChanges))
+      context.addIssue({
+        code: 'custom',
+        message: 'Control-change inclusion does not match the export level.',
       });
     for (const turn of document.turns) {
       const observation =

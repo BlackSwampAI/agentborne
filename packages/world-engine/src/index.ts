@@ -7,18 +7,22 @@ import {
   type ActionResult,
   type Agent,
   type AgentId,
+  type CaptureEligibility,
   type H3Cell,
-  type HexState,
   type RequestedAction,
   type WorldEvent,
   type WorldSnapshot,
 } from '@agentborne/shared';
 
 export interface WorldState {
-  readonly hexes: ReadonlyMap<H3Cell, HexState>;
+  readonly hexes: ReadonlyMap<H3Cell, HexControl>;
   readonly agents: ReadonlyMap<AgentId, Agent>;
   readonly events: readonly WorldEvent[];
 }
+
+export type HexControl =
+  | { readonly state: 'open'; readonly controllerAgentId: null }
+  | { readonly state: 'infected'; readonly controllerAgentId: AgentId };
 
 export interface EngineContext {
   createEventId: () => string;
@@ -49,6 +53,23 @@ export function areAdjacent(from: H3Cell, to: H3Cell): boolean {
   } catch {
     return false;
   }
+}
+
+export function getCaptureEligibility(
+  state: WorldState,
+  agentId: AgentId,
+): CaptureEligibility {
+  const agent = state.agents.get(agentId);
+  if (!agent) throw new Error('The acting agent does not exist.');
+  const currentHex = state.hexes.get(agent.currentCell);
+  if (!currentHex || currentHex.state === 'open')
+    return { eligible: false, blockedReason: 'capture-open-cell' };
+  if (currentHex.controllerAgentId === agentId)
+    return { eligible: false, blockedReason: 'already-controller' };
+  const controller = state.agents.get(currentHex.controllerAgentId);
+  if (controller?.currentCell === agent.currentCell)
+    return { eligible: false, blockedReason: 'controller-present' };
+  return { eligible: true };
 }
 
 export function applyRequestedAction(
@@ -111,7 +132,7 @@ export function applyRequestedAction(
   }
 
   if (action.type === 'infect') {
-    if (state.hexes.get(agent.currentCell) === 'infected') {
+    if (state.hexes.get(agent.currentCell)?.state === 'infected') {
       return rejected(
         state,
         'already-infected',
@@ -129,9 +150,45 @@ export function applyRequestedAction(
       ...eventBase,
       type: 'hex-infected',
       cell: agent.currentCell,
+      controllerAgentId: agentId,
     };
     const hexes = new Map(state.hexes);
-    hexes.set(agent.currentCell, 'infected');
+    hexes.set(agent.currentCell, {
+      state: 'infected',
+      controllerAgentId: agentId,
+    });
+    return accept(state, { ...state, hexes }, event);
+  }
+
+  if (action.type === 'capture') {
+    const eligibility = getCaptureEligibility(state, agentId);
+    if (!eligibility.eligible)
+      return rejected(
+        state,
+        eligibility.blockedReason,
+        {
+          'capture-open-cell': 'Only an infected current cell can be captured.',
+          'already-controller':
+            'The acting agent already controls the current cell.',
+          'controller-present':
+            'The current controller is present and defends this cell.',
+        }[eligibility.blockedReason],
+      );
+    const currentHex = state.hexes.get(agent.currentCell);
+    if (!currentHex || currentHex.state !== 'infected')
+      throw new Error('Eligible capture must target an infected current cell.');
+    const event: WorldEvent = {
+      ...eventBase,
+      type: 'hex-captured',
+      cell: agent.currentCell,
+      controllerAgentId: agentId,
+      previousControllerAgentId: currentHex.controllerAgentId,
+    };
+    const hexes = new Map(state.hexes);
+    hexes.set(agent.currentCell, {
+      state: 'infected',
+      controllerAgentId: agentId,
+    });
     return accept(state, { ...state, hexes }, event);
   }
 
@@ -217,7 +274,7 @@ export const DEVELOPMENT_AGENT_BLUEPRINTS = [
     name: 'Mingle',
     color: '#63d2ff',
     personality:
-      'You are curious about other agents. Move toward visible agents and linger near activity, while infecting opportunistically.',
+      'You are a social coalition-builder. Move toward visible agents, initiate and continue conversations, negotiate before taking their territory, and coordinate when useful. Infect open cells opportunistically, but value interaction over silent pursuit.',
   },
   {
     id: '442a1667-39c8-48e9-8c89-23803f9e2101',
@@ -261,6 +318,7 @@ export function createDevelopmentWorld({
     hexes: cells.map((cell) => ({
       cell,
       state: 'open' as const,
+      controllerAgentId: null,
     })),
     agents: DEVELOPMENT_AGENT_BLUEPRINTS.map((profile, index) => ({
       ...profile,
@@ -273,7 +331,7 @@ export function createDevelopmentWorld({
 
 export function toWorldState(snapshot: WorldSnapshot): WorldState {
   return {
-    hexes: new Map(snapshot.hexes.map(({ cell, state }) => [cell, state])),
+    hexes: new Map(snapshot.hexes.map(({ cell, ...hex }) => [cell, hex])),
     agents: new Map(snapshot.agents.map((agent) => [agent.id, agent])),
     events: snapshot.events,
   };

@@ -298,7 +298,13 @@ export function WorldLab() {
             selectedCell={selectedCell ?? snapshot.world.hexes[0]!.cell}
             selectedAgentId={selectedAgentId}
             onSelectCell={setSelectedCell}
-            onSelectAgent={setSelectedAgentId}
+            onSelectAgent={(agentId) => {
+              setSelectedAgentId(agentId);
+              const agent = snapshot.world.agents.find(
+                ({ id }) => id === agentId,
+              );
+              if (agent) setSelectedCell(agent.currentCell);
+            }}
           />
           <div className="map-caption">
             <span>Development location: Toledo, Ohio</span>
@@ -432,6 +438,22 @@ export function WorldLab() {
                   ({ agentId }) => agentId === selectedAgent.id,
                 )?.metrics
               }
+              controlledCellCount={
+                snapshot.experiment.currentTerritory.find(
+                  ({ agentId }) => agentId === selectedAgent.id,
+                )?.controlledCellCount ?? 0
+              }
+              controlChanges={snapshot.world.events.filter(
+                (
+                  event,
+                ): event is Extract<
+                  SimulationSnapshot['world']['events'][number],
+                  { type: 'hex-captured' }
+                > =>
+                  event.type === 'hex-captured' &&
+                  (event.controllerAgentId === selectedAgent.id ||
+                    event.previousControllerAgentId === selectedAgent.id),
+              )}
               onExportAgent={(agentId) => {
                 setRunning(false);
                 setExportAgentIds([agentId]);
@@ -449,14 +471,41 @@ export function WorldLab() {
             onSelectionChange={setExportAgentIds}
           />
 
+          <TerritoryScoreboard entries={snapshot.experiment.currentTerritory} />
+
           {selectedHex && (
-            <section className="panel selected-panel">
+            <section
+              className="panel selected-panel"
+              aria-label="Selected hex inspector"
+            >
               <p className="panel-kicker">Selected hex</p>
               <h2>{selectedHex.state === 'infected' ? 'Infected' : 'Open'}</h2>
               <dl>
                 <div>
                   <dt>H3 index</dt>
                   <dd>{selectedHex.cell}</dd>
+                </div>
+                <div>
+                  <dt>Controlled by</dt>
+                  <dd>
+                    {selectedHex.state === 'infected' ? (
+                      <>
+                        <span
+                          className="agent-swatch"
+                          style={{
+                            background: snapshot.world.agents.find(
+                              ({ id }) => id === selectedHex.controllerAgentId,
+                            )?.color,
+                          }}
+                        />
+                        {snapshot.world.agents.find(
+                          ({ id }) => id === selectedHex.controllerAgentId,
+                        )?.name ?? selectedHex.controllerAgentId}
+                      </>
+                    ) : (
+                      'No controller'
+                    )}
+                  </dd>
                 </div>
                 <div>
                   <dt>State</dt>
@@ -476,6 +525,35 @@ export function WorldLab() {
   );
 }
 
+function TerritoryScoreboard({
+  entries,
+}: {
+  entries: SimulationSnapshot['experiment']['currentTerritory'];
+}) {
+  return (
+    <section
+      className="panel territory-panel"
+      aria-label="Territory scoreboard"
+    >
+      <p className="panel-kicker">Current authoritative control</p>
+      <h2>Territory scoreboard</h2>
+      <ol>
+        {entries.map((entry) => (
+          <li key={entry.agentId}>
+            <span
+              className="agent-swatch"
+              style={{ background: entry.color }}
+            />
+            <span>{entry.name}</span>
+            <strong>{entry.controlledCellCount}</strong>
+            <span className="sr-only">controlled cells</span>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
 function AgentInspector({
   agent,
   cellState,
@@ -487,6 +565,8 @@ function AgentInspector({
   mutationPending,
   onApplyPersonality,
   metrics,
+  controlledCellCount,
+  controlChanges,
   onExportAgent,
 }: {
   agent: SimulationSnapshot['world']['agents'][number];
@@ -507,6 +587,13 @@ function AgentInspector({
     personality: string,
   ) => Promise<boolean>;
   metrics?: SimulationSnapshot['experiment']['metrics']['aggregate'];
+  controlledCellCount: number;
+  controlChanges: Array<
+    Extract<
+      SimulationSnapshot['world']['events'][number],
+      { type: 'hex-captured' }
+    >
+  >;
   onExportAgent: (agentId: AgentId) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -558,11 +645,34 @@ function AgentInspector({
         <span>{metrics?.totalTurns ?? 0} turns</span>
         <span>{metrics?.sentCommunications ?? 0} sent</span>
         <span>{metrics?.receivedCommunications ?? 0} received</span>
+        <span>{controlledCellCount} controlled cells</span>
         <span>{formatCost(metrics?.knownCostCredits ?? 0)} known cost</span>
         {(metrics?.turnsWithUnknownCost ?? 0) > 0 && (
           <span>{metrics?.turnsWithUnknownCost} unknown-cost turns</span>
         )}
       </div>
+      <h3>Recent territory gains and losses</h3>
+      {controlChanges.length === 0 ? (
+        <p className="muted">
+          No territory gains or losses for this agent yet.
+        </p>
+      ) : (
+        <ol className="control-history" aria-label="Recent territory changes">
+          {controlChanges.slice(-6).map((change) => {
+            const gained = change.controllerAgentId === agent.id;
+            const otherId = gained
+              ? change.previousControllerAgentId
+              : change.controllerAgentId;
+            const other = agents.find(({ id }) => id === otherId);
+            return (
+              <li key={change.id}>
+                <strong>{gained ? 'Gained' : 'Lost'}</strong> {change.cell}{' '}
+                {gained ? 'from' : 'to'} {other?.name ?? otherId}
+              </li>
+            );
+          })}
+        </ol>
+      )}
       <button type="button" onClick={() => onExportAgent(agent.id)}>
         Export this agent
       </button>
@@ -756,6 +866,12 @@ function AgentInspector({
               {latestTurn.observation.currentCell.state})
             </p>
             <p>
+              Capture:{' '}
+              {latestTurn.observation.captureEligibility.eligible
+                ? 'eligible'
+                : `blocked · ${latestTurn.observation.captureEligibility.blockedReason}`}
+            </p>
+            <p>
               Adjacent:{' '}
               {latestTurn.observation.adjacentCells
                 .map(({ cell, state }) => `${cell} (${state})`)
@@ -831,6 +947,7 @@ const defaultCustomOptions: CustomExportOptions = {
   nearbyAgents: true,
   recentEvents: true,
   recentCommunications: true,
+  recentControlChanges: true,
   validationDetails: true,
   resultingEvents: true,
   providerUsageMetadata: true,
@@ -838,6 +955,7 @@ const defaultCustomOptions: CustomExportOptions = {
   currentWorldState: true,
   computedMetrics: true,
   communications: true,
+  controlChanges: true,
 };
 
 function ExperimentExportPanel({
@@ -869,8 +987,8 @@ function ExperimentExportPanel({
     Array<'accepted' | 'rejected' | 'provider-error'>
   >(['accepted', 'rejected', 'provider-error']);
   const [actions, setActions] = useState<
-    Array<'move' | 'infect' | 'message' | 'wait'>
-  >(['move', 'infect', 'message', 'wait']);
+    Array<'move' | 'infect' | 'capture' | 'message' | 'wait'>
+  >(['move', 'infect', 'capture', 'message', 'wait']);
   const [custom, setCustom] = useState(defaultCustomOptions);
   const [preview, setPreview] = useState<ExperimentExportPreview | null>(null);
   const [document, setDocument] = useState<ExperimentExportDocument | null>(
@@ -1134,7 +1252,7 @@ function ExperimentExportPanel({
       />
       <FilterChecks
         label="Actions"
-        options={['move', 'infect', 'message', 'wait']}
+        options={['move', 'infect', 'capture', 'message', 'wait']}
         selected={actions}
         onToggle={(value) => setActions(toggle(actions, value))}
       />
@@ -1149,7 +1267,8 @@ function ExperimentExportPanel({
                   disabled={
                     (key === 'nearbyAgents' ||
                       key === 'recentEvents' ||
-                      key === 'recentCommunications') &&
+                      key === 'recentCommunications' ||
+                      key === 'recentControlChanges') &&
                     !custom.turnObservations
                   }
                   type="checkbox"
@@ -1163,6 +1282,7 @@ function ExperimentExportPanel({
                         next.nearbyAgents = false;
                         next.recentEvents = false;
                         next.recentCommunications = false;
+                        next.recentControlChanges = false;
                       }
                       return next;
                     })
@@ -1227,6 +1347,10 @@ function ExperimentExportPanel({
             <dd>{preview.matchingCommunicationCount} accepted</dd>
           </div>
           <div>
+            <dt>Control changes</dt>
+            <dd>{preview.matchingControlChangeCount} matched</dd>
+          </div>
+          <div>
             <dt>Size</dt>
             <dd>{preview.serializedUtf8Bytes} bytes</dd>
           </div>
@@ -1284,6 +1408,7 @@ function customOptionLabel(key: keyof CustomExportOptions): string {
     nearbyAgents: 'Nearby agents',
     recentEvents: 'Recent events',
     recentCommunications: 'Recent communications in observations',
+    recentControlChanges: 'Recent control changes in observations',
     validationDetails: 'Validation details',
     resultingEvents: 'Resulting events',
     providerUsageMetadata: 'Provider usage metadata',
@@ -1291,6 +1416,7 @@ function customOptionLabel(key: keyof CustomExportOptions): string {
     currentWorldState: 'Current world state',
     computedMetrics: 'Computed metrics',
     communications: 'Canonical communications',
+    controlChanges: 'Canonical control changes',
   }[key];
 }
 
@@ -1366,6 +1492,14 @@ function formatTurn(
     const sender = agents.find(({ id }) => id === event.agentId);
     const recipient = agents.find(({ id }) => id === event.recipientId);
     return `Message · ${sender?.name ?? event.agentId} → ${recipient?.name ?? event.recipientId}: ${event.message}`;
+  }
+  if (turn.event.type === 'hex-captured') {
+    const event = turn.event;
+    const capturer = agents.find(({ id }) => id === event.controllerAgentId);
+    const previous = agents.find(
+      ({ id }) => id === event.previousControllerAgentId,
+    );
+    return `${capturer?.name ?? event.controllerAgentId} captured ${event.cell} from ${previous?.name ?? event.previousControllerAgentId}.`;
   }
   return 'Waited';
 }

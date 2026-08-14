@@ -11,6 +11,7 @@ import {
   experimentExportRequestSchema,
   experimentExportPreviewSchema,
   experimentExportResponseSchema,
+  healthResponseSchema,
   PERSONALITY_MAX_LENGTH,
   resetSimulationResponseSchema,
   restoreDefaultPersonalitiesResponseSchema,
@@ -28,12 +29,7 @@ import {
 } from './simulation-service';
 import { ExperimentExportValidationError } from './experiment-export';
 
-export const healthResponseSchema = worldSnapshotSchema
-  .pick({ generatedAt: true })
-  .transform(({ generatedAt }) => ({
-    status: 'ok' as const,
-    checkedAt: generatedAt,
-  }));
+export { healthResponseSchema };
 
 export interface AppOptions {
   service?: SimulationService;
@@ -72,7 +68,10 @@ export function createApp(options: AppOptions = {}) {
 
   app.get('/health', (context) =>
     context.json(
-      healthResponseSchema.parse({ generatedAt: new Date().toISOString() }),
+      healthResponseSchema.parse({
+        status: 'ok',
+        checkedAt: new Date().toISOString(),
+      }),
     ),
   );
 

@@ -27,6 +27,7 @@ const mapLibreMock = vi.hoisted(() => ({
   }>,
   queryRenderedFeatures: vi.fn(),
   setData: vi.fn(),
+  latestSourceData: undefined as unknown,
 }));
 
 vi.mock('maplibre-gl', () => {
@@ -68,11 +69,13 @@ vi.mock('maplibre-gl', () => {
         data: source.data,
         setData: (data) => {
           mapLibreMock.setData(data);
+          mapLibreMock.latestSourceData = data;
           this.source!.data = data as typeof source.data;
           this.sourceLoaded = false;
           queueMicrotask(completeSourceUpdate);
         },
       };
+      mapLibreMock.latestSourceData = source.data;
       queueMicrotask(completeSourceUpdate);
     }
     emit(event: string, eventData?: unknown) {
@@ -167,6 +170,12 @@ const world = createDevelopmentWorld({
   generatedAt: '2026-08-13T12:00:00.000Z',
 });
 const HOSTILE_MESSAGE = '<img src=x onerror=alert(1)> Hold position.';
+const emptyTerritory = world.agents.map(({ id, name, color }) => ({
+  agentId: id,
+  name,
+  color,
+  controlledCellCount: 0,
+}));
 const initial = simulationSnapshotSchema.parse({
   world,
   turnNumber: 0,
@@ -190,6 +199,7 @@ const initial = simulationSnapshotSchema.parse({
         metrics: emptyMetrics(),
       })),
     },
+    currentTerritory: emptyTerritory,
   },
 });
 
@@ -201,10 +211,15 @@ function emptyMetrics() {
     providerErrors: 0,
     requestedMoves: 0,
     requestedInfections: 0,
+    requestedCaptures: 0,
     requestedMessages: 0,
     requestedWaits: 0,
     acceptedMovements: 0,
     successfullyInfectedCells: 0,
+    successfulCaptures: 0,
+    territoryGainedThroughInfection: 0,
+    territoryGainedThroughCapture: 0,
+    territoryLostThroughCapture: 0,
     deliveredMessages: 0,
     sentCommunications: 0,
     receivedCommunications: 0,
@@ -223,6 +238,7 @@ function afterInfection(): SimulationSnapshot {
     occurredAt: '2026-08-13T12:00:01.000Z',
     type: 'hex-infected' as const,
     cell: agent.currentCell,
+    controllerAgentId: agent.id,
   };
   const adjacent = gridDisk(agent.currentCell, 1).find(
     (cell) =>
@@ -238,11 +254,23 @@ function afterInfection(): SimulationSnapshot {
       agentId: agent.id,
       agentName: agent.name,
       personality: agent.personality,
-      currentCell: { cell: agent.currentCell, state: 'open' as const },
-      adjacentCells: [{ cell: adjacent, state: 'open' as const }],
+      currentCell: {
+        cell: agent.currentCell,
+        state: 'open' as const,
+        controllerAgentId: null,
+      },
+      captureEligibility: {
+        eligible: false as const,
+        blockedReason: 'capture-open-cell' as const,
+      },
+      adjacentCells: [
+        { cell: adjacent, state: 'open' as const, controllerAgentId: null },
+      ],
       nearbyAgents: [],
       recentEvents: [],
       recentCommunications: [],
+      territoryScoreboard: emptyTerritory,
+      recentControlChanges: [],
     },
     outcome: 'accepted' as const,
     requestedAction: { type: 'infect' as const },
@@ -265,7 +293,11 @@ function afterInfection(): SimulationSnapshot {
       ...world,
       hexes: world.hexes.map((hex) =>
         hex.cell === agent.currentCell
-          ? { ...hex, state: 'infected' as const }
+          ? {
+              ...hex,
+              state: 'infected' as const,
+              controllerAgentId: agent.id,
+            }
           : hex,
       ),
       events: [event],
@@ -286,6 +318,7 @@ function afterInfection(): SimulationSnapshot {
           accepted: 1,
           requestedInfections: 1,
           successfullyInfectedCells: 1,
+          territoryGainedThroughInfection: 1,
           uniqueVisitedCells: 1,
           averageLatencyMs: 0,
         },
@@ -299,6 +332,7 @@ function afterInfection(): SimulationSnapshot {
                   accepted: 1,
                   requestedInfections: 1,
                   successfullyInfectedCells: 1,
+                  territoryGainedThroughInfection: 1,
                   uniqueVisitedCells: 1,
                   averageLatencyMs: 0,
                 },
@@ -306,6 +340,10 @@ function afterInfection(): SimulationSnapshot {
             : entry,
         ),
       },
+      currentTerritory: emptyTerritory.map((entry, index) => ({
+        ...entry,
+        controlledCellCount: index === 0 ? 1 : 0,
+      })),
     },
   });
 }
@@ -332,8 +370,22 @@ function afterMessage(): SimulationSnapshot {
       agentId: sender.id,
       agentName: sender.name,
       personality: sender.personality,
-      currentCell: { cell: sender.currentCell, state: 'open' as const },
-      adjacentCells: [{ cell: world.hexes[1]!.cell, state: 'open' as const }],
+      currentCell: {
+        cell: sender.currentCell,
+        state: 'open' as const,
+        controllerAgentId: null,
+      },
+      captureEligibility: {
+        eligible: false as const,
+        blockedReason: 'capture-open-cell' as const,
+      },
+      adjacentCells: [
+        {
+          cell: world.hexes[1]!.cell,
+          state: 'open' as const,
+          controllerAgentId: null,
+        },
+      ],
       nearbyAgents: [
         {
           id: recipient.id,
@@ -344,6 +396,8 @@ function afterMessage(): SimulationSnapshot {
       ],
       recentEvents: [],
       recentCommunications: [],
+      territoryScoreboard: emptyTerritory,
+      recentControlChanges: [],
     },
     outcome: 'accepted' as const,
     requestedAction: {
@@ -408,6 +462,140 @@ function afterMessage(): SimulationSnapshot {
   });
 }
 
+function afterCapture(): SimulationSnapshot {
+  const infected = afterInfection();
+  const previous = world.agents[0]!;
+  const capturer = world.agents[1]!;
+  const cell = previous.currentCell;
+  const controllerDepartureCell = gridDisk(cell, 1).find(
+    (candidate) =>
+      candidate !== cell && world.hexes.some(({ cell }) => cell === candidate),
+  )!;
+  const captureEvent = {
+    id: '77bb21b9-fc78-4b04-9f92-9862bf346f97',
+    agentId: capturer.id,
+    occurredAt: '2026-08-13T12:00:02.000Z',
+    type: 'hex-captured' as const,
+    cell,
+    controllerAgentId: capturer.id,
+    previousControllerAgentId: previous.id,
+  };
+  const captureTurn = {
+    turnNumber: 2,
+    agentId: capturer.id,
+    startedAt: '2026-08-13T12:00:01.000Z',
+    completedAt: '2026-08-13T12:00:02.000Z',
+    observation: {
+      agentId: capturer.id,
+      agentName: capturer.name,
+      personality: capturer.personality,
+      currentCell: {
+        cell,
+        state: 'infected' as const,
+        controllerAgentId: previous.id,
+      },
+      captureEligibility: { eligible: true as const },
+      adjacentCells: [
+        {
+          ...world.hexes[1]!,
+        },
+      ],
+      nearbyAgents: [
+        {
+          id: previous.id,
+          name: previous.name,
+          currentCell: controllerDepartureCell,
+          distance: 1,
+        },
+      ],
+      recentEvents: [],
+      recentCommunications: [],
+      territoryScoreboard: emptyTerritory.map((entry, index) => ({
+        ...entry,
+        controlledCellCount: index === 0 ? 1 : 0,
+      })),
+      recentControlChanges: [],
+    },
+    outcome: 'accepted' as const,
+    requestedAction: { type: 'capture' as const },
+    summary: 'Capturing this contested hex.',
+    validation: { accepted: true as const },
+    event: captureEvent,
+    provider: {
+      provider: 'scripted-test' as const,
+      model: 'test',
+      latencyMs: 0,
+      costCredits: 0,
+    },
+  };
+  return simulationSnapshotSchema.parse({
+    ...infected,
+    world: {
+      ...infected.world,
+      hexes: infected.world.hexes.map((hex) =>
+        hex.cell === cell ? { ...hex, controllerAgentId: capturer.id } : hex,
+      ),
+      agents: infected.world.agents.map((agent) =>
+        agent.id === capturer.id
+          ? { ...agent, currentCell: cell }
+          : agent.id === previous.id
+            ? { ...agent, currentCell: controllerDepartureCell }
+            : agent,
+      ),
+      events: [...infected.world.events, captureEvent],
+    },
+    turnNumber: 2,
+    nextAgentId: world.agents[2]!.id,
+    turns: [...infected.turns, captureTurn],
+    experiment: {
+      ...infected.experiment,
+      totalCompletedTurns: 2,
+      retainedTurns: 2,
+      lastRetainedTurn: 2,
+      metrics: {
+        aggregate: {
+          ...infected.experiment.metrics.aggregate,
+          totalTurns: 2,
+          accepted: 2,
+          requestedCaptures: 1,
+          successfulCaptures: 1,
+          territoryGainedThroughCapture: 1,
+          territoryLostThroughCapture: 1,
+        },
+        byAgent: infected.experiment.metrics.byAgent.map((entry, index) =>
+          index === 0
+            ? {
+                ...entry,
+                metrics: {
+                  ...entry.metrics,
+                  territoryLostThroughCapture: 1,
+                },
+              }
+            : index === 1
+              ? {
+                  ...entry,
+                  metrics: {
+                    ...entry.metrics,
+                    totalTurns: 1,
+                    accepted: 1,
+                    requestedCaptures: 1,
+                    successfulCaptures: 1,
+                    territoryGainedThroughCapture: 1,
+                    uniqueVisitedCells: 1,
+                    averageLatencyMs: 0,
+                  },
+                }
+              : entry,
+        ),
+      },
+      currentTerritory: emptyTerritory.map((entry, index) => ({
+        ...entry,
+        controlledCellCount: index === 1 ? 1 : 0,
+      })),
+    },
+  });
+}
+
 function jsonResponse(value: unknown) {
   return Promise.resolve(new Response(JSON.stringify(value), { status: 200 }));
 }
@@ -439,6 +627,7 @@ beforeEach(() => {
   mapLibreMock.layers = [];
   mapLibreMock.queryRenderedFeatures.mockReset();
   mapLibreMock.setData.mockReset();
+  mapLibreMock.latestSourceData = undefined;
   vi.stubGlobal(
     'fetch',
     vi.fn(() => jsonResponse(initial)),
@@ -655,6 +844,10 @@ describe('WorldLab', () => {
       await screen.findByText('Infection · ' + world.agents[0]!.currentCell),
     ).toBeInTheDocument();
     expect(screen.getByText('Infecting this open cell.')).toBeInTheDocument();
+    await user.click(screen.getByText('Latest structured observation'));
+    expect(
+      screen.getByText('Latest structured observation').closest('details'),
+    ).toHaveTextContent('Capture: blocked · capture-open-cell');
     await waitFor(() =>
       expect(screen.getByTestId('world-map')).toHaveAttribute(
         'data-rendered-infected-cell-count',
@@ -674,6 +867,53 @@ describe('WorldLab', () => {
       }),
     );
     expect(screen.queryByText(/chain-of-thought/i)).not.toBeInTheDocument();
+  });
+
+  it('renders controller identity, territory totals, capture events, and both gain/loss views', async () => {
+    const user = userEvent.setup();
+    const captured = afterCapture();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(captured)),
+    );
+    render(<WorldLab />);
+    expect(
+      await screen.findByRole('heading', { name: 'Territory scoreboard' }),
+    ).toBeInTheDocument();
+    const scoreboard = screen.getByLabelText('Territory scoreboard');
+    expect(scoreboard).toHaveTextContent('Ember0');
+    expect(scoreboard).toHaveTextContent('Rook1');
+    expect(screen.getByText('Rook', { selector: 'dd' })).toBeInTheDocument();
+    expect(screen.getByText(/Rook captured .* from Ember/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Recent territory changes')).toHaveTextContent(
+      'Lost',
+    );
+    expect(screen.getByText('0 controlled cells')).toBeInTheDocument();
+    await user.click(
+      await screen.findByRole('button', { name: 'Select agent Rook' }),
+    );
+    expect(screen.getByLabelText('Recent territory changes')).toHaveTextContent(
+      'Gained',
+    );
+    expect(screen.getByText('1 controlled cells')).toBeInTheDocument();
+    await user.click(screen.getByText('Latest structured observation'));
+    expect(
+      screen.getByText('Latest structured observation').closest('details'),
+    ).toHaveTextContent('Capture: eligible');
+    await waitFor(() =>
+      expect(mapLibreMock.latestSourceData).toEqual(
+        expect.objectContaining({
+          features: expect.arrayContaining([
+            expect.objectContaining({
+              properties: expect.objectContaining({
+                controllerColor: '#ffd166',
+                controllerName: 'Rook',
+              }),
+            }),
+          ]),
+        }),
+      ),
+    );
   });
 
   it('starts, pauses, and changes playback speed without overlapping immediately', async () => {
@@ -1027,6 +1267,7 @@ describe('WorldLab', () => {
         experimentId: initial.experiment.id,
         matchingRecordCount: 0,
         matchingCommunicationCount: 0,
+        matchingControlChangeCount: 0,
         selectedAgentCount: 2,
         retention: {
           limit: 5000,
@@ -1157,7 +1398,17 @@ describe('WorldLab', () => {
         hexes: initial.world.hexes.map((hex) => ({
           ...hex,
           state: 'infected' as const,
+          controllerAgentId: initial.world.agents[0]!.id,
         })),
+      },
+      experiment: {
+        ...initial.experiment,
+        currentTerritory: initial.experiment.currentTerritory.map(
+          (entry, index) => ({
+            ...entry,
+            controlledCellCount: index === 0 ? 61 : 0,
+          }),
+        ),
       },
     });
     vi.stubGlobal(
@@ -1178,7 +1429,7 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
   const turn = snapshot.turns[0]!;
   const agent = snapshot.world.agents[0]!;
   return {
-    schemaVersion: 2 as const,
+    schemaVersion: 3 as const,
     generatedAt: '2026-08-13T12:00:02.000Z',
     experiment: {
       id: snapshot.experiment.id,
@@ -1199,13 +1450,14 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
       agents: { mode: 'selected' as const, agentIds: [agent.id] },
       turns: { mode: 'entire-retained' as const },
       outcomes: ['accepted', 'rejected', 'provider-error'] as const,
-      actions: ['move', 'infect', 'message', 'wait'] as const,
+      actions: ['move', 'infect', 'capture', 'message', 'wait'] as const,
       level: 'minimal' as const,
     },
     selection: {
       selectedAgentIds: [agent.id],
       matchingRecordCount: 1,
       matchingCommunicationCount: 0,
+      matchingControlChangeCount: 0,
       firstMatchingTurn: 1,
       lastMatchingTurn: 1,
     },
@@ -1214,7 +1466,9 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
       aggregate: snapshot.experiment.metrics.aggregate,
       byAgent: [snapshot.experiment.metrics.byAgent[0]!],
     },
+    currentTerritory: snapshot.experiment.currentTerritory,
     communications: [],
+    controlChanges: [],
     turns: [
       {
         turnNumber: turn.turnNumber,

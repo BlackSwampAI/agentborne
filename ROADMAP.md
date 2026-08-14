@@ -37,6 +37,8 @@ Range-limited messages, agent inboxes, relationship memories, communication visu
 
 First focused slice: messaging is one exclusive turn action to a single existing agent within inclusive H3 distance three. Accepted messages become bounded world events and supply at most six recent inbound/outbound communications to later observations. World Lab and safe experiment exports expose this event-derived context. Generic inboxes, persistent or semantic memory, relationships, group chat, automatic replies, and communication visualization remain deferred.
 
+Second focused slice: every infected hex has one individual controller. Infect claims an open current hex and capture deterministically transfers an infected current hex from another agent only after that controller leaves it; controller presence defends against immediate capture and control ping-pong. Observations expose explicit capture eligibility, an authoritative six-agent territory scoreboard, and at most six event-derived relevant gains/losses. Mingle alone receives a social coalition-builder default so messaging remains deliberately exercised without becoming automatic. Telemetry and schema-v3 exports are victim-aware. Combat calculations, formal alliances, resources, territory bonuses, and post-infection autonomous conflict playback remain deferred.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.

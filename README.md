@@ -1,6 +1,6 @@
 # Agentborne
 
-Agentborne is the working title for an agent-first GPS containment game. Six persistent, named model-backed agents move, infect, wait, and exchange short nearby messages in a real Toledo H3 world while the World Lab exposes every safe decision record.
+Agentborne is the working title for an agent-first GPS containment game. Six persistent, named model-backed agents move, infect, capture contested territory, wait, and exchange short nearby messages in a real Toledo H3 world while the World Lab exposes every safe decision record.
 
 ## Workspace
 
@@ -28,7 +28,7 @@ Open the World Lab at <http://localhost:3000>. The Game API binds to <http://127
 
 Each Single turn or completed playback interval makes one third-party OpenRouter request and may incur cost. Start is deliberately disabled when the server has no key. This development API has no authentication or cost controls and is not suitable for an unauthenticated public deployment.
 
-State is held only in the Game API process. The API captures one active safe experiment with up to 5,000 complete turn records while the browser snapshot remains capped at 120. A message is an exclusive turn action to one agent at H3 distance three or less; content is server-trimmed and bounded to 280 characters. Observations contain at most six recent accepted inbound or outbound communications. Minimal, Standard, Full safe, and Custom exports filter that same capture without changing prompts or inference usage. OpenRouter's returned `usage.cost` is shown as known cost; missing cost remains explicitly unknown. Restarting the API loses the experiment. Reset warns before discarding telemetry and communication history, creates a new experiment identity, reconstructs the same 61-cell Toledo world, and preserves active personalities.
+State is held only in the Game API process. The API captures one active safe experiment with up to 5,000 complete turn records while the browser snapshot remains capped at 120. Every infected hex has exactly one individual controlling agent. Infect claims an open current hex; capture transfers an infected current hex from another controller only when that controller is not physically present, without movement or combat calculations. Other occupants do not defend it. Observations explicitly report current capture eligibility, an authoritative six-agent territory scoreboard, at most six relevant control changes, and at most six recent accepted inbound or outbound communications. Message remains an exclusive turn action to one agent at H3 distance three or less; content is server-trimmed and bounded to 280 characters. Mingle's social coalition-builder default deliberately favors interaction and negotiation, while the other five defaults are unchanged. Minimal, Standard, Full safe, and Custom schema-v3 exports filter that same capture without changing prompts or inference usage. OpenRouter's returned `usage.cost` is shown as known cost; missing cost remains explicitly unknown. Restarting the API loses the experiment. Reset warns before discarding telemetry and histories, creates a new experiment identity, reconstructs the same 61-cell open/uncontrolled Toledo world, and preserves active personalities.
 
 Export previews report exact serialized UTF-8 bytes and a model-agnostic `ceil(bytes / 4)` approximate AI-input-token estimate. Compact JSON is the default for AI sharing; Pretty JSON remains available for human review, and preview estimates reflect the selected serialization. This is a sharing-budget aid, not tokenizer output or a billing guarantee. Exports exclude fixed prompts, raw provider payloads, credentials, authorization headers, private reasoning, and unbounded diagnostics.
 
@@ -46,7 +46,7 @@ The command uses Node 24's built-in environment parser to read only `OPENROUTER_
 
 The map centers on Toledo, Ohio (`41.6528, -83.5379`) at H3 resolution 9 and renders a radius-four disk. MapLibre uses the public OpenStreetMap raster tile endpoint with attribution for light local development only. A public deployment must choose a compliant production tile source.
 
-Relationships, group chat, persistent memory, player mechanics, persistence, autonomous scheduling, and provider configuration UI remain deferred to later roadmap milestones.
+Formal alliances, combat systems, relationships, group chat, persistent memory, player mechanics, persistence, autonomous scheduling, and provider configuration UI remain deferred to later roadmap milestones.
 
 When every development cell is infected, World Lab automatically pauses playback and disables Start to avoid accidental provider calls. Reset and export remain available, and Single turn remains an explicitly manual diagnostic action.
 

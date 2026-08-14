@@ -8,6 +8,11 @@ import {
   agentObservationSchema,
   agentTurnRecordSchema,
   acceptedMessageEventSchema,
+  captureEligibilitySchema,
+  experimentExportWorldStateSchema,
+  hexCapturedWorldEventSchema,
+  hexSchema,
+  invalidActionReasonSchema,
   experimentExportRequestSchema,
   experimentIdSchema,
   personalityConfigurationEventSchema,
@@ -21,15 +26,34 @@ import {
 const agentId = '128f3f38-6b7d-4db7-9e95-751b4ce2681e';
 const cell = '892a1072893ffff';
 const adjacent = '892a1072883ffff';
+const scoreboard = [
+  '128f3f38-6b7d-4db7-9e95-751b4ce2681e',
+  '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
+  '3ba3ef0b-2142-44cc-b175-f6e5d6e98df5',
+  '442a1667-39c8-48e9-8c89-23803f9e2101',
+  '5f812a08-05f2-4950-bf2d-4df59d05e9c2',
+  '67a43b5c-ced8-45bd-970f-a89ac57853fc',
+].map((id, index) => ({
+  agentId: id,
+  name: `Agent ${index + 1}`,
+  color: '#ff6b57',
+  controlledCellCount: 0,
+}));
 const observation = {
   agentId,
   agentName: 'Ember',
   personality: 'Prefer infection.',
-  currentCell: { cell, state: 'open' },
-  adjacentCells: [{ cell: adjacent, state: 'open' }],
+  currentCell: { cell, state: 'open', controllerAgentId: null },
+  captureEligibility: {
+    eligible: false,
+    blockedReason: 'capture-open-cell',
+  },
+  adjacentCells: [{ cell: adjacent, state: 'open', controllerAgentId: null }],
   nearbyAgents: [],
   recentEvents: [],
   recentCommunications: [],
+  territoryScoreboard: scoreboard,
+  recentControlChanges: [],
 };
 const baseTurn = {
   turnNumber: 1,
@@ -49,6 +73,7 @@ const event = {
   occurredAt: '2026-08-13T12:00:01.000Z',
   type: 'hex-infected',
   cell,
+  controllerAgentId: agentId,
 };
 const worldAgent = {
   id: agentId,
@@ -57,11 +82,18 @@ const worldAgent = {
   personality: 'Prefer infection.',
   currentCell: cell,
 };
+const worldAgents = scoreboard.map((entry) => ({
+  id: entry.agentId,
+  name: entry.name,
+  color: entry.color,
+  personality: 'Prefer infection.',
+  currentCell: cell,
+}));
 const snapshot = {
   world: {
     generatedAt: '2026-08-13T12:00:00.000Z',
-    hexes: [{ cell, state: 'open' }],
-    agents: [worldAgent],
+    hexes: [{ cell, state: 'open', controllerAgentId: null }],
+    agents: worldAgents,
     events: [],
   },
   turnNumber: 0,
@@ -86,10 +118,15 @@ const snapshot = {
         providerErrors: 0,
         requestedMoves: 0,
         requestedInfections: 0,
+        requestedCaptures: 0,
         requestedMessages: 0,
         requestedWaits: 0,
         acceptedMovements: 0,
         successfullyInfectedCells: 0,
+        successfulCaptures: 0,
+        territoryGainedThroughInfection: 0,
+        territoryGainedThroughCapture: 0,
+        territoryLostThroughCapture: 0,
         deliveredMessages: 0,
         sentCommunications: 0,
         receivedCommunications: 0,
@@ -100,6 +137,7 @@ const snapshot = {
       },
       byAgent: [],
     },
+    currentTerritory: scoreboard,
   },
 };
 
@@ -132,6 +170,7 @@ describe('agent observation and decision schemas', () => {
       summary: 'Move.',
     },
     { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+    { requestedAction: { type: 'capture' }, summary: 'Capture.' },
     {
       requestedAction: {
         type: 'message',
@@ -141,8 +180,83 @@ describe('agent observation and decision schemas', () => {
       summary: 'Message.',
     },
     { requestedAction: { type: 'wait' }, summary: 'Wait.' },
-  ])('accepts a PR 2 decision', (decision) => {
+  ])('accepts every supported exclusive turn decision', (decision) => {
     expect(agentDecisionSchema.safeParse(decision).success).toBe(true);
+  });
+
+  it('validates explicit hex control invariants and capture events', () => {
+    expect(
+      hexSchema.safeParse({ cell, state: 'open', controllerAgentId: null })
+        .success,
+    ).toBe(true);
+    expect(
+      hexSchema.safeParse({
+        cell,
+        state: 'infected',
+        controllerAgentId: agentId,
+      }).success,
+    ).toBe(true);
+    expect(
+      hexSchema.safeParse({ cell, state: 'open', controllerAgentId: agentId })
+        .success,
+    ).toBe(false);
+    expect(
+      hexSchema.safeParse({ cell, state: 'infected', controllerAgentId: null })
+        .success,
+    ).toBe(false);
+    expect(
+      hexCapturedWorldEventSchema.safeParse({
+        id: '67aa21b9-fc78-4b04-9f92-9862bf346f96',
+        type: 'hex-captured',
+        agentId,
+        controllerAgentId: agentId,
+        previousControllerAgentId: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
+        cell,
+        occurredAt: '2026-08-13T12:00:01.000Z',
+      }).success,
+    ).toBe(true);
+    expect(invalidActionReasonSchema.parse('capture-open-cell')).toBe(
+      'capture-open-cell',
+    );
+    expect(invalidActionReasonSchema.parse('already-controller')).toBe(
+      'already-controller',
+    );
+    expect(invalidActionReasonSchema.parse('controller-present')).toBe(
+      'controller-present',
+    );
+    expect(captureEligibilitySchema.parse({ eligible: true })).toEqual({
+      eligible: true,
+    });
+    for (const blockedReason of [
+      'capture-open-cell',
+      'already-controller',
+      'controller-present',
+    ] as const) {
+      expect(
+        captureEligibilitySchema.parse({ eligible: false, blockedReason }),
+      ).toEqual({ eligible: false, blockedReason });
+    }
+    expect(
+      captureEligibilitySchema.safeParse({
+        eligible: false,
+        blockedReason: 'some-other-reason',
+      }).success,
+    ).toBe(false);
+    expect(
+      simulationSnapshotSchema.safeParse({
+        ...snapshot,
+        world: {
+          ...snapshot.world,
+          hexes: [
+            {
+              cell,
+              state: 'infected',
+              controllerAgentId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it.each([
@@ -222,9 +336,55 @@ describe('agent observation and decision schemas', () => {
       }).success,
     ).toBe(false);
   });
+
+  it('caps chronological gained/lost control observations at six', () => {
+    const change = {
+      eventId: '67aa21b9-fc78-4b04-9f92-9862bf346f96',
+      direction: 'gained',
+      otherAgentId: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
+      otherAgentName: 'Rook',
+      cell,
+      occurredAt: '2026-08-13T12:00:01.000Z',
+    };
+    expect(
+      agentObservationSchema.safeParse({
+        ...observation,
+        recentControlChanges: Array(6).fill(change),
+      }).success,
+    ).toBe(true);
+    expect(
+      agentObservationSchema.safeParse({
+        ...observation,
+        recentControlChanges: Array(7).fill(change),
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe('turn and snapshot schemas', () => {
+  it('validates state-only export snapshots without dropping controller invariants', () => {
+    const worldState = {
+      generatedAt: snapshot.world.generatedAt,
+      hexes: snapshot.world.hexes,
+      agents: snapshot.world.agents,
+    };
+    expect(experimentExportWorldStateSchema.safeParse(worldState).success).toBe(
+      true,
+    );
+    expect(
+      experimentExportWorldStateSchema.safeParse({
+        ...worldState,
+        hexes: [
+          {
+            cell,
+            state: 'infected',
+            controllerAgentId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
   it.each([
     {
       ...baseTurn,
@@ -318,7 +478,7 @@ describe('experiment telemetry and export contracts', () => {
       agents: { mode: 'selected', agentIds: [agentId] },
       turns: { mode: 'entire-retained' },
       outcomes: ['accepted'],
-      actions: ['message', 'wait'],
+      actions: ['capture', 'message', 'wait'],
     };
     for (const level of ['minimal', 'standard', 'full-safe'])
       expect(
@@ -345,6 +505,7 @@ describe('experiment telemetry and export contracts', () => {
           nearbyAgents: false,
           recentEvents: false,
           recentCommunications: false,
+          recentControlChanges: false,
           validationDetails: false,
           resultingEvents: false,
           providerUsageMetadata: false,
@@ -352,6 +513,7 @@ describe('experiment telemetry and export contracts', () => {
           currentWorldState: false,
           computedMetrics: false,
           communications: true,
+          controlChanges: true,
         },
       }).success,
     ).toBe(true);

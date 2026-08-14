@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { gridDistance } from 'h3-js';
 import {
   AgentProviderError,
   ScriptedAgentProvider,
@@ -34,12 +35,291 @@ function exportRequest(level: 'minimal' | 'standard' | 'full-safe' | 'custom') {
     agents: { mode: 'all' as const },
     turns: { mode: 'entire-retained' as const },
     outcomes: ['accepted', 'rejected', 'provider-error'] as const,
-    actions: ['move', 'infect', 'message', 'wait'] as const,
+    actions: ['move', 'infect', 'capture', 'message', 'wait'] as const,
     level,
   };
 }
 
 describe('SimulationService', () => {
+  it('derives authoritative territory, bounded control history, capture metrics, and victim-aware exports', async () => {
+    const emberId = agentIdSchema.parse(DEVELOPMENT_AGENT_BLUEPRINTS[0].id);
+    const rookId = agentIdSchema.parse(DEVELOPMENT_AGENT_BLUEPRINTS[1].id);
+    let targetCell: AgentObservation['currentCell']['cell'] | undefined;
+    let emberDeparted = false;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'capture-scenario',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        let requestedAction: ProviderDecision['decision']['requestedAction'];
+        if (observation.agentId === emberId && !targetCell) {
+          targetCell = observation.currentCell.cell;
+          requestedAction = { type: 'infect' };
+        } else if (observation.agentId === emberId && !emberDeparted) {
+          emberDeparted = true;
+          requestedAction = {
+            type: 'move',
+            targetCell: observation.adjacentCells[0]!.cell,
+          };
+        } else if (observation.agentId === rookId) {
+          if (
+            observation.currentCell.cell === targetCell &&
+            observation.captureEligibility.eligible
+          ) {
+            requestedAction = { type: 'capture' };
+          } else if (observation.currentCell.cell === targetCell) {
+            requestedAction = { type: 'wait' };
+          } else {
+            const target = targetCell!;
+            const next = observation.adjacentCells.toSorted(
+              (left, right) =>
+                gridDistance(left.cell, target) -
+                  gridDistance(right.cell, target) ||
+                left.cell.localeCompare(right.cell),
+            )[0]!;
+            requestedAction = { type: 'move', targetCell: next.cell };
+          }
+        } else {
+          requestedAction = { type: 'wait' };
+        }
+        return {
+          decision: { requestedAction, summary: 'Deterministic contest.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'capture-scenario',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    let capture: AgentTurnRecord | undefined;
+    for (let index = 0; index < 31 && !capture; index += 1) {
+      const turn = await simulation.executeNextTurn();
+      if (turn.outcome === 'accepted' && turn.event.type === 'hex-captured')
+        capture = turn;
+    }
+    expect(capture).toMatchObject({
+      agentId: rookId,
+      requestedAction: { type: 'capture' },
+      event: {
+        controllerAgentId: rookId,
+        previousControllerAgentId: emberId,
+        cell: targetCell,
+      },
+    });
+    if (!capture || capture.outcome !== 'accepted')
+      throw new Error('Expected a successful capture fixture.');
+    expect(capture.observation.currentCell).toMatchObject({
+      state: 'infected',
+      controllerAgentId: emberId,
+    });
+    expect(capture.observation.captureEligibility).toEqual({ eligible: true });
+    expect(capture.observation.adjacentCells).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ controllerAgentId: null }),
+      ]),
+    );
+    expect(capture.observation.territoryScoreboard).toHaveLength(6);
+    expect(
+      capture.observation.territoryScoreboard.reduce(
+        (sum, { controlledCellCount }) => sum + controlledCellCount,
+        0,
+      ),
+    ).toBe(1);
+    const snapshot = simulation.getSnapshot();
+    expect(
+      snapshot.world.hexes.filter(({ state }) => state === 'infected'),
+    ).toHaveLength(1);
+    expect(
+      snapshot.world.hexes.find(({ cell }) => cell === targetCell),
+    ).toMatchObject({ state: 'infected', controllerAgentId: rookId });
+    expect(
+      snapshot.experiment.currentTerritory.reduce(
+        (sum, { controlledCellCount }) => sum + controlledCellCount,
+        0,
+      ),
+    ).toBe(1);
+    expect(
+      snapshot.experiment.currentTerritory.find(
+        ({ agentId }) => agentId === rookId,
+      )?.controlledCellCount,
+    ).toBe(1);
+    expect(
+      snapshot.experiment.metrics.byAgent.find(
+        ({ agentId }) => agentId === emberId,
+      )?.metrics,
+    ).toMatchObject({
+      territoryGainedThroughInfection: 1,
+      territoryLostThroughCapture: 1,
+    });
+    expect(
+      snapshot.experiment.metrics.byAgent.find(
+        ({ agentId }) => agentId === rookId,
+      )?.metrics,
+    ).toMatchObject({
+      requestedCaptures: 1,
+      successfulCaptures: 1,
+      territoryGainedThroughCapture: 1,
+    });
+
+    const subsequent: AgentTurnRecord[] = [];
+    for (let index = 0; index < 6; index += 1)
+      subsequent.push(await simulation.executeNextTurn());
+    const emberObservation = subsequent.find(
+      ({ agentId }) => agentId === emberId,
+    )?.observation;
+    const rookObservation = subsequent.find(
+      ({ agentId }) => agentId === rookId,
+    )?.observation;
+    expect(emberObservation?.recentControlChanges).toMatchObject([
+      { direction: 'lost', otherAgentId: rookId, cell: targetCell },
+    ]);
+    expect(rookObservation?.recentControlChanges).toMatchObject([
+      { direction: 'gained', otherAgentId: emberId, cell: targetCell },
+    ]);
+    expect(
+      subsequent
+        .filter(({ agentId }) => agentId !== emberId && agentId !== rookId)
+        .every(
+          ({ observation }) => observation.recentControlChanges.length === 0,
+        ),
+    ).toBe(true);
+
+    const victimExport = simulation.generateExperimentExport({
+      agents: { mode: 'selected', agentIds: [emberId] },
+      turns: { mode: 'entire-retained' },
+      outcomes: ['accepted'],
+      actions: ['capture'],
+      level: 'minimal',
+    });
+    expect(victimExport.schemaVersion).toBe(3);
+    expect(victimExport.turns).toHaveLength(0);
+    expect(victimExport.selection).toMatchObject({
+      matchingRecordCount: 0,
+      matchingControlChangeCount: 1,
+    });
+    expect(victimExport.controlChanges).toMatchObject([
+      {
+        controllerAgentId: rookId,
+        previousControllerAgentId: emberId,
+      },
+    ]);
+    expect(victimExport.metrics?.byAgent[0]?.metrics).toMatchObject({
+      totalTurns: 0,
+      territoryLostThroughCapture: 1,
+    });
+    expect(victimExport.currentTerritory).toHaveLength(6);
+    const unrelatedAgentId = agentIdSchema.parse(
+      DEVELOPMENT_AGENT_BLUEPRINTS[2].id,
+    );
+    expect(
+      simulation.generateExperimentExport({
+        ...exportRequest('minimal'),
+        agents: { mode: 'selected', agentIds: [unrelatedAgentId] },
+        outcomes: ['accepted'],
+        actions: ['capture'],
+      }).controlChanges,
+    ).toEqual([]);
+  });
+
+  it('records controller-present rejection without control mutation or gain/loss metrics', async () => {
+    const emberId = agentIdSchema.parse(DEVELOPMENT_AGENT_BLUEPRINTS[0].id);
+    const rookId = agentIdSchema.parse(DEVELOPMENT_AGENT_BLUEPRINTS[1].id);
+    let targetCell: AgentObservation['currentCell']['cell'] | undefined;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'defended-capture-scenario',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        let requestedAction: ProviderDecision['decision']['requestedAction'];
+        if (observation.agentId === emberId && !targetCell) {
+          targetCell = observation.currentCell.cell;
+          requestedAction = { type: 'infect' };
+        } else if (observation.agentId === rookId) {
+          if (observation.currentCell.cell === targetCell) {
+            requestedAction = { type: 'capture' };
+          } else {
+            const next = observation.adjacentCells.toSorted(
+              (left, right) =>
+                gridDistance(left.cell, targetCell!) -
+                  gridDistance(right.cell, targetCell!) ||
+                left.cell.localeCompare(right.cell),
+            )[0]!;
+            requestedAction = { type: 'move', targetCell: next.cell };
+          }
+        } else {
+          requestedAction = { type: 'wait' };
+        }
+        return {
+          decision: { requestedAction, summary: 'Test defended capture.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'defended-capture-scenario',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    let rejected: AgentTurnRecord | undefined;
+    for (let index = 0; index < 31 && !rejected; index += 1) {
+      const turn = await simulation.executeNextTurn();
+      if (
+        turn.outcome === 'rejected' &&
+        turn.validation.reason === 'controller-present'
+      )
+        rejected = turn;
+    }
+    expect(rejected).toMatchObject({
+      agentId: rookId,
+      requestedAction: { type: 'capture' },
+      observation: {
+        captureEligibility: {
+          eligible: false,
+          blockedReason: 'controller-present',
+        },
+      },
+    });
+    const snapshot = simulation.getSnapshot();
+    expect(
+      snapshot.world.hexes.find(({ cell }) => cell === targetCell),
+    ).toEqual(expect.objectContaining({ controllerAgentId: emberId }));
+    expect(snapshot.world.events).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'hex-captured' }),
+      ]),
+    );
+    expect(snapshot.experiment.metrics.aggregate).toMatchObject({
+      requestedCaptures: 1,
+      successfulCaptures: 0,
+      territoryGainedThroughCapture: 0,
+      territoryLostThroughCapture: 0,
+    });
+    const exported = simulation.generateExperimentExport({
+      ...exportRequest('standard'),
+      agents: { mode: 'selected', agentIds: [rookId] },
+      outcomes: ['rejected'],
+      actions: ['capture'],
+    });
+    expect(exported.schemaVersion).toBe(3);
+    expect(exported.turns).toMatchObject([
+      {
+        outcome: 'rejected',
+        validationReason: 'controller-present',
+        observation: {
+          captureEligibility: {
+            eligible: false,
+            blockedReason: 'controller-present',
+          },
+        },
+      },
+    ]);
+    expect(exported.controlChanges).toEqual([]);
+  });
+
   it('resets to the exact deterministic six-agent starting world', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
@@ -527,6 +807,7 @@ describe('SimulationService', () => {
         nearbyAgents: false,
         recentEvents: false,
         recentCommunications: false,
+        recentControlChanges: false,
         validationDetails: false,
         resultingEvents: false,
         providerUsageMetadata: false,
@@ -534,13 +815,14 @@ describe('SimulationService', () => {
         currentWorldState: false,
         computedMetrics: false,
         communications: false,
+        controlChanges: false,
       },
     });
-    expect(minimal.schemaVersion).toBe(2);
+    expect(minimal.schemaVersion).toBe(3);
     expect(
       experimentExportDocumentSchema.safeParse({
         ...minimal,
-        schemaVersion: 1,
+        schemaVersion: 2,
       }).success,
     ).toBe(false);
     expect(minimal.turns[0]).not.toHaveProperty('observation');
@@ -556,6 +838,7 @@ describe('SimulationService', () => {
     expect(standard.communications).toEqual([]);
     expect(full.communications).toEqual([]);
     expect(custom).not.toHaveProperty('communications');
+    expect(custom).not.toHaveProperty('controlChanges');
     expect(custom).not.toHaveProperty('metrics');
     expect(custom.turns[0]).not.toHaveProperty('provider');
     minimal.turns[0]!.outcome = 'rejected';
@@ -954,6 +1237,11 @@ describe('SimulationService', () => {
 
     expect(restored.world.agents.map(({ personality }) => personality)).toEqual(
       DEVELOPMENT_AGENT_BLUEPRINTS.map(({ personality }) => personality),
+    );
+    expect(
+      restored.world.agents.find(({ name }) => name === 'Mingle')?.personality,
+    ).toBe(
+      'You are a social coalition-builder. Move toward visible agents, initiate and continue conversations, negotiate before taking their territory, and coordinate when useful. Infect open cells opportunistically, but value interaction over silent pursuit.',
     );
     expect(restored.world.hexes).toEqual(before.world.hexes);
     expect(restored.world.events).toEqual(before.world.events);

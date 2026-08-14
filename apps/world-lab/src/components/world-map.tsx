@@ -17,13 +17,14 @@ import type {
   AgentId,
   AgentProfile,
   H3Cell,
+  Hex,
   HexState,
 } from '@agentborne/shared';
 
 interface WorldMapProps {
   latitude: number;
   longitude: number;
-  hexes: Array<{ cell: H3Cell; state: HexState }>;
+  hexes: Hex[];
   agents: AgentProfile[];
   selectedCell: H3Cell;
   selectedAgentId: AgentId | null;
@@ -54,15 +55,34 @@ const initialOverlayDiagnostics: OverlayDiagnostics = {
   detail: 'Waiting for the H3 source and layers to render.',
 };
 
-function asGeoJson(hexes: WorldMapProps['hexes'], selectedCell: H3Cell) {
+function asGeoJson(
+  hexes: WorldMapProps['hexes'],
+  agents: AgentProfile[],
+  selectedCell: H3Cell,
+) {
+  const agentById = new globalThis.Map(
+    agents.map((agent) => [agent.id, agent]),
+  );
   return {
     type: 'FeatureCollection' as const,
-    features: hexes.map(({ cell, state }) => ({
+    features: hexes.map((hex) => ({
       type: 'Feature' as const,
-      properties: { cell, state, selected: cell === selectedCell },
+      properties: {
+        cell: hex.cell,
+        state: hex.state,
+        controllerColor:
+          hex.state === 'infected'
+            ? (agentById.get(hex.controllerAgentId)?.color ?? '#e44f45')
+            : '#4a8178',
+        controllerName:
+          hex.state === 'infected'
+            ? (agentById.get(hex.controllerAgentId)?.name ?? 'Unknown agent')
+            : 'Uncontrolled',
+        selected: hex.cell === selectedCell,
+      },
       geometry: {
         type: 'Polygon' as const,
-        coordinates: [closedBoundary(cell)],
+        coordinates: [closedBoundary(hex.cell)],
       },
     })),
   };
@@ -91,6 +111,7 @@ export function WorldMap(props: WorldMapProps) {
   const onSelectCellRef = useRef(onSelectCell);
   const onSelectAgentRef = useRef(onSelectAgent);
   const initialHexes = useRef(hexes);
+  const initialAgents = useRef(agents);
   const initialSelectedCell = useRef(selectedCell);
   const currentHexesRef = useRef(hexes);
   const scheduleOverlayInspectionRef = useRef<(() => void) | null>(null);
@@ -233,20 +254,18 @@ export function WorldMap(props: WorldMapProps) {
       try {
         map.addSource(sourceId, {
           type: 'geojson',
-          data: asGeoJson(initialHexes.current, initialSelectedCell.current),
+          data: asGeoJson(
+            initialHexes.current,
+            initialAgents.current,
+            initialSelectedCell.current,
+          ),
         });
         map.addLayer({
           id: fillLayerId,
           type: 'fill',
           source: sourceId,
           paint: {
-            'fill-color': [
-              'match',
-              ['get', 'state'],
-              'infected',
-              '#e44f45',
-              '#4a8178',
-            ],
+            'fill-color': ['get', 'controllerColor'],
             'fill-opacity': [
               'case',
               ['boolean', ['get', 'selected'], false],
@@ -323,9 +342,9 @@ export function WorldMap(props: WorldMapProps) {
     const source = mapRef.current?.getSource(sourceId) as
       GeoJSONSource | undefined;
     if (!source) return;
-    source.setData(asGeoJson(hexes, selectedCell));
+    source.setData(asGeoJson(hexes, agents, selectedCell));
     scheduleOverlayInspectionRef.current?.();
-  }, [hexes, selectedCell]);
+  }, [agents, hexes, selectedCell]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -386,6 +405,15 @@ export function WorldMap(props: WorldMapProps) {
         data-rendered-infected-cell-count={
           overlayDiagnostics.renderedInfectedCellCount
         }
+        data-controller-colors={hexes
+          .flatMap((hex) => {
+            if (hex.state === 'open') return [];
+            const controller = agents.find(
+              ({ id }) => id === hex.controllerAgentId,
+            );
+            return [`${hex.cell}:${controller?.color ?? 'unknown'}`];
+          })
+          .join(',')}
         data-testid="world-map"
         ref={containerRef}
       />
