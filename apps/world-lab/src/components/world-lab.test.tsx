@@ -1,9 +1,17 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { gridDisk } from 'h3-js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   experimentExportDocumentSchema,
+  modelCatalogResponseSchema,
   simulationSnapshotSchema,
   type SimulationSnapshot,
 } from '@agentborne/shared';
@@ -189,6 +197,17 @@ const initial = simulationSnapshotSchema.parse({
   status: 'paused',
   providerMode: 'scripted-test',
   providerConfigured: true,
+  modelConfiguration: {
+    globalModelId: 'deterministic-script',
+    overrides: [],
+    locked: false,
+  },
+  resolvedModels: world.agents.map(({ id }) => ({
+    agentId: id,
+    modelId: 'deterministic-script',
+    source: 'global',
+    available: true,
+  })),
   turns: [],
   experiment: {
     id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -702,6 +721,76 @@ function afterCapture(): SimulationSnapshot {
 
 function jsonResponse(value: unknown) {
   return Promise.resolve(new Response(JSON.stringify(value), { status: 200 }));
+}
+
+const compatibleCatalog = modelCatalogResponseSchema.parse({
+  models: [
+    {
+      id: 'example/alpha',
+      name: 'Alpha',
+      author: 'example',
+      contextLength: 32_768,
+      inputPricePerToken: '0.000001',
+      outputPricePerToken: '0.000002',
+      requestPrice: '0',
+      supportedParameters: [
+        'max_tokens',
+        'response_format',
+        'structured_outputs',
+      ],
+      createdAt: '2026-08-01T00:00:00.000Z',
+      isFree: false,
+    },
+    {
+      id: 'sample/beta',
+      name: 'Beta Free',
+      author: 'sample',
+      contextLength: 65_536,
+      inputPricePerToken: '0',
+      outputPricePerToken: '0',
+      supportedParameters: [
+        'max_tokens',
+        'response_format',
+        'structured_outputs',
+      ],
+      createdAt: '2026-08-02T00:00:00.000Z',
+      isFree: true,
+    },
+  ],
+  filteredOutCount: 12,
+  fetchedAt: '2026-08-15T12:00:00.000Z',
+  expiresAt: '2026-08-15T12:05:00.000Z',
+  stale: false,
+  requirements: {
+    input: 'text',
+    output: 'text',
+    endpoint: 'chat-completions',
+    requiredParameters: ['max_tokens', 'response_format', 'structured_outputs'],
+    minimumContextLength: 16_384,
+    streaming: false,
+  },
+});
+
+function openRouterSnapshot(
+  globalModelId: string | null = 'example/alpha',
+  overrides: SimulationSnapshot['modelConfiguration']['overrides'] = [],
+): SimulationSnapshot {
+  return simulationSnapshotSchema.parse({
+    ...initial,
+    providerMode: 'openrouter',
+    modelConfiguration: { globalModelId, overrides, locked: false },
+    resolvedModels: world.agents.map(({ id }) => {
+      const override = overrides.find(({ agentId }) => agentId === id);
+      const modelId = override?.modelId ?? globalModelId;
+      return {
+        agentId: id,
+        modelId,
+        source: override ? 'override' : modelId ? 'global' : 'missing',
+        available: Boolean(modelId),
+        ...(modelId ? {} : { issue: 'missing' }),
+      };
+    }),
+  });
 }
 
 function withPersonality(
@@ -1267,6 +1356,154 @@ describe('WorldLab', () => {
     expect(screen.getByRole('button', { name: 'Single turn' })).toBeDisabled();
   });
 
+  it('renders catalog facts and preserves overrides until Apply to all is explicit', async () => {
+    const emberId = world.agents[0]!.id;
+    let current = openRouterSnapshot('example/alpha', [
+      { agentId: emberId, modelId: 'sample/beta' },
+    ]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/experiment/models')) {
+          const body = JSON.parse(String(init?.body)) as {
+            globalModelId: string | null;
+            overrides: SimulationSnapshot['modelConfiguration']['overrides'];
+          };
+          current = openRouterSnapshot(body.globalModelId, body.overrides);
+          return jsonResponse({ snapshot: current });
+        }
+        if (url.endsWith('/models')) return jsonResponse(compatibleCatalog);
+        return jsonResponse(current);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    const summary = await screen.findByText('Model: Alpha');
+    await user.click(summary);
+    const modelConsole = within(summary.closest('details')!);
+    expect(screen.getByText(/12 filtered out/)).toBeInTheDocument();
+    expect(screen.getByText('$1/M')).toBeInTheDocument();
+    expect(screen.getByText('$2/M')).toBeInTheDocument();
+    expect(screen.getByText('32,768 tokens')).toBeInTheDocument();
+    expect(screen.getByText('Required contract supported')).toBeInTheDocument();
+
+    await user.selectOptions(
+      modelConsole.getByLabelText('Global model'),
+      'sample/beta',
+    );
+    await screen.findByText('Model: Beta Free');
+    expect(modelConsole.getByLabelText('Ember')).toHaveValue('sample/beta');
+    const firstUpdate = vi
+      .mocked(fetch)
+      .mock.calls.find(([url]) => String(url).endsWith('/experiment/models'));
+    expect(JSON.parse(String(firstUpdate?.[1]?.body)).overrides).toEqual([
+      { agentId: emberId, modelId: 'sample/beta' },
+    ]);
+
+    await user.click(
+      screen.getByRole('button', { name: 'Apply global model to all agents' }),
+    );
+    await waitFor(() =>
+      expect(modelConsole.getByLabelText('Ember')).toHaveValue(''),
+    );
+    const updates = vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).endsWith('/experiment/models'));
+    expect(JSON.parse(String(updates.at(-1)?.[1]?.body)).overrides).toEqual([]);
+  });
+
+  it('shows stale catalog and unavailable saved-model states without substitution', async () => {
+    const unavailable = openRouterSnapshot('retired/model');
+    unavailable.resolvedModels.forEach((entry) => {
+      entry.available = false;
+      entry.issue = 'unavailable';
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) =>
+        String(input).endsWith('/models')
+          ? jsonResponse({
+              ...compatibleCatalog,
+              stale: true,
+              error: {
+                code: 'timeout',
+                message: 'The OpenRouter model catalog request timed out.',
+              },
+            })
+          : jsonResponse(unavailable),
+      ),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await user.click(await screen.findByText('Model: retired/model'));
+    expect(
+      screen.getByText(/Showing the last successful catalog/),
+    ).toHaveTextContent('timed out');
+    expect(screen.getByLabelText('Global model')).toHaveValue('retired/model');
+    expect(
+      screen.getByText(/Select an available compatible model/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
+  });
+
+  it('collapses and expands the bounded public chat dock', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(afterPublicMessage())),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    const chat = await screen.findByLabelText('Public world chat');
+    await user.click(screen.getByRole('button', { name: 'Collapse' }));
+    expect(chat).not.toHaveTextContent(HOSTILE_MESSAGE);
+    await user.click(screen.getByRole('button', { name: 'Expand' }));
+    expect(chat).toHaveTextContent(HOSTILE_MESSAGE);
+  });
+
+  it('pauses chat auto-scroll and offers a jump when new messages arrive above the bottom', async () => {
+    const first = afterPublicMessage();
+    const nextEvent = {
+      ...first.world.events.find(({ type }) => type === 'public-message-sent')!,
+      id: '99cc21b9-fc78-4b04-9f92-9862bf346f99',
+      occurredAt: '2026-08-13T12:00:02.000Z',
+      message: 'A newer public message.',
+    };
+    const next = simulationSnapshotSchema.parse({
+      ...first,
+      world: { ...first.world, events: [...first.world.events, nextEvent] },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementationOnce(() => jsonResponse(first))
+        .mockImplementationOnce(() =>
+          jsonResponse({ snapshot: next, turn: next.turns[0] }),
+        ),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    const chat = await screen.findByLabelText('Public world chat');
+    const feed = within(chat).getByRole('list');
+    Object.defineProperties(feed, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 100 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    fireEvent.scroll(feed);
+    await act(async () => undefined);
+    feed.scrollTop = 0;
+    await user.click(screen.getByRole('button', { name: 'Single turn' }));
+    const jump = await screen.findByRole('button', {
+      name: '1 new message · Jump to newest',
+    });
+    expect(feed.scrollTop).toBe(0);
+    await user.click(jump);
+    expect(feed.scrollTop).toBe(1_000);
+    expect(screen.queryByText(/new message · Jump/)).not.toBeInTheDocument();
+  });
+
   it('enters and cancels explicit personality editing without a request', async () => {
     const user = userEvent.setup();
     render(<WorldLab />);
@@ -1721,7 +1958,7 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
   const turn = snapshot.turns[0]!;
   const agent = snapshot.world.agents[0]!;
   return {
-    schemaVersion: 5 as const,
+    schemaVersion: 6 as const,
     generatedAt: '2026-08-13T12:00:02.000Z',
     experiment: {
       id: snapshot.experiment.id,

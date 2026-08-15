@@ -50,6 +50,11 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(page.getByRole('heading', { name: 'World Lab' })).toBeVisible();
   const worldMap = page.getByTestId('world-map');
   await expect(worldMap).toBeVisible();
+  const desktopMapBox = await worldMap.boundingBox();
+  const desktopDockBox = await page.locator('.bottom-dock').boundingBox();
+  expect(desktopMapBox?.width ?? 0).toBeGreaterThan(450);
+  expect(desktopMapBox?.height ?? 0).toBeGreaterThan(300);
+  expect(desktopDockBox?.height ?? Infinity).toBeLessThanOrEqual(181);
   await expect(worldMap).toHaveAttribute('data-overlay-status', 'ready');
   await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '127');
   await expect(worldMap).toHaveAttribute(
@@ -188,7 +193,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   const exported = experimentExportDocumentSchema.parse(
     JSON.parse(await readFile(downloadedPath!, 'utf8')),
   );
-  expect(exported.schemaVersion).toBe(5);
+  expect(exported.schemaVersion).toBe(6);
   expect(exported.filters.level).toBe('minimal');
   expect(exported.selection.selectedAgentIds).toEqual([EMBER_ID]);
   expect(exported.turns).toEqual([]);
@@ -267,5 +272,12 @@ test('runs the complete deterministic World Lab browser flow', async ({
     '1',
   );
   await expect(markers).toHaveCount(8);
+  await page.setViewportSize({ width: 760, height: 820 });
+  await expect(worldMap).toBeVisible();
+  const narrowMapBox = await worldMap.boundingBox();
+  expect(narrowMapBox?.width ?? 0).toBeGreaterThan(700);
+  expect(narrowMapBox?.height ?? 0).toBeGreaterThan(350);
+  await expect(page.getByLabel('Agent roster')).toBeVisible();
+  await expect(page.getByLabel('Public world chat')).toBeVisible();
   expect(openRouterRequests).toEqual([]);
 });

@@ -1,11 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   PERSONALITY_MAX_LENGTH,
   experimentExportPreviewSchema,
   experimentExportRequestSchema,
   experimentExportResponseSchema,
+  experimentImportResponseSchema,
+  modelCatalogResponseSchema,
   personalitySchema,
   resetSimulationResponseSchema,
   restoreDefaultPersonalitiesResponseSchema,
@@ -13,6 +15,7 @@ import {
   singleTurnResponseSchema,
   updateAgentPersonalityRequestSchema,
   updateAgentPersonalityResponseSchema,
+  updateExperimentModelsResponseSchema,
   type AgentId,
   type AgentTurnRecord,
   type CustomExportOptions,
@@ -20,6 +23,9 @@ import {
   type ExperimentExportPreview,
   type ExperimentExportRequest,
   type H3Cell,
+  type CompatibleModel,
+  type ModelCatalogResponse,
+  type ExperimentModelConfiguration,
   type SimulationSnapshot,
 } from '@agentborne/shared';
 import {
@@ -50,6 +56,8 @@ export function WorldLab() {
   const [uiError, setUiError] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportAgentIds, setExportAgentIds] = useState<AgentId[]>([]);
+  const [catalog, setCatalog] = useState<ModelCatalogResponse | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const inFlightRef = useRef(false);
   const runToTurn200Ref = useRef(false);
   const completedTurnsRef = useRef(0);
@@ -91,6 +99,113 @@ export function WorldLab() {
       alive = false;
     };
   }, [applySnapshot]);
+
+  const providerMode = snapshot?.providerMode;
+  useEffect(() => {
+    if (providerMode !== 'openrouter') return;
+    let alive = true;
+    void fetch(`${apiBase}/models`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error('The model catalog is unavailable.');
+        const nextCatalog = modelCatalogResponseSchema.parse(
+          await response.json(),
+        );
+        if (alive) setCatalog(nextCatalog);
+        const snapshotResponse = await fetch(apiBase);
+        if (snapshotResponse.ok && alive)
+          applySnapshot(
+            simulationSnapshotSchema.parse(await snapshotResponse.json()),
+          );
+      })
+      .catch(() => {
+        if (alive) setUiError('The model catalog is unavailable.');
+      })
+      .finally(() => {
+        if (alive) setCatalogLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [applySnapshot, providerMode]);
+
+  const refreshCatalog = async () => {
+    setCatalogLoading(true);
+    try {
+      const response = await fetch(`${apiBase}/models/refresh`, {
+        method: 'POST',
+      });
+      if (!response.ok) throw new Error('catalog refresh failed');
+      setCatalog(modelCatalogResponseSchema.parse(await response.json()));
+      const snapshotResponse = await fetch(apiBase);
+      if (snapshotResponse.ok)
+        applySnapshot(
+          simulationSnapshotSchema.parse(await snapshotResponse.json()),
+        );
+    } catch {
+      setUiError(
+        'The model catalog refresh failed. A cached catalog may still be available.',
+      );
+    } finally {
+      setCatalogLoading(false);
+    }
+  };
+
+  const updateModels = async (
+    configuration: Omit<ExperimentModelConfiguration, 'locked'>,
+  ): Promise<boolean> => {
+    setUiError(null);
+    try {
+      const response = await fetch(`${apiBase}/experiment/models`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(configuration),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => undefined)) as
+          { error?: { message?: string } } | undefined;
+        setUiError(
+          payload?.error?.message ?? 'The model assignment was rejected.',
+        );
+        return false;
+      }
+      const payload = updateExperimentModelsResponseSchema.parse(
+        await response.json(),
+      );
+      applySnapshot(payload.snapshot);
+      return true;
+    } catch {
+      setUiError('The model assignment could not be saved.');
+      return false;
+    }
+  };
+
+  const importExperiment = async (file: File): Promise<void> => {
+    if (file.size > 5_000_000) {
+      setUiError('Experiment import files must be 5 MB or smaller.');
+      return;
+    }
+    try {
+      const document = JSON.parse(await file.text()) as unknown;
+      const response = await fetch(`${apiBase}/experiment/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ document }),
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        const error = body as { error?: { message?: string } };
+        setUiError(
+          error.error?.message ?? 'The experiment import was rejected.',
+        );
+        return;
+      }
+      const payload = experimentImportResponseSchema.parse(body);
+      applySnapshot(payload.snapshot);
+      setPersonalityNotice(payload.message);
+    } catch {
+      setUiError('The selected file is not a valid experiment export.');
+    }
+  };
 
   const executeTurn = useCallback(async () => {
     if (inFlightRef.current) return;
@@ -289,9 +404,6 @@ export function WorldLab() {
         : running
           ? 'running'
           : 'paused';
-  const nextAgent = snapshot.world.agents.find(
-    ({ id }) => id === snapshot.nextAgentId,
-  );
   const personalityControlsDisabled =
     running ||
     inFlight ||
@@ -304,6 +416,17 @@ export function WorldLab() {
     resetting ||
     personalityPending ||
     snapshot.activeAgentId !== null;
+  const modelsReady = snapshot.resolvedModels.every(
+    ({ available }) => available,
+  );
+  const publicMessages = snapshot.world.events.filter(
+    (
+      event,
+    ): event is Extract<
+      SimulationSnapshot['world']['events'][number],
+      { type: 'public-message-sent' }
+    > => event.type === 'public-message-sent',
+  );
 
   return (
     <main>
@@ -324,7 +447,152 @@ export function WorldLab() {
         </div>
       </header>
 
+      <section className="command-bar" aria-label="Experiment command bar">
+        <div className="command-summary">
+          <strong>Turn {snapshot.turnNumber}</strong>
+          <span>{status.replaceAll('-', ' ')}</span>
+          <span>
+            {formatCost(snapshot.experiment.metrics.aggregate.knownCostCredits)}
+          </span>
+        </div>
+        <div className="control-row command-controls">
+          {running ? (
+            <button
+              type="button"
+              onClick={() => {
+                setRunning(false);
+                setRunToTurn200(false);
+                runToTurn200Ref.current = false;
+              }}
+            >
+              Pause
+            </button>
+          ) : (
+            <button
+              disabled={
+                inFlight ||
+                personalityPending ||
+                fullyInfected ||
+                !snapshot.providerConfigured ||
+                !modelsReady
+              }
+              type="button"
+              onClick={() => setRunning(true)}
+            >
+              Start
+            </button>
+          )}
+          <button
+            disabled={
+              inFlight ||
+              running ||
+              personalityPending ||
+              !snapshot.providerConfigured ||
+              !modelsReady
+            }
+            type="button"
+            onClick={() => void executeTurn()}
+          >
+            Single turn
+          </button>
+          <button
+            disabled={inFlight || resetting || personalityPending}
+            type="button"
+            onClick={() => void reset()}
+          >
+            Reset world
+          </button>
+          <button
+            disabled={
+              running ||
+              inFlight ||
+              resetting ||
+              personalityPending ||
+              !snapshot.providerConfigured ||
+              !modelsReady ||
+              fullyInfected ||
+              snapshot.experiment.totalCompletedTurns >= 200
+            }
+            type="button"
+            onClick={() => {
+              runToTurn200Ref.current = true;
+              setRunToTurn200(true);
+              setRunning(true);
+            }}
+          >
+            Run to turn 200
+          </button>
+        </div>
+        {snapshot.providerMode === 'openrouter' ? (
+          <ModelConsole
+            catalog={catalog}
+            loading={catalogLoading || catalog === null}
+            snapshot={snapshot}
+            disabled={running || inFlight || resetting}
+            onRefresh={refreshCatalog}
+            onUpdate={updateModels}
+            onImport={importExperiment}
+          />
+        ) : (
+          <p className="provider-badge">Model: deterministic test provider</p>
+        )}
+        <div className="command-secondary">
+          <span>
+            Experiment progress:{' '}
+            {Math.min(snapshot.experiment.totalCompletedTurns, 200)}/200
+            {runToTurn200 ? ' · bounded run active' : ''}
+          </span>
+          <label className="speed-control">
+            Playback speed
+            <select
+              aria-label="Playback speed"
+              value={speed}
+              onChange={(event) => setSpeed(Number(event.target.value))}
+            >
+              <option value={2_000}>Slow · 2s</option>
+              <option value={1_000}>Normal · 1s</option>
+              <option value={250}>Fast · 0.25s</option>
+            </select>
+          </label>
+          <button
+            className="secondary-action"
+            disabled={personalityControlsDisabled}
+            type="button"
+            onClick={() => void restoreDefaultPersonalities()}
+          >
+            Restore default personalities
+          </button>
+          <ExperimentUsageMeter snapshot={snapshot} />
+        </div>
+      </section>
+      {(!modelsReady || uiError || fullyInfected || personalityNotice) && (
+        <div className="command-alert" role="alert">
+          {uiError ??
+            (fullyInfected
+              ? 'Development world fully infected. Automatic playback is paused; Single turn remains a manual cost-incurring diagnostic action.'
+              : (personalityNotice ??
+                'Select an available compatible model for every agent before starting.'))}
+        </div>
+      )}
+      {!snapshot.providerConfigured && (
+        <div className="command-alert" role="alert">
+          Model calls unavailable. Set OPENROUTER_API_KEY on the Game API server
+          and restart pnpm dev.
+        </div>
+      )}
+
       <div className="workspace">
+        <AgentRoster
+          snapshot={snapshot}
+          selectedAgentId={selectedAgentId}
+          onSelect={(agentId) => {
+            setSelectedAgentId(agentId);
+            const agent = snapshot.world.agents.find(
+              ({ id }) => id === agentId,
+            );
+            if (agent) setSelectedCell(agent.currentCell);
+          }}
+        />
         <section className="map-panel" aria-label="Development world map">
           <WorldMap
             latitude={latitude}
@@ -351,146 +619,7 @@ export function WorldLab() {
           </div>
         </section>
 
-        <aside className="sidebar">
-          <section className="panel controls-panel">
-            <p className="panel-kicker">Turn {snapshot.turnNumber}</p>
-            <h2>Simulation controls</h2>
-            <p className="next-agent">
-              {inFlight ? 'Acting' : 'Next'}: <strong>{nextAgent?.name}</strong>
-            </p>
-            <div className="control-row">
-              {running ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRunning(false);
-                    setRunToTurn200(false);
-                    runToTurn200Ref.current = false;
-                  }}
-                >
-                  Pause
-                </button>
-              ) : (
-                <button
-                  disabled={
-                    inFlight ||
-                    personalityPending ||
-                    fullyInfected ||
-                    !snapshot.providerConfigured
-                  }
-                  type="button"
-                  onClick={() => {
-                    setRunToTurn200(false);
-                    runToTurn200Ref.current = false;
-                    setRunning(true);
-                  }}
-                >
-                  Start
-                </button>
-              )}
-              <button
-                disabled={
-                  inFlight ||
-                  running ||
-                  personalityPending ||
-                  !snapshot.providerConfigured
-                }
-                type="button"
-                onClick={() => void executeTurn()}
-              >
-                Single turn
-              </button>
-              <button
-                disabled={inFlight || resetting || personalityPending}
-                type="button"
-                onClick={() => void reset()}
-              >
-                Reset world
-              </button>
-            </div>
-            <button
-              className="secondary-action"
-              disabled={
-                running ||
-                inFlight ||
-                resetting ||
-                personalityPending ||
-                !snapshot.providerConfigured ||
-                fullyInfected ||
-                snapshot.experiment.totalCompletedTurns >= 200
-              }
-              type="button"
-              onClick={() => {
-                runToTurn200Ref.current = true;
-                setRunToTurn200(true);
-                setRunning(true);
-              }}
-            >
-              Run to turn 200
-            </button>
-            <p role="status">
-              Experiment progress:{' '}
-              {Math.min(snapshot.experiment.totalCompletedTurns, 200)}/200
-              {runToTurn200 ? ' · bounded run active' : ''}
-            </p>
-            <button
-              className="secondary-action"
-              disabled={personalityControlsDisabled}
-              type="button"
-              onClick={() => void restoreDefaultPersonalities()}
-            >
-              Restore default personalities
-            </button>
-            <label className="speed-control">
-              Playback speed
-              <select
-                aria-label="Playback speed"
-                value={speed}
-                onChange={(event) => setSpeed(Number(event.target.value))}
-              >
-                <option value={2_000}>Slow · 2s</option>
-                <option value={1_000}>Normal · 1s</option>
-                <option value={250}>Fast · 0.25s</option>
-              </select>
-            </label>
-            <ExperimentUsageMeter snapshot={snapshot} />
-            {fullyInfected && (
-              <p className="callout success" role="status">
-                Development world fully infected. Automatic playback is paused;
-                Single turn remains a manual cost-incurring diagnostic action.
-              </p>
-            )}
-            {!snapshot.providerConfigured && (
-              <p className="callout configuration" role="alert">
-                Model calls unavailable. Set OPENROUTER_API_KEY on the Game API
-                server and restart pnpm dev.
-              </p>
-            )}
-            {uiError && (
-              <p className="callout error" role="alert">
-                {uiError}
-              </p>
-            )}
-            {personalityNotice && (
-              <p className="callout success" role="status">
-                {personalityNotice}
-              </p>
-            )}
-          </section>
-
-          <PublicWorldChat
-            agents={snapshot.world.agents}
-            events={snapshot.world.events.filter(
-              (
-                event,
-              ): event is Extract<
-                SimulationSnapshot['world']['events'][number],
-                { type: 'public-message-sent' }
-              > => event.type === 'public-message-sent',
-            )}
-            turns={snapshot.turns}
-          />
-
+        <aside className="sidebar details-sidebar">
           {selectedAgent && (
             <AgentInspector
               key={`${selectedAgent.id}:${selectedAgent.personality}`}
@@ -629,11 +758,325 @@ export function WorldLab() {
               </dl>
             </section>
           )}
-
-          <EventLog turns={snapshot.turns} agents={snapshot.world.agents} />
         </aside>
       </div>
+      <div className="bottom-dock">
+        <PublicWorldChat
+          agents={snapshot.world.agents}
+          events={publicMessages}
+          turns={snapshot.turns}
+        />
+        <EventLog turns={snapshot.turns} agents={snapshot.world.agents} />
+      </div>
     </main>
+  );
+}
+
+function ModelConsole({
+  catalog,
+  loading,
+  snapshot,
+  disabled,
+  onRefresh,
+  onUpdate,
+  onImport,
+}: {
+  catalog: ModelCatalogResponse | null;
+  loading: boolean;
+  snapshot: SimulationSnapshot;
+  disabled: boolean;
+  onRefresh: () => Promise<void>;
+  onUpdate: (
+    configuration: Omit<ExperimentModelConfiguration, 'locked'>,
+  ) => Promise<boolean>;
+  onImport: (file: File) => Promise<void>;
+}) {
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState<'name' | 'price' | 'context' | 'newest'>(
+    'name',
+  );
+  const models = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return [...(catalog?.models ?? [])]
+      .filter(
+        ({ id, name, author }) =>
+          !query ||
+          id.toLowerCase().includes(query) ||
+          name.toLowerCase().includes(query) ||
+          author.toLowerCase().includes(query),
+      )
+      .sort((left, right) => {
+        if (sort === 'price')
+          return (
+            Number(left.inputPricePerToken) -
+              Number(right.inputPricePerToken) ||
+            Number(left.outputPricePerToken) - Number(right.outputPricePerToken)
+          );
+        if (sort === 'context') return right.contextLength - left.contextLength;
+        if (sort === 'newest')
+          return (right.createdAt ?? '').localeCompare(left.createdAt ?? '');
+        return left.name.localeCompare(right.name);
+      });
+  }, [catalog, search, sort]);
+  const configuration = snapshot.modelConfiguration;
+  const selected = catalog?.models.find(
+    ({ id }) => id === configuration.globalModelId,
+  );
+  const locked = configuration.locked || disabled;
+
+  const save = (next: Omit<ExperimentModelConfiguration, 'locked'>) =>
+    void onUpdate(next);
+
+  return (
+    <details className="model-console">
+      <summary>
+        Model: {selected?.name ?? configuration.globalModelId ?? 'not selected'}
+      </summary>
+      <div className="model-console-popover">
+        <div className="model-console-heading">
+          <div>
+            <strong>Compatible OpenRouter models</strong>
+            <p>
+              {catalog?.models.length ?? 0} available ·{' '}
+              {catalog?.filteredOutCount ?? 0} filtered out
+            </p>
+          </div>
+          <button
+            disabled={loading}
+            type="button"
+            onClick={() => void onRefresh()}
+          >
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
+        {catalog?.stale && (
+          <p className="catalog-state warning">
+            Showing the last successful catalog. {catalog.error?.message}
+          </p>
+        )}
+        {loading && !catalog && (
+          <p className="catalog-state">Loading compatible models…</p>
+        )}
+        {!catalog?.stale && catalog?.error && (
+          <p className="catalog-state error">{catalog.error.message}</p>
+        )}
+        {!loading && catalog && catalog.models.length === 0 && (
+          <p className="catalog-state">
+            No compatible models are currently available.
+          </p>
+        )}
+        <div className="model-filters">
+          <label>
+            Search
+            <input
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Name, slug, or author"
+            />
+          </label>
+          <label>
+            Sort
+            <select
+              value={sort}
+              onChange={(event) => setSort(event.target.value as typeof sort)}
+            >
+              <option value="name">Name</option>
+              <option value="price">Lowest input price</option>
+              <option value="context">Largest context</option>
+              <option value="newest">Newest</option>
+            </select>
+          </label>
+        </div>
+        <label className="model-select-label">
+          Global model
+          <select
+            disabled={locked}
+            value={configuration.globalModelId ?? ''}
+            onChange={(event) =>
+              save({
+                globalModelId: event.target.value || null,
+                overrides: configuration.overrides,
+              })
+            }
+          >
+            <option value="">Select a model…</option>
+            {configuration.globalModelId && !selected && (
+              <option value={configuration.globalModelId}>
+                {configuration.globalModelId} — unavailable
+              </option>
+            )}
+            {models.map((model) => (
+              <option value={model.id} key={model.id}>
+                {model.name} · {formatPerMillion(model.inputPricePerToken)} in /{' '}
+                {formatPerMillion(model.outputPricePerToken)} out
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          disabled={locked || !configuration.globalModelId}
+          type="button"
+          onClick={() =>
+            save({ globalModelId: configuration.globalModelId, overrides: [] })
+          }
+        >
+          Apply global model to all agents
+        </button>
+        {selected && <ModelFacts model={selected} />}
+        <div className="agent-model-overrides">
+          <strong>Agent overrides</strong>
+          {snapshot.world.agents.map((agent) => {
+            const override = configuration.overrides.find(
+              ({ agentId }) => agentId === agent.id,
+            );
+            return (
+              <label key={agent.id}>
+                {agent.name}
+                <select
+                  disabled={locked}
+                  value={override?.modelId ?? ''}
+                  onChange={(event) => {
+                    const withoutAgent = configuration.overrides.filter(
+                      ({ agentId }) => agentId !== agent.id,
+                    );
+                    save({
+                      globalModelId: configuration.globalModelId,
+                      overrides: event.target.value
+                        ? [
+                            ...withoutAgent,
+                            { agentId: agent.id, modelId: event.target.value },
+                          ]
+                        : withoutAgent,
+                    });
+                  }}
+                >
+                  <option value="">Inherit global</option>
+                  {override &&
+                    !catalog?.models.some(
+                      ({ id }) => id === override.modelId,
+                    ) && (
+                      <option value={override.modelId}>
+                        {override.modelId} — unavailable
+                      </option>
+                    )}
+                  {(catalog?.models ?? []).map((model) => (
+                    <option value={model.id} key={model.id}>
+                      {model.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            );
+          })}
+        </div>
+        {configuration.locked && (
+          <p className="catalog-state">
+            Assignments locked after the first completed turn. Reset starts a
+            new experiment and unlocks selection.
+          </p>
+        )}
+        <label className="model-import-label">
+          Import saved experiment model assignments
+          <input
+            disabled={configuration.locked || disabled}
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void onImport(file);
+              event.currentTarget.value = '';
+            }}
+          />
+        </label>
+      </div>
+    </details>
+  );
+}
+
+function ModelFacts({ model }: { model: CompatibleModel }) {
+  return (
+    <dl className="model-facts">
+      <div>
+        <dt>Slug</dt>
+        <dd>{model.id}</dd>
+      </div>
+      <div>
+        <dt>Author</dt>
+        <dd>{model.author}</dd>
+      </div>
+      <div>
+        <dt>Context</dt>
+        <dd>{model.contextLength.toLocaleString()} tokens</dd>
+      </div>
+      <div>
+        <dt>Input</dt>
+        <dd>{formatPerMillion(model.inputPricePerToken)}</dd>
+      </div>
+      <div>
+        <dt>Output</dt>
+        <dd>{formatPerMillion(model.outputPricePerToken)}</dd>
+      </div>
+      <div>
+        <dt>Pricing</dt>
+        <dd>{model.isFree ? 'Free' : 'Paid'}</dd>
+      </div>
+      <div>
+        <dt>Capability</dt>
+        <dd>Required contract supported</dd>
+      </div>
+    </dl>
+  );
+}
+
+function AgentRoster({
+  snapshot,
+  selectedAgentId,
+  onSelect,
+}: {
+  snapshot: SimulationSnapshot;
+  selectedAgentId: AgentId | null;
+  onSelect: (agentId: AgentId) => void;
+}) {
+  return (
+    <aside className="agent-roster" aria-label="Agent roster">
+      <p className="panel-kicker">Agents</p>
+      {snapshot.world.agents.map((agent) => {
+        const territory = snapshot.experiment.currentTerritory.find(
+          ({ agentId }) => agentId === agent.id,
+        );
+        const alliance = snapshot.world.alliances.find(({ memberAgentIds }) =>
+          memberAgentIds.includes(agent.id),
+        );
+        const resolved = snapshot.resolvedModels.find(
+          ({ agentId }) => agentId === agent.id,
+        )!;
+        return (
+          <button
+            type="button"
+            aria-pressed={selectedAgentId === agent.id}
+            key={agent.id}
+            onClick={() => onSelect(agent.id)}
+          >
+            <span
+              className="agent-swatch"
+              style={{ background: alliance?.color ?? agent.color }}
+            />
+            <span>
+              <strong>{agent.name}</strong>
+              <small>
+                {alliance ? 'Allied' : 'Unaffiliated'} ·{' '}
+                {territory?.controlledCellCount ?? 0} cells
+              </small>
+              <small className={resolved.available ? '' : 'unavailable'}>
+                {resolved.source === 'override' ? 'Override' : 'Global'} ·{' '}
+                {resolved.modelId ?? 'model required'}
+              </small>
+            </span>
+          </button>
+        );
+      })}
+    </aside>
   );
 }
 
@@ -651,37 +1094,104 @@ function PublicWorldChat({
   >;
   turns: AgentTurnRecord[];
 }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const [atBottom, setAtBottom] = useState(true);
+  const [newMessages, setNewMessages] = useState(0);
+  const feedRef = useRef<HTMLOListElement | null>(null);
+  const previousCount = useRef(events.length);
+
+  useEffect(() => {
+    const feed = feedRef.current;
+    if (!collapsed && atBottom && feed) feed.scrollTop = feed.scrollHeight;
+  }, [atBottom, collapsed]);
+
+  useEffect(() => {
+    const added = Math.max(0, events.length - previousCount.current);
+    previousCount.current = events.length;
+    if (!added) return;
+    const feed = feedRef.current;
+    if (atBottom && feed) {
+      feed.scrollTop = feed.scrollHeight;
+      setNewMessages(0);
+    } else setNewMessages((count) => count + added);
+  }, [atBottom, events.length]);
+
+  const jumpToNewest = () => {
+    const feed = feedRef.current;
+    if (feed) feed.scrollTop = feed.scrollHeight;
+    setAtBottom(true);
+    setNewMessages(0);
+  };
+
   return (
     <section className="panel world-chat-panel" aria-label="Public world chat">
-      <p className="panel-kicker">Visible to every agent</p>
-      <h2>Public world chat</h2>
-      {events.length === 0 ? (
-        <p className="muted">No public messages yet.</p>
-      ) : (
-        <ol className="world-chat-feed">
-          {events.slice(-12).map((event) => {
-            const sender = agents.find(({ id }) => id === event.agentId);
-            const turnNumber = turns.find(
-              (turn) =>
-                turn.outcome !== 'provider-error' &&
-                turn.communicationResult.requested &&
-                turn.communicationResult.accepted &&
-                turn.communicationResult.event.id === event.id,
-            )?.turnNumber;
-            return (
-              <li key={event.id}>
-                <div>
-                  <strong>{sender?.name ?? event.agentId}</strong>
-                  <small>
-                    Turn {turnNumber ?? '—'} ·{' '}
-                    {formatTimestamp(event.occurredAt)}
-                  </small>
-                </div>
-                <p>{event.message}</p>
-              </li>
-            );
-          })}
-        </ol>
+      <div className="dock-heading">
+        <div>
+          <p className="panel-kicker">Visible to every agent</p>
+          <h2>Public world chat</h2>
+        </div>
+        <button
+          type="button"
+          aria-expanded={!collapsed}
+          onClick={() => setCollapsed((value) => !value)}
+        >
+          {collapsed ? 'Expand' : 'Collapse'}
+        </button>
+      </div>
+      {newMessages > 0 && !collapsed && (
+        <button
+          className="new-message-button"
+          type="button"
+          onClick={jumpToNewest}
+        >
+          {newMessages} new {newMessages === 1 ? 'message' : 'messages'} · Jump
+          to newest
+        </button>
+      )}
+      {!collapsed && (
+        <>
+          {events.length === 0 ? (
+            <p className="muted">No public messages yet.</p>
+          ) : (
+            <ol
+              className="world-chat-feed"
+              ref={feedRef}
+              onScroll={(event) => {
+                const element = event.currentTarget;
+                const nearBottom =
+                  element.scrollHeight -
+                    element.scrollTop -
+                    element.clientHeight <
+                  36;
+                setAtBottom(nearBottom);
+                if (nearBottom) setNewMessages(0);
+              }}
+            >
+              {events.map((event) => {
+                const sender = agents.find(({ id }) => id === event.agentId);
+                const turnNumber = turns.find(
+                  (turn) =>
+                    turn.outcome !== 'provider-error' &&
+                    turn.communicationResult.requested &&
+                    turn.communicationResult.accepted &&
+                    turn.communicationResult.event.id === event.id,
+                )?.turnNumber;
+                return (
+                  <li key={event.id} style={{ borderLeftColor: sender?.color }}>
+                    <div>
+                      <strong>{sender?.name ?? event.agentId}</strong>
+                      <small>
+                        Turn {turnNumber ?? '—'} ·{' '}
+                        {formatTimestamp(event.occurredAt)}
+                      </small>
+                    </div>
+                    <p>{event.message}</p>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </>
       )}
     </section>
   );
@@ -879,6 +1389,9 @@ function AgentInspector({
     ({ proposerAgentId, recipientAgentId }) =>
       proposerAgentId === agent.id || recipientAgentId === agent.id,
   );
+  const resolvedModel = snapshot.resolvedModels.find(
+    ({ agentId }) => agentId === agent.id,
+  );
 
   const apply = async () => {
     const parsed = personalitySchema.safeParse(draft);
@@ -934,6 +1447,14 @@ function AgentInspector({
           <dt>Cell state</dt>
           <dd>{cellState}</dd>
         </div>
+        <div>
+          <dt>Resolved model</dt>
+          <dd>
+            {resolvedModel?.modelId ?? 'Not selected'} ·{' '}
+            {resolvedModel?.source ?? 'missing'}
+            {!resolvedModel?.available && ' · unavailable'}
+          </dd>
+        </div>
       </dl>
       <h3>Relevant pending proposals</h3>
       {pendingProposals.length ? (
@@ -968,6 +1489,13 @@ function AgentInspector({
         <span>{metrics?.directMessagesReceived ?? 0} direct received</span>
         <span>{controlledCellCount} controlled cells</span>
         <span>{formatCost(metrics?.knownCostCredits ?? 0)} known cost</span>
+        <span>{metrics?.tokens.promptTokens ?? 0} prompt tokens</span>
+        <span>{metrics?.tokens.completionTokens ?? 0} completion tokens</span>
+        {(metrics?.tokens.reasoningTokens ?? 0) > 0 && (
+          <span>
+            {metrics?.tokens.reasoningTokens} reasoning tokens reported
+          </span>
+        )}
         {(metrics?.turnsWithUnknownCost ?? 0) > 0 && (
           <span>{metrics?.turnsWithUnknownCost} unknown-cost turns</span>
         )}
@@ -1190,7 +1718,15 @@ function AgentInspector({
               </div>
               <p className="provider-meta">
                 {latestTurn.provider.provider} · {latestTurn.provider.model} ·{' '}
-                {latestTurn.provider.latencyMs}ms
+                {latestTurn.provider.latencyMs}ms ·{' '}
+                {latestTurn.provider.promptTokens ?? '—'} prompt /{' '}
+                {latestTurn.provider.completionTokens ?? '—'} completion
+                {latestTurn.provider.reasoningTokens === undefined
+                  ? ''
+                  : ` / ${latestTurn.provider.reasoningTokens} reasoning`}
+                {latestTurn.provider.costCredits === undefined
+                  ? ' · cost unavailable'
+                  : ` · ${formatCost(latestTurn.provider.costCredits)}`}
               </p>
             </>
           ) : (
@@ -1849,6 +2385,12 @@ function formatCost(cost: number): string {
   return `${cost.toFixed(8).replace(/0+$/, '').replace(/\.$/, '.0')} credits`;
 }
 
+function formatPerMillion(pricePerToken: string): string {
+  const value = Number(pricePerToken) * 1_000_000;
+  if (!Number.isFinite(value)) return 'Unavailable';
+  return `$${value.toLocaleString(undefined, { maximumFractionDigits: 6 })}/M`;
+}
+
 function serializeExportDocument(document: ExperimentExportDocument): string {
   return document.filters.serialization === 'pretty'
     ? JSON.stringify(document, null, 2)
@@ -1877,9 +2419,22 @@ function EventLog({
             .slice(-20)
             .toReversed()
             .map((turn) => (
-              <li data-outcome={turn.outcome} key={turn.turnNumber}>
+              <li
+                data-outcome={turn.outcome}
+                key={turn.turnNumber}
+                style={{
+                  borderLeft: `3px solid ${agents.find(({ id }) => id === turn.agentId)?.color ?? '#82938e'}`,
+                  paddingLeft: 8,
+                }}
+              >
                 <time>#{turn.turnNumber}</time>
                 <span>{formatTurn(turn, agents)}</span>
+                <small>
+                  {agents.find(({ id }) => id === turn.agentId)?.name ??
+                    turn.agentId}
+                  {' · '}
+                  {turn.provider?.model ?? 'model unavailable'}
+                </small>
               </li>
             ))
         )}
