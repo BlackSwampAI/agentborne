@@ -22,6 +22,8 @@ import {
   RECENT_CONTROL_CHANGE_LIMIT,
   RECENT_ALLIANCE_EVENT_LIMIT,
   PERSONALITY_MAX_LENGTH,
+  OPENROUTER_PROVIDER_TIMEOUT_MS,
+  OPENROUTER_429_FALLBACK_BACKOFF_MS,
   personalitySchema,
   simulationSnapshotSchema,
   type Agent,
@@ -667,76 +669,138 @@ export class SimulationService {
       pending?.observation ?? this.#buildObservation(agent.id);
     const turnNumber = pending?.turnNumber ?? this.#completedTurnCount + 1;
     const attemptStartedAt = this.#now();
+    let successfulAttemptStartedAt = attemptStartedAt;
     const resolvedModel = this.#resolvedModel(agent.id);
     const selectedModel = resolvedModel.modelId!;
     let providerResult: ProviderDecision | undefined;
+    const attemptHistory = [...(pending?.attempts ?? [])];
+    const deadlineAtMs = Date.now() + OPENROUTER_PROVIDER_TIMEOUT_MS;
 
     try {
       const providerObservation = structuredClone(observation);
 
-      try {
-        providerResult = await this.#provider.decide(
-          providerObservation,
-          selectedModel,
-          {
+      const automaticRecoveryAllowed = attemptKind === 'initial';
+      let nextKind: ModelAttempt['kind'] = attemptKind;
+      let validationFeedback: ProviderFailure['validationCodes'] =
+        pending?.failure.validationCodes;
+      for (let automaticCall = 0; automaticCall < 2; automaticCall += 1) {
+        const currentAttemptStartedAt = this.#now();
+        successfulAttemptStartedAt = currentAttemptStartedAt;
+        try {
+          providerResult = await this.#provider.decide(
+            providerObservation,
+            selectedModel,
+            {
+              reasoningProfile: resolvedModel.reasoningProfile,
+              signal: this.#activeRequestController.signal,
+              deadlineAtMs,
+              validationFeedback,
+            },
+          );
+          if (this.#activeRequestController.signal.aborted)
+            throw new AgentProviderError({
+              code: 'cancelled',
+              message: 'The model request was cancelled by the operator.',
+              retryable: false,
+              model: selectedModel,
+            });
+          break;
+        } catch (error) {
+          const providerError = asProviderError(error);
+          if (providerError.failure.code === 'cancelled') {
+            this.#status = 'paused';
+            throw new SimulationTurnCancelledError();
+          }
+          const attemptProvider = providerError.metadata ?? {
+            provider: this.#provider.mode,
+            model: providerError.failure.model ?? selectedModel,
+            latencyMs: providerError.failure.latencyMs ?? 0,
+          };
+          const attempt = {
+            attemptNumber: attemptHistory.length + 1,
+            kind: nextKind,
+            startedAt: currentAttemptStartedAt,
+            completedAt: this.#now(),
+            modelId: selectedModel,
             reasoningProfile: resolvedModel.reasoningProfile,
-            signal: this.#activeRequestController.signal,
-          },
-        );
-        if (this.#activeRequestController.signal.aborted)
-          throw new AgentProviderError({
-            code: 'cancelled',
-            message: 'The model request was cancelled by the operator.',
-            retryable: false,
-            model: selectedModel,
+            failure: providerError.failure,
+            provider: attemptProvider,
+          } satisfies ModelAttempt;
+          attemptHistory.push(attempt);
+          const formatFailure = Boolean(
+            providerError.failure.validationCodes?.length,
+          );
+          const transientFailure =
+            providerError.failure.retryable &&
+            (providerError.failure.code === 'network' ||
+              providerError.failure.code === 'timeout' ||
+              providerError.failure.code === 'malformed-response' ||
+              providerError.failure.code === 'unsupported-response' ||
+              (providerError.failure.code === 'provider-http' &&
+                [408, 429, 500, 502, 503, 504].includes(
+                  providerError.failure.httpStatus ?? 0,
+                )));
+          const retryDelayMs = automaticRetryDelayMs(
+            providerError.failure,
+            deadlineAtMs,
+          );
+          const canRetry =
+            automaticRecoveryAllowed &&
+            automaticCall === 0 &&
+            Date.now() < deadlineAtMs &&
+            Date.now() + retryDelayMs < deadlineAtMs &&
+            (formatFailure || transientFailure);
+          if (canRetry) {
+            if (retryDelayMs > 0) {
+              try {
+                await waitForRetryBackoff(
+                  retryDelayMs,
+                  this.#activeRequestController.signal,
+                  selectedModel,
+                );
+              } catch (error) {
+                if (
+                  error instanceof AgentProviderError &&
+                  error.failure.code === 'cancelled'
+                ) {
+                  this.#status = 'paused';
+                  throw new SimulationTurnCancelledError();
+                }
+                throw error;
+              }
+            }
+            validationFeedback = providerError.failure.validationCodes;
+            nextKind = formatFailure
+              ? 'automatic-repair'
+              : 'automatic-transport-retry';
+            continue;
+          }
+          this.#pendingFailedTurn = {
+            turnNumber,
+            agentId: agent.id,
+            startedAt,
+            observation,
+            failure: providerError.failure,
+            attempts: attemptHistory,
+          };
+          const record = agentTurnRecordSchema.parse({
+            turnNumber,
+            agentId: agent.id,
+            startedAt,
+            completedAt: this.#now(),
+            observation,
+            outcome: 'provider-error',
+            failure: providerError.failure,
+            provider: attemptProvider,
+            modelAttempts: attemptHistory,
+            allianceEvents: [],
           });
-      } catch (error) {
-        const providerError = asProviderError(error);
-        if (providerError.failure.code === 'cancelled') {
-          this.#status = 'paused';
-          throw new SimulationTurnCancelledError();
+          this.#status =
+            providerError.failure.code === 'configuration'
+              ? 'configuration-error'
+              : 'provider-error';
+          return record;
         }
-        const attemptProvider = providerError.metadata ?? {
-          provider: this.#provider.mode,
-          model: providerError.failure.model ?? selectedModel,
-          latencyMs: providerError.failure.latencyMs ?? 0,
-        };
-        const attempt = {
-          attemptNumber: (pending?.attempts.length ?? 0) + 1,
-          kind: attemptKind,
-          startedAt: attemptStartedAt,
-          completedAt: this.#now(),
-          modelId: selectedModel,
-          reasoningProfile: resolvedModel.reasoningProfile,
-          failure: providerError.failure,
-          provider: attemptProvider,
-        } satisfies ModelAttempt;
-        const attempts = [...(pending?.attempts ?? []), attempt];
-        this.#pendingFailedTurn = {
-          turnNumber,
-          agentId: agent.id,
-          startedAt,
-          observation,
-          failure: providerError.failure,
-          attempts,
-        };
-        const record = agentTurnRecordSchema.parse({
-          turnNumber,
-          agentId: agent.id,
-          startedAt,
-          completedAt: this.#now(),
-          observation,
-          outcome: 'provider-error',
-          failure: providerError.failure,
-          provider: attemptProvider,
-          modelAttempts: attempts,
-          allianceEvents: [],
-        });
-        this.#status =
-          providerError.failure.code === 'configuration'
-            ? 'configuration-error'
-            : 'provider-error';
-        return record;
       }
 
       if (!providerResult)
@@ -811,11 +875,11 @@ export class SimulationService {
         ),
         provider: providerResult.metadata,
         modelAttempts: [
-          ...(pending?.attempts ?? []),
+          ...attemptHistory,
           {
-            attemptNumber: (pending?.attempts.length ?? 0) + 1,
-            kind: attemptKind,
-            startedAt: attemptStartedAt,
+            attemptNumber: attemptHistory.length + 1,
+            kind: nextKind,
+            startedAt: successfulAttemptStartedAt,
             completedAt: this.#now(),
             modelId: selectedModel,
             reasoningProfile: resolvedModel.reasoningProfile,
@@ -855,7 +919,7 @@ export class SimulationService {
         model: selectedModel,
       };
       const attempt = {
-        attemptNumber: (pending?.attempts.length ?? 0) + 1,
+        attemptNumber: attemptHistory.length + 1,
         kind: attemptKind,
         startedAt: attemptStartedAt,
         completedAt: this.#now(),
@@ -868,7 +932,7 @@ export class SimulationService {
           latencyMs: 0,
         },
       } satisfies ModelAttempt;
-      const attempts = [...(pending?.attempts ?? []), attempt];
+      const attempts = [...attemptHistory, attempt];
       this.#pendingFailedTurn = {
         turnNumber,
         agentId: agent.id,
@@ -1073,6 +1137,7 @@ export class SimulationService {
       .map((cell) => h3CellSchema.parse(cell))
       .filter((cell) => this.#state.hexes.has(cell))
       .map(stateFor);
+    const captureEligibility = getCaptureEligibility(this.#state, agent.id);
     const nearbyAgents = [...this.#state.agents.values()]
       .filter((candidate) => candidate.id !== agent.id)
       .map((candidate) => ({
@@ -1183,7 +1248,21 @@ export class SimulationService {
       agentName: agent.name,
       personality: agent.personality,
       currentCell: stateFor(agent.currentCell),
-      captureEligibility: getCaptureEligibility(this.#state, agent.id),
+      captureEligibility,
+      actionAvailability: {
+        moveTargetCellIds: adjacentCells.map(({ cell }) => cell),
+        infect:
+          this.#state.hexes.get(agent.currentCell)?.state === 'open'
+            ? { available: true }
+            : {
+                available: false,
+                reason: 'current-cell-already-infected',
+              },
+        capture: captureEligibility.eligible
+          ? { available: true }
+          : { available: false, reason: captureEligibility.blockedReason },
+        wait: { available: true },
+      },
       adjacentCells,
       nearbyAgents,
       recentEvents,
@@ -1321,6 +1400,48 @@ function summarizeAllianceEvent(
     return `${name(event.leftAgentId)} left the alliance.`;
   if (event.type === 'alliance-dissolved') return 'The alliance dissolved.';
   return `The proposal from ${name(event.proposerAgentId)} to ${name(event.recipientAgentId)} was ${event.reason}.`;
+}
+
+function automaticRetryDelayMs(
+  failure: ProviderFailure,
+  deadlineAtMs: number,
+): number {
+  if (failure.code !== 'provider-http' || failure.httpStatus !== 429) return 0;
+  const retryAfterMs = failure.retryAfterMs;
+  if (retryAfterMs !== undefined && Date.now() + retryAfterMs < deadlineAtMs)
+    return retryAfterMs;
+  return OPENROUTER_429_FALLBACK_BACKOFF_MS;
+}
+
+function waitForRetryBackoff(
+  delayMs: number,
+  signal: AbortSignal,
+  model: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(cancelledBackoffError(model));
+      return;
+    }
+    const timeout = setTimeout(() => {
+      signal.removeEventListener('abort', cancel);
+      resolve();
+    }, delayMs);
+    const cancel = () => {
+      clearTimeout(timeout);
+      reject(cancelledBackoffError(model));
+    };
+    signal.addEventListener('abort', cancel, { once: true });
+  });
+}
+
+function cancelledBackoffError(model: string): AgentProviderError {
+  return new AgentProviderError({
+    code: 'cancelled',
+    message: 'The model request was cancelled by the operator.',
+    retryable: false,
+    model,
+  });
 }
 
 function asProviderError(error: unknown): {

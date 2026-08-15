@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { gridDistance } from 'h3-js';
 import {
   AgentProviderError,
@@ -78,6 +78,182 @@ function exportRequest(level: 'minimal' | 'standard' | 'full-safe' | 'custom') {
 }
 
 describe('SimulationService', () => {
+  it('derives compact action availability from the same authoritative world state', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'infect' }, summary: 'Infect.' },
+      ]),
+    );
+    const turn = await simulation.executeNextTurn();
+    expect(turn.observation.actionAvailability).toEqual({
+      moveTargetCellIds: turn.observation.adjacentCells.map(({ cell }) => cell),
+      infect: { available: true },
+      capture: { available: false, reason: 'capture-open-cell' },
+      wait: { available: true },
+    });
+    expect(turn.outcome).toBe('accepted');
+    if (
+      turn.outcome === 'provider-error' ||
+      turn.outcome === 'operator-skipped'
+    )
+      throw new Error('Expected a completed engine decision.');
+    expect(turn.worldActionResult.accepted).toBe(true);
+  });
+
+  it('uses one bounded automatic repair with the same observation and deadline', async () => {
+    const calls: Array<{
+      observation: AgentObservation;
+      deadlineAtMs?: number;
+      feedback?: readonly string[];
+    }> = [];
+    const simulation = service({
+      mode: 'scripted-test',
+      configured: true,
+      async decide(observation, model, options) {
+        calls.push({
+          observation: structuredClone(observation),
+          deadlineAtMs: options?.deadlineAtMs,
+          feedback: options?.validationFeedback,
+        });
+        if (calls.length === 1)
+          throw new AgentProviderError({
+            code: 'invalid-json',
+            message: 'Invalid decision JSON.',
+            retryable: true,
+            model,
+            validationCodes: ['invalid-json'],
+          });
+        return {
+          decision: { worldAction: { type: 'wait' }, summary: 'Repaired.' },
+          metadata: {
+            provider: 'scripted-test',
+            model,
+            latencyMs: 1,
+            costCredits: 0,
+          },
+        };
+      },
+    });
+    const turn = await simulation.executeNextTurn();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.observation).toEqual(calls[0]!.observation);
+    expect(calls[1]!.deadlineAtMs).toBe(calls[0]!.deadlineAtMs);
+    expect(calls[1]!.feedback).toEqual(['invalid-json']);
+    expect(turn).toMatchObject({
+      outcome: 'accepted',
+      modelAttempts: [{ kind: 'initial' }, { kind: 'automatic-repair' }],
+    });
+  });
+
+  it.each([
+    ['valid Retry-After', 2_000, 2_000],
+    ['missing Retry-After', undefined, 1_500],
+  ])(
+    'backs off for %s before the one automatic 429 retry',
+    async (_label, retryAfterMs, expectedDelay) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-08-15T12:00:00.000Z'));
+      try {
+        let calls = 0;
+        const simulation = service({
+          mode: 'scripted-test',
+          configured: true,
+          async decide(_observation, model) {
+            calls += 1;
+            if (calls === 1)
+              throw new AgentProviderError({
+                code: 'provider-http',
+                message: 'Rate limited.',
+                retryable: true,
+                model,
+                httpStatus: 429,
+                ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+              });
+            return {
+              decision: {
+                worldAction: { type: 'wait' },
+                summary: 'Recovered.',
+              },
+              metadata: { provider: 'scripted-test', model, latencyMs: 1 },
+            };
+          },
+        });
+        const turn = simulation.executeNextTurn();
+        await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+        expect(calls).toBe(1);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(turn).resolves.toMatchObject({ outcome: 'accepted' });
+        expect(calls).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('does not retry a 429 when the fallback cannot fit the shared deadline', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-15T12:00:00.000Z'));
+    try {
+      let calls = 0;
+      const simulation = service({
+        mode: 'scripted-test',
+        configured: true,
+        async decide(_observation, model) {
+          calls += 1;
+          vi.setSystemTime(new Date('2026-08-15T12:01:14.000Z'));
+          throw new AgentProviderError({
+            code: 'provider-http',
+            message: 'Rate limited.',
+            retryable: true,
+            model,
+            httpStatus: 429,
+          });
+        },
+      });
+      await expect(simulation.executeNextTurn()).resolves.toMatchObject({
+        outcome: 'provider-error',
+        modelAttempts: [{ kind: 'initial' }],
+      });
+      expect(calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancellation interrupts the 429 fallback without starting another call', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-15T12:00:00.000Z'));
+    try {
+      let calls = 0;
+      const simulation = service({
+        mode: 'scripted-test',
+        configured: true,
+        async decide(_observation, model) {
+          calls += 1;
+          throw new AgentProviderError({
+            code: 'provider-http',
+            message: 'Rate limited.',
+            retryable: true,
+            model,
+            httpStatus: 429,
+          });
+        },
+      });
+      const turn = simulation.executeNextTurn();
+      await Promise.resolve();
+      simulation.cancelCurrentRequest();
+      await expect(turn).rejects.toBeInstanceOf(SimulationTurnCancelledError);
+      expect(calls).toBe(1);
+      expect(simulation.getSnapshot()).toMatchObject({
+        activeAgentId: null,
+        pendingFailedTurn: null,
+        turnNumber: 0,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('applies formal diplomacy independently and exposes authoritative alliance observations', async () => {
     const [emberId, rookId] = DEVELOPMENT_AGENT_BLUEPRINTS.slice(0, 2).map(
       ({ id }) => agentIdSchema.parse(id),
@@ -746,6 +922,7 @@ describe('SimulationService', () => {
       acceptedMovements: 1,
       successfullyInfectedCells: 1,
       knownCostCredits: 0.00000002,
+      attemptsWithUnknownCost: 0,
       turnsWithUnknownCost: 0,
     });
     expect(document.metrics?.aggregate.uniqueVisitedCells).toBeGreaterThan(1);
@@ -765,6 +942,7 @@ describe('SimulationService', () => {
         ?.aggregate,
     ).toMatchObject({
       knownCostCredits: 0.00000002,
+      attemptsWithUnknownCost: 1,
       turnsWithUnknownCost: 1,
     });
   });
@@ -1874,7 +2052,7 @@ describe('SimulationService', () => {
       configured: true,
       async decide(): Promise<ProviderDecision> {
         calls += 1;
-        if (calls === 1)
+        if (calls <= 2)
           throw new AgentProviderError(
             {
               code: 'timeout',
@@ -1924,12 +2102,16 @@ describe('SimulationService', () => {
     expect(simulation.getSnapshot().turnNumber).toBe(0);
     expect(simulation.getSnapshot().pendingFailedTurn).toMatchObject({
       turnNumber: 1,
-      attempts: [{ kind: 'initial' }],
+      attempts: [{ kind: 'initial' }, { kind: 'automatic-transport-retry' }],
     });
     expect(await simulation.retryFailedTurn()).toMatchObject({
       turnNumber: 1,
       outcome: 'accepted',
-      modelAttempts: [{ kind: 'initial' }, { kind: 'manual-retry' }],
+      modelAttempts: [
+        { kind: 'initial' },
+        { kind: 'automatic-transport-retry' },
+        { kind: 'manual-retry' },
+      ],
     });
     expect(simulation.getSnapshot().turnNumber).toBe(1);
     expect(simulation.getSnapshot().experiment.metrics.aggregate).toMatchObject(
@@ -1939,22 +2121,171 @@ describe('SimulationService', () => {
         rejected: 0,
         providerErrors: 0,
         operatorSkipped: 0,
-        modelCalls: 2,
-        failedModelAttempts: 1,
+        modelCalls: 3,
+        failedModelAttempts: 2,
+        automaticTransportRetries: 1,
         manualRetryAttempts: 1,
         retriedTurns: 1,
         recoveredByRetry: 1,
         tokens: {
-          promptTokens: 30,
-          completionTokens: 7,
-          reasoningTokens: 3,
-          cachedReadTokens: 9,
-          cacheWriteTokens: 12,
-          totalTokens: 37,
+          promptTokens: 40,
+          completionTokens: 9,
+          reasoningTokens: 4,
+          cachedReadTokens: 12,
+          cacheWriteTokens: 16,
+          totalTokens: 49,
         },
-        knownCostCredits: 0.3,
+        knownCostCredits: 0.4,
       },
     );
+  });
+
+  it('preserves partial-known token and cost totals per attempt and per logical turn', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'Known usage.' },
+      ]),
+    );
+    const completed = await simulation.executeNextTurn();
+    const failedAttempt = (attemptNumber: number) => ({
+      attemptNumber,
+      kind:
+        attemptNumber === 1
+          ? ('initial' as const)
+          : ('automatic-transport-retry' as const),
+      startedAt: completed.startedAt,
+      completedAt: completed.completedAt,
+      modelId: 'acceptance/model',
+      reasoningProfile: 'provider-default' as const,
+      failure: {
+        code: 'provider-http' as const,
+        message: 'The model provider rate limited the request.',
+        retryable: true,
+        httpStatus: 429,
+      },
+      provider: {
+        provider: 'openrouter' as const,
+        model: 'acceptance/model',
+        httpStatus: 429,
+        latencyMs: 10,
+      },
+    });
+    const acceptanceTurn = agentTurnRecordSchema.parse({
+      ...completed,
+      provider: {
+        provider: 'openrouter',
+        model: 'acceptance/model',
+        latencyMs: 20,
+        promptTokens: 73_931,
+        completionTokens: 5_079,
+        totalTokens: 79_010,
+        reasoningTokens: 2_642,
+        cachedReadTokens: 432,
+        cacheWriteTokens: 8_175,
+        costCredits: 1.25,
+      },
+      modelAttempts: [
+        failedAttempt(1),
+        failedAttempt(2),
+        {
+          attemptNumber: 3,
+          kind: 'manual-retry',
+          startedAt: completed.startedAt,
+          completedAt: completed.completedAt,
+          modelId: 'acceptance/model',
+          reasoningProfile: 'provider-default',
+          provider: {
+            provider: 'openrouter',
+            model: 'acceptance/model',
+            latencyMs: 20,
+            promptTokens: 73_931,
+            completionTokens: 5_079,
+            totalTokens: 79_010,
+            reasoningTokens: 2_642,
+            cachedReadTokens: 432,
+            cacheWriteTokens: 8_175,
+            costCredits: 1.25,
+          },
+        },
+      ],
+    });
+    const metrics = calculateExperimentMetrics(
+      [acceptanceTurn],
+      [acceptanceTurn.agentId],
+    ).aggregate;
+    expect(metrics).toMatchObject({
+      tokens: {
+        promptTokens: 73_931,
+        completionTokens: 5_079,
+        totalTokens: 79_010,
+        reasoningTokens: 2_642,
+        cachedReadTokens: 432,
+        cacheWriteTokens: 8_175,
+      },
+      tokenUsageComplete: false,
+      attemptsWithUnknownTokenUsage: 2,
+      knownCostCredits: 1.25,
+      attemptsWithUnknownCost: 2,
+      turnsWithUnknownCost: 1,
+      manualRetryAttempts: 1,
+      recoveredManually: 1,
+    });
+  });
+
+  it('sums each partially reported token field independently', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'Partial usage.' },
+      ]),
+    );
+    const completed = await simulation.executeNextTurn();
+    const partial = agentTurnRecordSchema.parse({
+      ...completed,
+      modelAttempts: [
+        {
+          attemptNumber: 1,
+          kind: 'initial',
+          startedAt: completed.startedAt,
+          completedAt: completed.completedAt,
+          modelId: 'partial/model',
+          reasoningProfile: 'provider-default',
+          provider: {
+            provider: 'openrouter',
+            model: 'partial/model',
+            latencyMs: 1,
+            promptTokens: 5,
+            costCredits: 0.1,
+          },
+        },
+        {
+          attemptNumber: 2,
+          kind: 'automatic-repair',
+          startedAt: completed.startedAt,
+          completedAt: completed.completedAt,
+          modelId: 'partial/model',
+          reasoningProfile: 'provider-default',
+          provider: {
+            provider: 'openrouter',
+            model: 'partial/model',
+            latencyMs: 1,
+            completionTokens: 3,
+            costCredits: 0.2,
+          },
+        },
+      ],
+    });
+    expect(
+      calculateExperimentMetrics([partial], [partial.agentId]).aggregate,
+    ).toMatchObject({
+      tokens: { promptTokens: 5, completionTokens: 3 },
+      tokenUsageComplete: false,
+      attemptsWithUnknownTokenUsage: 2,
+      knownCostCredits: 0.3,
+      attemptsWithUnknownCost: 0,
+      turnsWithUnknownCost: 0,
+      automaticRepairAttempts: 1,
+      recoveredAutomatically: 1,
+    });
   });
 
   it('skips one failed logical turn without applying an action and exports its attempts', async () => {
@@ -1997,6 +2328,7 @@ describe('SimulationService', () => {
       provider: { model: 'failure-test' },
       modelAttempts: [
         { kind: 'initial' },
+        { kind: 'automatic-transport-retry' },
         { kind: 'manual-retry' },
         { kind: 'manual-retry' },
       ],
@@ -2015,6 +2347,7 @@ describe('SimulationService', () => {
       outcome: 'operator-skipped',
       modelAttempts: [
         { kind: 'initial' },
+        { kind: 'automatic-transport-retry' },
         { kind: 'manual-retry' },
         { kind: 'manual-retry' },
       ],
@@ -2025,12 +2358,13 @@ describe('SimulationService', () => {
       rejected: 0,
       providerErrors: 0,
       operatorSkipped: 1,
-      modelCalls: 3,
-      failedModelAttempts: 3,
+      modelCalls: 4,
+      failedModelAttempts: 4,
+      automaticTransportRetries: 1,
       manualRetryAttempts: 2,
       retriedTurns: 1,
       recoveredByRetry: 0,
-      knownCostCredits: 0.03,
+      knownCostCredits: 0.04,
     });
   });
 
@@ -2041,7 +2375,7 @@ describe('SimulationService', () => {
       configured: true,
       async decide(_observation, model, options) {
         calls.push({ model, reasoningProfile: options?.reasoningProfile });
-        if (calls.length === 1)
+        if (calls.length <= 2)
           throw new AgentProviderError({
             code: 'timeout',
             message: 'Timed out.',
@@ -2068,6 +2402,7 @@ describe('SimulationService', () => {
     });
     await simulation.retryFailedTurn();
     expect(calls).toEqual([
+      { model: compatibleModels[0]!.id, reasoningProfile: 'low' },
       { model: compatibleModels[0]!.id, reasoningProfile: 'low' },
       { model: compatibleModels[1]!.id, reasoningProfile: 'low' },
     ]);

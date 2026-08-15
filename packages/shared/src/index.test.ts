@@ -68,6 +68,12 @@ const observation = {
     eligible: false,
     blockedReason: 'capture-open-cell',
   },
+  actionAvailability: {
+    moveTargetCellIds: [adjacent],
+    infect: { available: true },
+    capture: { available: false, reason: 'capture-open-cell' },
+    wait: { available: true },
+  },
   adjacentCells: [
     {
       cell: adjacent,
@@ -185,7 +191,10 @@ const snapshot = {
         directMessagesReceived: 0,
         uniqueVisitedCells: 0,
         tokens: {},
+        tokenUsageComplete: true,
+        attemptsWithUnknownTokenUsage: 0,
         knownCostCredits: 0,
+        attemptsWithUnknownCost: 0,
         turnsWithUnknownCost: 0,
       },
       byAgent: [],

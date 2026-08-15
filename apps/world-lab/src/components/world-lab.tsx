@@ -60,6 +60,7 @@ export function WorldLab() {
   const [running, setRunning] = useState(false);
   const [runToTurn200, setRunToTurn200] = useState(false);
   const [inFlight, setInFlight] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [personalityPending, setPersonalityPending] = useState(false);
   const [personalityNotice, setPersonalityNotice] = useState<string | null>(
@@ -80,6 +81,7 @@ export function WorldLab() {
   const inFlightRef = useRef(false);
   const runToTurn200Ref = useRef(false);
   const completedTurnsRef = useRef(0);
+  const mutationSequenceRef = useRef(0);
   const exportInitializedRef = useRef(false);
 
   useEffect(() => {
@@ -102,6 +104,24 @@ export function WorldLab() {
     setSelectedCell((current) => current ?? next.world.hexes[0]!.cell);
     setSelectedAgentId((current) => current ?? next.world.agents[0]!.id);
   }, []);
+
+  const reconcileAuthoritativeSnapshot = useCallback(async () => {
+    setReconciling(true);
+    try {
+      for (;;) {
+        const response = await fetch(apiBase, { cache: 'no-store' });
+        if (!response.ok) throw new Error('snapshot request failed');
+        const authoritative = simulationSnapshotSchema.parse(
+          await response.json(),
+        );
+        applySnapshot(authoritative);
+        if (authoritative.activeAgentId === null) return;
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      }
+    } finally {
+      setReconciling(false);
+    }
+  }, [applySnapshot]);
 
   useEffect(() => {
     let alive = true;
@@ -274,8 +294,11 @@ export function WorldLab() {
       setInFlight(true);
       setUiError(null);
       try {
+        mutationSequenceRef.current += 1;
+        const mutationId = `mutation_${Date.now()}_${mutationSequenceRef.current}`;
+        const turnPath = `${apiBase}/turn${operation === 'retry' ? '/retry' : ''}`;
         const response = await fetch(
-          `${apiBase}/turn${operation === 'retry' ? '/retry' : ''}`,
+          `${turnPath}?mutationId=${encodeURIComponent(mutationId)}`,
           { method: 'POST' },
         );
         if (response.status === 409) {
@@ -307,16 +330,24 @@ export function WorldLab() {
           );
         }
       } catch {
-        setUiError('The turn failed safely. Check the Game API and try again.');
+        setUiError('The response was lost. Reconciling with the Game API…');
         setRunning(false);
         setRunToTurn200(false);
         runToTurn200Ref.current = false;
+        try {
+          await reconcileAuthoritativeSnapshot();
+          setUiError(null);
+        } catch {
+          setUiError(
+            'The authoritative state could not be reconciled. Refresh before retrying.',
+          );
+        }
       } finally {
         inFlightRef.current = false;
         setInFlight(false);
       }
     },
-    [applySnapshot],
+    [applySnapshot, reconcileAuthoritativeSnapshot],
   );
 
   const skipFailedTurn = async () => {
@@ -535,14 +566,16 @@ export function WorldLab() {
     : undefined;
   const status = resetting
     ? 'resetting'
-    : inFlight
-      ? 'waiting-for-model'
-      : snapshot.status === 'configuration-error' ||
-          snapshot.status === 'provider-error'
-        ? snapshot.status
-        : running
-          ? 'running'
-          : 'paused';
+    : reconciling
+      ? 'reconciling-request'
+      : inFlight
+        ? 'waiting-for-model'
+        : snapshot.status === 'configuration-error' ||
+            snapshot.status === 'provider-error'
+          ? snapshot.status
+          : running
+            ? 'running'
+            : 'paused';
   const personalityControlsDisabled =
     running ||
     inFlight ||
@@ -595,6 +628,7 @@ export function WorldLab() {
         <div className="command-summary">
           <strong>Turn {snapshot.turnNumber}</strong>
           <span>{status.replaceAll('-', ' ')}</span>
+          {reconciling && <span>Reconciling request…</span>}
           <span>
             {formatCost(snapshot.experiment.metrics.aggregate.knownCostCredits)}
           </span>
@@ -1942,7 +1976,16 @@ function AgentInspector({
           </span>
         )}
         {(metrics?.turnsWithUnknownCost ?? 0) > 0 && (
-          <span>{metrics?.turnsWithUnknownCost} unknown-cost turns</span>
+          <span>
+            {metrics?.attemptsWithUnknownCost} unknown-cost attempts across{' '}
+            {metrics?.turnsWithUnknownCost} turns
+          </span>
+        )}
+        {(metrics?.attemptsWithUnknownTokenUsage ?? 0) > 0 && (
+          <span>
+            Partial token totals · {metrics?.attemptsWithUnknownTokenUsage}{' '}
+            attempts missing token usage
+          </span>
         )}
       </div>
       <h3>Recent territory gains and losses</h3>
@@ -2327,7 +2370,16 @@ function ExperimentUsageMeter({ snapshot }: { snapshot: SimulationSnapshot }) {
         tokens
       </span>
       {metrics.turnsWithUnknownCost > 0 && (
-        <span>{metrics.turnsWithUnknownCost} unknown-cost turns</span>
+        <span>
+          {metrics.attemptsWithUnknownCost} unknown-cost attempts across{' '}
+          {metrics.turnsWithUnknownCost} turns
+        </span>
+      )}
+      {metrics.attemptsWithUnknownTokenUsage > 0 && (
+        <span>
+          Partial token totals · {metrics.attemptsWithUnknownTokenUsage}{' '}
+          attempts missing token usage
+        </span>
       )}
     </div>
   );

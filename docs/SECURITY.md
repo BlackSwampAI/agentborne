@@ -18,6 +18,14 @@ Non-success OpenRouter bodies are read only up to a fixed bound. The adapter ext
 
 ## Prompt and reasoning data
 
+New logical turns may use one automatic repair or transient transport retry,
+but never both, and all calls share the original 75-second deadline. A
+corrective request contains the same authoritative observation plus only
+allowlisted validation codes; it never contains the raw invalid response, raw
+Zod issues, stack traces, provider bodies, or copied diagnostic text.
+Engine-rejected normalized decisions are not retried. Manual Retry is one
+request per click and cannot invoke automatic recovery.
+
 The model is explicitly instructed to return only one flat JSON decision with one concise visible summary and no hidden reasoning or chain-of-thought. Optional reasoning configuration always sets `exclude: true`; Provider default sends no reasoning instruction. Only numeric reasoning-token billing metadata is retained if OpenRouter reports it. The application stores no raw prompts, raw provider payloads, reasoning text, or private reasoning.
 
 Agent-authored messages, personalities, summaries, scoreboards, alliance events, proposals, and natural-language alliance claims are bounded untrusted data. They appear only inside the immutable user observation, never the fixed system instruction. Direct eligibility is derived from the pre-action snapshot. Recipient/range, infection, controller-presence, alliance membership, proposal eligibility, system ID/color allocation, and capture validation remain authoritative in the world engine. Models cannot choose alliance IDs, colors, membership lists, or metadata. Only accepted typed diplomacy changes alliance state, and rejected components cannot partially mutate or corrupt one another. World Lab renders model text through React text nodes and never raw HTML.

@@ -22,4 +22,19 @@ Catalog compatibility and runtime verification are distinct. A manual “Test se
 
 Schema-v7 telemetry treats `modelAttempts` as the canonical billable-usage source. Logical-turn outcomes and model calls are separate counters: retries add calls, tokens, and cost without adding turns, while an operator skip adds one `operatorSkipped` logical outcome and no provider call. Schema-v6 model-configuration imports remain supported.
 
+Each observation also carries compact action availability derived from the same authoritative engine state: exact adjacent move IDs, infect and capture availability with bounded blocking reasons, and always-available wait. This guidance is placed beside the flat decision contract and explicitly explains that infect has no target, affects only the current cell, and that adjacent expansion requires moving now and infecting on a later turn. It does not replace engine validation.
+
+A new logical turn may make an initial call plus at most one automatic contract-repair or transient-transport retry. Both calls use the same immutable observation, model, reasoning profile, universal contract, and 75-second deadline. Corrective requests contain only bounded validation codes and never replay raw invalid output. A normalized decision rejected by the engine is a legitimate simulation outcome and is not retried. Manual Retry remains exactly one request per click, reuses the saved observation, resolves the current model/profile, includes the latest safe feedback, and cannot start nested automatic recovery.
+
+Every charged attempt is recorded once with its kind, timing, safe failure/validation data, provider metadata, usage, and actual cost. Schema version 7 is extended compatibly with separate automatic/manual recovery metrics. Client mutation IDs suppress duplicate turn execution, and after an ambiguous proxy or response failure the World Lab clears its local guard and polls the authoritative server snapshot without automatically resubmitting. LangChain remains intentionally unnecessary.
+
+Schema-v7 aggregation retains every independently known token field even when
+other attempts omit usage. `attemptsWithUnknownTokenUsage` and a completeness
+flag disclose partial totals without estimating missing values. Known costs are
+summed exactly, while `attemptsWithUnknownCost` counts affected calls and
+`turnsWithUnknownCost` counts distinct logical turns. For a 429, a valid
+`Retry-After` is honored when it fits the shared deadline; otherwise one
+centralized 1.5-second fallback may be used when it fits. Cancellation interrupts
+that backoff, and the two-call maximum remains unchanged.
+
 The process-local cache and assignments disappear with the development server; persistent experiment storage, authentication, budget enforcement, popularity/throughput ranking, and catalog history are deferred.

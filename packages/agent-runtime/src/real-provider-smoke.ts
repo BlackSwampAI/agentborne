@@ -52,6 +52,12 @@ const observation = agentObservationSchema.parse({
     eligible: false,
     blockedReason: 'capture-open-cell',
   },
+  actionAvailability: {
+    moveTargetCellIds: adjacentCells.map(({ cell }) => cell),
+    infect: { available: true },
+    capture: { available: false, reason: 'capture-open-cell' },
+    wait: { available: true },
+  },
   adjacentCells,
   nearbyAgents: [],
   recentEvents: [],

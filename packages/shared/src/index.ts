@@ -12,6 +12,7 @@ export const PROVIDER_ERROR_MAX_LENGTH = 240;
 export const OPENROUTER_MODEL_CONTEXT_MINIMUM = 16_384;
 export const OPENROUTER_MAX_OUTPUT_TOKENS = 4_096;
 export const OPENROUTER_PROVIDER_TIMEOUT_MS = 75_000;
+export const OPENROUTER_429_FALLBACK_BACKOFF_MS = 1_500;
 export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v1';
 export const OPENROUTER_REQUIRED_PARAMETERS = ['max_tokens'] as const;
 export const DEVELOPMENT_WORLD_CONFIG = {
@@ -712,12 +713,37 @@ export const observedAllianceEventSchema = z.object({
   summary: z.string().trim().min(1).max(240),
 });
 
-export const agentObservationSchema = z.object({
+const agentObservationObjectSchema = z.object({
   agentId: agentIdSchema,
   agentName: z.string().trim().min(1).max(80),
   personality: z.string().trim().min(1).max(PERSONALITY_MAX_LENGTH),
   currentCell: cellObservationSchema,
   captureEligibility: captureEligibilitySchema,
+  actionAvailability: z
+    .object({
+      moveTargetCellIds: z.array(h3CellSchema).min(1).max(6),
+      infect: z.discriminatedUnion('available', [
+        z.object({ available: z.literal(true) }).strict(),
+        z
+          .object({
+            available: z.literal(false),
+            reason: z.literal('current-cell-already-infected'),
+          })
+          .strict(),
+      ]),
+      capture: z.discriminatedUnion('available', [
+        z.object({ available: z.literal(true) }).strict(),
+        z
+          .object({
+            available: z.literal(false),
+            reason: captureBlockedReasonSchema,
+          })
+          .strict(),
+      ]),
+      wait: z.object({ available: z.literal(true) }).strict(),
+    })
+    .strict()
+    .optional(),
   adjacentCells: z.array(cellObservationSchema).min(1).max(6),
   nearbyAgents: z
     .array(nearbyAgentObservationSchema)
@@ -742,6 +768,29 @@ export const agentObservationSchema = z.object({
     .array(observedControlChangeSchema)
     .max(RECENT_CONTROL_CHANGE_LIMIT),
 });
+
+export const agentObservationSchema = agentObservationObjectSchema.transform(
+  (observation) => ({
+    ...observation,
+    actionAvailability: observation.actionAvailability ?? {
+      moveTargetCellIds: observation.adjacentCells.map(({ cell }) => cell),
+      infect:
+        observation.currentCell.state === 'open'
+          ? { available: true as const }
+          : {
+              available: false as const,
+              reason: 'current-cell-already-infected' as const,
+            },
+      capture: observation.captureEligibility.eligible
+        ? { available: true as const }
+        : {
+            available: false as const,
+            reason: observation.captureEligibility.blockedReason,
+          },
+      wait: { available: true as const },
+    },
+  }),
+);
 export type AgentObservation = z.infer<typeof agentObservationSchema>;
 
 export const agentDecisionSchema = z
@@ -1017,12 +1066,34 @@ export const providerFailureSchema = z.object({
   model: modelIdSchema.optional(),
   finishReason: z.string().trim().min(1).max(80).optional(),
   nativeFinishReason: z.string().trim().min(1).max(120).optional(),
+  validationCodes: z
+    .array(
+      z.enum([
+        'missing-json-object',
+        'multiple-json-objects',
+        'invalid-json',
+        'missing-required-field',
+        'invalid-field-type',
+        'invalid-enum-value',
+        'contradictory-fields',
+        'invalid-recipient-sentinel',
+        'invalid-action-fields',
+      ]),
+    )
+    .max(8)
+    .optional(),
+  retryAfterMs: z.number().int().nonnegative().max(75_000).optional(),
 });
 export type ProviderFailure = z.infer<typeof providerFailureSchema>;
 
 export const modelAttemptSchema = z.object({
   attemptNumber: z.number().int().positive(),
-  kind: z.enum(['initial', 'manual-retry']),
+  kind: z.enum([
+    'initial',
+    'automatic-repair',
+    'automatic-transport-retry',
+    'manual-retry',
+  ]),
   startedAt: z.iso.datetime(),
   completedAt: z.iso.datetime(),
   modelId: modelIdSchema,
@@ -1417,8 +1488,12 @@ export const metricCountsSchema = z
     operatorSkipped: z.number().int().nonnegative().default(0),
     modelCalls: z.number().int().nonnegative().default(0),
     failedModelAttempts: z.number().int().nonnegative().default(0),
+    automaticRepairAttempts: z.number().int().nonnegative().default(0),
+    automaticTransportRetries: z.number().int().nonnegative().default(0),
     manualRetryAttempts: z.number().int().nonnegative().default(0),
     retriedTurns: z.number().int().nonnegative().default(0),
+    recoveredAutomatically: z.number().int().nonnegative().default(0),
+    recoveredManually: z.number().int().nonnegative().default(0),
     recoveredByRetry: z.number().int().nonnegative().default(0),
     requestedMoves: z.number().int().nonnegative(),
     requestedInfections: z.number().int().nonnegative(),
@@ -1477,7 +1552,10 @@ export const metricCountsSchema = z
     uniqueVisitedCells: z.number().int().nonnegative(),
     averageLatencyMs: z.number().nonnegative().optional(),
     tokens: tokenTotalsSchema,
+    tokenUsageComplete: z.boolean().default(true),
+    attemptsWithUnknownTokenUsage: z.number().int().nonnegative().default(0),
     knownCostCredits: z.number().nonnegative().finite(),
+    attemptsWithUnknownCost: z.number().int().nonnegative().default(0),
     turnsWithUnknownCost: z.number().int().nonnegative(),
   })
   .superRefine((metrics, context) => {
@@ -1659,6 +1737,7 @@ export const experimentExportPreviewSchema = z.object({
   lastMatchingTurn: z.number().int().positive().optional(),
   retention: experimentRetentionSchema,
   knownCostCredits: z.number().nonnegative().finite(),
+  attemptsWithUnknownCost: z.number().int().nonnegative().default(0),
   turnsWithUnknownCost: z.number().int().nonnegative(),
   serializedUtf8Bytes: z.number().int().nonnegative(),
   approximateAiInputTokens: z.number().int().nonnegative(),
@@ -1682,7 +1761,7 @@ export const experimentExportTurnSchema = z.object({
   communicationSummary: z.string().trim().min(1).max(300).optional(),
   diplomacySummary: z.string().trim().min(1).max(300).optional(),
   personality: personalitySchema.optional(),
-  observation: agentObservationSchema.partial().optional(),
+  observation: agentObservationObjectSchema.partial().optional(),
   worldActionResult: worldActionResultSchema.optional(),
   communicationResult: communicationResultSchema.optional(),
   diplomacyResult: diplomacyResultSchema.optional(),

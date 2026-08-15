@@ -298,6 +298,15 @@ function afterInfection(): SimulationSnapshot {
         eligible: false as const,
         blockedReason: 'capture-open-cell' as const,
       },
+      actionAvailability: {
+        moveTargetCellIds: [adjacent],
+        infect: { available: true as const },
+        capture: {
+          available: false as const,
+          reason: 'capture-open-cell' as const,
+        },
+        wait: { available: true as const },
+      },
       adjacentCells: [
         {
           cell: adjacent,
@@ -436,6 +445,15 @@ function afterMessage(): SimulationSnapshot {
       captureEligibility: {
         eligible: false as const,
         blockedReason: 'capture-open-cell' as const,
+      },
+      actionAvailability: {
+        moveTargetCellIds: [world.hexes[1]!.cell],
+        infect: { available: true as const },
+        capture: {
+          available: false as const,
+          reason: 'capture-open-cell' as const,
+        },
+        wait: { available: true as const },
       },
       adjacentCells: [
         {
@@ -608,6 +626,15 @@ function afterCapture(): SimulationSnapshot {
         effectiveColor: previous.color,
       },
       captureEligibility: { eligible: true as const },
+      actionAvailability: {
+        moveTargetCellIds: [world.hexes[1]!.cell],
+        infect: {
+          available: false as const,
+          reason: 'current-cell-already-infected' as const,
+        },
+        capture: { available: true as const },
+        wait: { available: true as const },
+      },
       adjacentCells: [
         {
           ...world.hexes[1]!,
@@ -1638,7 +1665,7 @@ describe('WorldLab', () => {
         vi.fn((input: RequestInfo | URL) => {
           const url = String(input);
           if (url.endsWith('/models')) return jsonResponse(compatibleCatalog);
-          if (url.endsWith('/turn')) {
+          if (url.includes('/turn?mutationId=')) {
             turnRequests += 1;
             return jsonResponse({ snapshot: failed, turn: failedTurn });
           }
@@ -1668,6 +1695,44 @@ describe('WorldLab', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('reconciles a lost turn response from the authoritative snapshot without resubmitting', async () => {
+    const initial = simulationSnapshotSchema.parse({
+      ...afterInfection(),
+      turnNumber: 0,
+      turns: [],
+      experiment: {
+        ...afterInfection().experiment,
+        totalCompletedTurns: 0,
+        retainedTurns: 0,
+        firstRetainedTurn: undefined,
+        lastRetainedTurn: undefined,
+      },
+    });
+    const completed = afterInfection();
+    let turnRequests = 0;
+    let snapshotRequests = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/models')) return jsonResponse(compatibleCatalog);
+        if (url.includes('/turn?mutationId=')) {
+          turnRequests += 1;
+          return Promise.reject(new TypeError('ECONNRESET'));
+        }
+        snapshotRequests += 1;
+        return jsonResponse(snapshotRequests === 1 ? initial : completed);
+      }),
+    );
+    render(<WorldLab />);
+    await screen.findByText('Turn 0');
+    fireEvent.click(screen.getByRole('button', { name: 'Single turn' }));
+    await screen.findByText('Turn 1');
+    expect(turnRequests).toBe(1);
+    expect(screen.getByRole('button', { name: 'Single turn' })).toBeEnabled();
+    expect(screen.queryByText('Reconciling request…')).not.toBeInTheDocument();
   });
 
   it('collapses and expands the bounded public chat dock', async () => {

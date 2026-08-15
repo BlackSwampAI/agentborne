@@ -24,6 +24,43 @@ import {
 import { createApp } from './app';
 
 describe('game API simulation boundary', () => {
+  it('coalesces repeated delivery of the same turn mutation ID', async () => {
+    let calls = 0;
+    const app = createApp({
+      provider: {
+        mode: 'scripted-test',
+        configured: true,
+        async decide(): Promise<ProviderDecision> {
+          calls += 1;
+          await Promise.resolve();
+          return {
+            decision: { worldAction: { type: 'wait' }, summary: 'Wait once.' },
+            metadata: {
+              provider: 'scripted-test',
+              model: 'mutation-test',
+              latencyMs: 0,
+              costCredits: 0,
+            },
+          };
+        },
+      },
+    });
+    const request = () =>
+      app.request('/api/simulation/turn', {
+        method: 'POST',
+        headers: { 'X-Agentborne-Mutation-Id': 'mutation_same_001' },
+      });
+    const [first, duplicate] = await Promise.all([request(), request()]);
+    expect(first.status).toBe(200);
+    expect(duplicate.status).toBe(200);
+    expect(calls).toBe(1);
+    expect(
+      simulationSnapshotSchema.parse(
+        await (await app.request('/api/simulation')).json(),
+      ).turnNumber,
+    ).toBe(1);
+  });
+
   it('reports health and serves a schema-valid snapshot', async () => {
     const app = createApp({
       provider: new ScriptedAgentProvider([
@@ -433,8 +470,8 @@ describe('game API simulation boundary', () => {
         await app.request('/api/simulation/turn/retry', { method: 'POST' })
       ).json(),
     );
-    expect(calls).toBe(2);
-    expect(retried.snapshot.pendingFailedTurn?.attempts).toHaveLength(2);
+    expect(calls).toBe(3);
+    expect(retried.snapshot.pendingFailedTurn?.attempts).toHaveLength(3);
     const skipped = singleTurnResponseSchema.parse(
       await (
         await app.request('/api/simulation/turn/skip', { method: 'POST' })
@@ -775,6 +812,7 @@ describe('game API simulation boundary', () => {
     expect(preview).toMatchObject({
       matchingTurnCount: 1,
       knownCostCredits: 0,
+      attemptsWithUnknownCost: 0,
       turnsWithUnknownCost: 0,
     });
     const generatedResponse = await app.request(

@@ -149,8 +149,12 @@ interface MutableMetrics {
   operatorSkipped: number;
   modelCalls: number;
   failedModelAttempts: number;
+  automaticRepairAttempts: number;
+  automaticTransportRetries: number;
   manualRetryAttempts: number;
   retriedTurns: number;
+  recoveredAutomatically: number;
+  recoveredManually: number;
   recoveredByRetry: number;
   requestedMoves: number;
   requestedInfections: number;
@@ -204,8 +208,11 @@ interface MutableMetrics {
   latencyCount: number;
   tokens: Record<(typeof metricTokenFields)[number], number>;
   tokenFieldsComplete: Record<(typeof metricTokenFields)[number], boolean>;
+  tokenFieldsKnown: Record<(typeof metricTokenFields)[number], boolean>;
   knownCostCredits: string;
-  unknownCost: number;
+  attemptsWithUnknownTokenUsage: number;
+  attemptsWithUnknownCost: number;
+  turnsWithUnknownCost: Set<number>;
   visited: Set<string>;
 }
 
@@ -218,8 +225,12 @@ function mutableMetrics(): MutableMetrics {
     operatorSkipped: 0,
     modelCalls: 0,
     failedModelAttempts: 0,
+    automaticRepairAttempts: 0,
+    automaticTransportRetries: 0,
     manualRetryAttempts: 0,
     retriedTurns: 0,
+    recoveredAutomatically: 0,
+    recoveredManually: 0,
     recoveredByRetry: 0,
     requestedMoves: 0,
     requestedInfections: 0,
@@ -269,8 +280,13 @@ function mutableMetrics(): MutableMetrics {
     tokenFieldsComplete: Object.fromEntries(
       metricTokenFields.map((field) => [field, true]),
     ) as MutableMetrics['tokenFieldsComplete'],
+    tokenFieldsKnown: Object.fromEntries(
+      metricTokenFields.map((field) => [field, false]),
+    ) as MutableMetrics['tokenFieldsKnown'],
     knownCostCredits: '0',
-    unknownCost: 0,
+    attemptsWithUnknownTokenUsage: 0,
+    attemptsWithUnknownCost: 0,
+    turnsWithUnknownCost: new Set(),
     visited: new Set(),
   };
 }
@@ -381,10 +397,17 @@ function addToMutable(
   const attempts = usageAttempts(turn);
   metrics.modelCalls += attempts.length;
   metrics.failedModelAttempts += attempts.filter(({ failed }) => failed).length;
+  metrics.automaticRepairAttempts += attempts.filter(
+    ({ kind }) => kind === 'automatic-repair',
+  ).length;
+  metrics.automaticTransportRetries += attempts.filter(
+    ({ kind }) => kind === 'automatic-transport-retry',
+  ).length;
   metrics.manualRetryAttempts += attempts.filter(
     ({ kind }) => kind === 'manual-retry',
   ).length;
-  const retried = attempts.some(({ kind }) => kind === 'manual-retry');
+  const retried = attempts.some(({ kind }) => kind !== 'initial');
+  const manuallyRetried = attempts.some(({ kind }) => kind === 'manual-retry');
   if (retried) metrics.retriedTurns += 1;
   if (
     retried &&
@@ -392,6 +415,14 @@ function addToMutable(
     turn.outcome !== 'operator-skipped'
   )
     metrics.recoveredByRetry += 1;
+  if (
+    retried &&
+    turn.outcome !== 'provider-error' &&
+    turn.outcome !== 'operator-skipped'
+  ) {
+    if (manuallyRetried) metrics.recoveredManually += 1;
+    else metrics.recoveredAutomatically += 1;
+  }
   for (const { provider } of attempts) {
     if (provider) {
       metrics.latencyTotal += provider.latencyMs;
@@ -400,10 +431,17 @@ function addToMutable(
     for (const field of metricTokenFields) {
       const value = provider?.[field];
       if (value === undefined) metrics.tokenFieldsComplete[field] = false;
-      else metrics.tokens[field] += value;
+      else {
+        metrics.tokens[field] += value;
+        metrics.tokenFieldsKnown[field] = true;
+      }
     }
-    if (provider?.costCredits === undefined) metrics.unknownCost += 1;
-    else
+    if (metricTokenFields.some((field) => provider?.[field] === undefined))
+      metrics.attemptsWithUnknownTokenUsage += 1;
+    if (provider?.costCredits === undefined) {
+      metrics.attemptsWithUnknownCost += 1;
+      metrics.turnsWithUnknownCost.add(turn.turnNumber);
+    } else
       metrics.knownCostCredits = addDecimalValue(
         metrics.knownCostCredits,
         provider.costCredits,
@@ -431,11 +469,10 @@ function usageAttempts(turn: AgentTurnRecord) {
 
 function finalizeMutable(metrics: MutableMetrics) {
   const tokens: Record<string, number> = {};
-  if (metrics.turns > 0) {
+  if (metrics.turns > 0)
     for (const field of metricTokenFields)
-      if (metrics.tokenFieldsComplete[field])
+      if (metrics.tokenFieldsKnown[field])
         tokens[field] = metrics.tokens[field];
-  }
   return {
     totalTurns: metrics.turns,
     accepted: metrics.accepted,
@@ -444,8 +481,12 @@ function finalizeMutable(metrics: MutableMetrics) {
     operatorSkipped: metrics.operatorSkipped,
     modelCalls: metrics.modelCalls,
     failedModelAttempts: metrics.failedModelAttempts,
+    automaticRepairAttempts: metrics.automaticRepairAttempts,
+    automaticTransportRetries: metrics.automaticTransportRetries,
     manualRetryAttempts: metrics.manualRetryAttempts,
     retriedTurns: metrics.retriedTurns,
+    recoveredAutomatically: metrics.recoveredAutomatically,
+    recoveredManually: metrics.recoveredManually,
     recoveredByRetry: metrics.recoveredByRetry,
     requestedMoves: metrics.requestedMoves,
     requestedInfections: metrics.requestedInfections,
@@ -492,8 +533,11 @@ function finalizeMutable(metrics: MutableMetrics) {
       ? { averageLatencyMs: metrics.latencyTotal / metrics.latencyCount }
       : {}),
     tokens,
+    tokenUsageComplete: metrics.attemptsWithUnknownTokenUsage === 0,
+    attemptsWithUnknownTokenUsage: metrics.attemptsWithUnknownTokenUsage,
     knownCostCredits: Number(metrics.knownCostCredits),
-    turnsWithUnknownCost: metrics.unknownCost,
+    attemptsWithUnknownCost: metrics.attemptsWithUnknownCost,
+    turnsWithUnknownCost: metrics.turnsWithUnknownCost.size,
   };
 }
 
@@ -730,6 +774,7 @@ export function createExperimentPreview(
     lastMatchingTurn: document.selection.lastMatchingTurn,
     retention: document.retention,
     knownCostCredits: metrics.aggregate.knownCostCredits,
+    attemptsWithUnknownCost: metrics.aggregate.attemptsWithUnknownCost,
     turnsWithUnknownCost: metrics.aggregate.turnsWithUnknownCost,
     serializedUtf8Bytes,
     approximateAiInputTokens: Math.ceil(serializedUtf8Bytes / 4),
@@ -1147,9 +1192,12 @@ export function calculateExperimentMetrics(
       const known = attempts
         .map(({ provider }) => provider?.[field])
         .filter((value): value is number => value !== undefined);
-      if (known.length === attempts.length && known.length > 0)
+      if (known.length > 0)
         tokens[field] = known.reduce((sum, value) => sum + value, 0);
     }
+    const attemptsWithUnknownTokenUsage = attempts.filter(({ provider }) =>
+      metricTokenFields.some((field) => provider?.[field] === undefined),
+    ).length;
     const visited = new Set<string>();
     for (const turn of records) {
       visited.add(turn.observation.currentCell.cell);
@@ -1165,8 +1213,14 @@ export function calculateExperimentMetrics(
     const manualRetryAttempts = attempts.filter(
       ({ kind }) => kind === 'manual-retry',
     ).length;
+    const automaticRepairAttempts = attempts.filter(
+      ({ kind }) => kind === 'automatic-repair',
+    ).length;
+    const automaticTransportRetries = attempts.filter(
+      ({ kind }) => kind === 'automatic-transport-retry',
+    ).length;
     const retriedTurns = records.filter((turn) =>
-      usageAttempts(turn).some(({ kind }) => kind === 'manual-retry'),
+      usageAttempts(turn).some(({ kind }) => kind !== 'initial'),
     );
     return {
       totalTurns: records.length,
@@ -1180,8 +1234,22 @@ export function calculateExperimentMetrics(
       ).length,
       modelCalls: attempts.length,
       failedModelAttempts: attempts.filter(({ failed }) => failed).length,
+      automaticRepairAttempts,
+      automaticTransportRetries,
       manualRetryAttempts,
       retriedTurns: retriedTurns.length,
+      recoveredAutomatically: retriedTurns.filter(
+        (turn) =>
+          !usageAttempts(turn).some(({ kind }) => kind === 'manual-retry') &&
+          turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'operator-skipped',
+      ).length,
+      recoveredManually: retriedTurns.filter(
+        (turn) =>
+          usageAttempts(turn).some(({ kind }) => kind === 'manual-retry') &&
+          turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'operator-skipped',
+      ).length,
       recoveredByRetry: retriedTurns.filter(
         ({ outcome }) =>
           outcome !== 'provider-error' && outcome !== 'operator-skipped',
@@ -1264,9 +1332,16 @@ export function calculateExperimentMetrics(
           }
         : {}),
       tokens,
+      tokenUsageComplete: attemptsWithUnknownTokenUsage === 0,
+      attemptsWithUnknownTokenUsage,
       knownCostCredits: sumDecimalNumbers(costs),
-      turnsWithUnknownCost: attempts.filter(
+      attemptsWithUnknownCost: attempts.filter(
         ({ provider }) => provider?.costCredits === undefined,
+      ).length,
+      turnsWithUnknownCost: records.filter((turn) =>
+        usageAttempts(turn).some(
+          ({ provider }) => provider?.costCredits === undefined,
+        ),
       ).length,
     };
   };

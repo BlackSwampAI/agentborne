@@ -45,6 +45,8 @@ Fourth focused slice: expand the Toledo development world to 127 cells and eight
 
 Fifth focused slice: replace environment-selected models with a server-owned capability-filtered OpenRouter catalog, experiment-level global and per-agent assignments, schema-v6 assignment preservation, usage visibility, and a map-first operator layout with bounded collapsible activity. Model families remain irrelevant to compatibility; persistence, authentication, spending controls, and live catalog persistence remain deferred.
 
+Sixth focused slice: harden each logical model turn with engine-derived legal-action affordances, at most one bounded automatic contract repair or transient transport retry inside the existing shared 75-second deadline, complete schema-v7 attempt accounting, exact one-call manual Retry, mutation idempotency, and browser reconciliation after ambiguous proxy failures. The universal text/flat-JSON contract remains the portability layer; engine-rejected game decisions are never automatically retried.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.
