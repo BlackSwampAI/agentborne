@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   PERSONALITY_MAX_LENGTH,
+  cancelSimulationResponseSchema,
   experimentExportPreviewSchema,
   experimentExportRequestSchema,
   experimentExportResponseSchema,
@@ -16,6 +17,7 @@ import {
   updateAgentPersonalityRequestSchema,
   updateAgentPersonalityResponseSchema,
   updateExperimentModelsResponseSchema,
+  verifyModelResponseSchema,
   type AgentId,
   type AgentTurnRecord,
   type CustomExportOptions,
@@ -25,6 +27,7 @@ import {
   type H3Cell,
   type CompatibleModel,
   type ModelCatalogResponse,
+  type ModelVerification,
   type ExperimentModelConfiguration,
   type SimulationSnapshot,
 } from '@agentborne/shared';
@@ -58,6 +61,12 @@ export function WorldLab() {
   const [exportAgentIds, setExportAgentIds] = useState<AgentId[]>([]);
   const [catalog, setCatalog] = useState<ModelCatalogResponse | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [modelVerifications, setModelVerifications] = useState<
+    Record<string, ModelVerification>
+  >({});
+  const [verifyingModelId, setVerifyingModelId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [chatCollapsed, setChatCollapsed] = useState(false);
   const inFlightRef = useRef(false);
   const runToTurn200Ref = useRef(false);
   const completedTurnsRef = useRef(0);
@@ -70,6 +79,8 @@ export function WorldLab() {
     completedTurnsRef.current = next.experiment.totalCompletedTurns;
     setSnapshot(next);
     if (
+      next.status === 'provider-error' ||
+      next.status === 'configuration-error' ||
       next.world.hexes.every(({ state }) => state === 'infected') ||
       (runToTurn200Ref.current && next.experiment.totalCompletedTurns >= 200)
     ) {
@@ -179,6 +190,33 @@ export function WorldLab() {
     }
   };
 
+  const verifyModel = async (modelId: string, force = false) => {
+    setVerifyingModelId(modelId);
+    setUiError(null);
+    try {
+      const response = await fetch(`${apiBase}/models/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelId, force }),
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        const error = body as { error?: { message?: string } };
+        setUiError(error.error?.message ?? 'The compatibility test failed.');
+        return;
+      }
+      const { verification } = verifyModelResponseSchema.parse(body);
+      setModelVerifications((current) => ({
+        ...current,
+        [verification.modelId]: verification,
+      }));
+    } catch {
+      setUiError('The compatibility test could not be completed.');
+    } finally {
+      setVerifyingModelId(null);
+    }
+  };
+
   const importExperiment = async (file: File): Promise<void> => {
     if (file.size > 5_000_000) {
       setUiError('Experiment import files must be 5 MB or smaller.');
@@ -222,19 +260,60 @@ export function WorldLab() {
       const response = await fetch(`${apiBase}/turn`, { method: 'POST' });
       if (response.status === 409) {
         setUiError('Another turn is already in progress.');
+        setRunning(false);
+        setRunToTurn200(false);
+        runToTurn200Ref.current = false;
         return;
       }
       if (!response.ok) throw new Error('turn request failed');
       const payload = singleTurnResponseSchema.parse(await response.json());
       applySnapshot(payload.snapshot);
+      if (payload.turn.outcome === 'provider-error') {
+        setRunning(false);
+        setRunToTurn200(false);
+        runToTurn200Ref.current = false;
+        const failedAgent = payload.snapshot.world.agents.find(
+          ({ id }) => id === payload.turn.agentId,
+        );
+        setUiError(
+          `Turn stopped (${payload.turn.failure.code}): ${payload.turn.failure.message} Agent ${failedAgent?.name ?? payload.turn.agentId} · model ${payload.turn.failure.model ?? payload.turn.provider?.model ?? 'unavailable'}.`,
+        );
+      }
     } catch {
       setUiError('The turn failed safely. Check the Game API and try again.');
       setRunning(false);
+      setRunToTurn200(false);
+      runToTurn200Ref.current = false;
     } finally {
       inFlightRef.current = false;
       setInFlight(false);
     }
   }, [applySnapshot]);
+
+  const cancelCurrentRequest = async () => {
+    setCancelling(true);
+    setRunning(false);
+    setRunToTurn200(false);
+    runToTurn200Ref.current = false;
+    try {
+      const response = await fetch(`${apiBase}/turn/cancel`, {
+        method: 'POST',
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        const error = body as { error?: { message?: string } };
+        setUiError(
+          error.error?.message ?? 'The request could not be cancelled.',
+        );
+        return;
+      }
+      applySnapshot(cancelSimulationResponseSchema.parse(body).snapshot);
+    } catch {
+      setUiError('The cancellation request could not reach the Game API.');
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   useEffect(() => {
     if (!running || inFlight || resetting) return;
@@ -242,6 +321,19 @@ export function WorldLab() {
     const timer = window.setTimeout(() => void executeTurn(), speed);
     return () => window.clearTimeout(timer);
   }, [executeTurn, inFlight, resetting, running, snapshot?.turnNumber, speed]);
+
+  useEffect(() => {
+    if (!snapshot?.activeAgentId || inFlight) return;
+    const timer = window.setInterval(() => {
+      void fetch(apiBase)
+        .then(async (response) => {
+          if (!response.ok) return;
+          applySnapshot(simulationSnapshotSchema.parse(await response.json()));
+        })
+        .catch(() => undefined);
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [applySnapshot, inFlight, snapshot?.activeAgentId]);
 
   const reset = async () => {
     if (inFlightRef.current) return;
@@ -429,7 +521,9 @@ export function WorldLab() {
   );
 
   return (
-    <main>
+    <main
+      className={`world-lab-shell${chatCollapsed ? ' chat-collapsed' : ''}`}
+    >
       <header className="topbar">
         <div>
           <p className="eyebrow">Developer simulation interface</p>
@@ -522,15 +616,36 @@ export function WorldLab() {
           >
             Run to turn 200
           </button>
+          {(inFlight || snapshot.activeAgentId !== null) && (
+            <button
+              className="secondary-action"
+              disabled={cancelling || snapshot.cancellationRequested}
+              type="button"
+              onClick={() => void cancelCurrentRequest()}
+            >
+              {snapshot.cancellationRequested || cancelling
+                ? 'Cancelling request…'
+                : 'Cancel current request'}
+            </button>
+          )}
         </div>
         {snapshot.providerMode === 'openrouter' ? (
           <ModelConsole
             catalog={catalog}
             loading={catalogLoading || catalog === null}
             snapshot={snapshot}
-            disabled={running || inFlight || resetting}
+            disabled={
+              running ||
+              inFlight ||
+              resetting ||
+              snapshot.activeAgentId !== null ||
+              verifyingModelId !== null
+            }
+            verifications={modelVerifications}
+            verifyingModelId={verifyingModelId}
             onRefresh={refreshCatalog}
             onUpdate={updateModels}
+            onVerify={verifyModel}
             onImport={importExperiment}
           />
         ) : (
@@ -542,6 +657,12 @@ export function WorldLab() {
             {Math.min(snapshot.experiment.totalCompletedTurns, 200)}/200
             {runToTurn200 ? ' · bounded run active' : ''}
           </span>
+          {!running && (inFlight || snapshot.activeAgentId !== null) && (
+            <span role="status">
+              Playback is paused; the current provider request is still
+              finishing.
+            </span>
+          )}
           <label className="speed-control">
             Playback speed
             <select
@@ -565,21 +686,23 @@ export function WorldLab() {
           <ExperimentUsageMeter snapshot={snapshot} />
         </div>
       </section>
-      {(!modelsReady || uiError || fullyInfected || personalityNotice) && (
-        <div className="command-alert" role="alert">
-          {uiError ??
-            (fullyInfected
-              ? 'Development world fully infected. Automatic playback is paused; Single turn remains a manual cost-incurring diagnostic action.'
-              : (personalityNotice ??
-                'Select an available compatible model for every agent before starting.'))}
-        </div>
-      )}
-      {!snapshot.providerConfigured && (
-        <div className="command-alert" role="alert">
-          Model calls unavailable. Set OPENROUTER_API_KEY on the Game API server
-          and restart pnpm dev.
-        </div>
-      )}
+      <div className="command-alerts">
+        {(!modelsReady || uiError || fullyInfected || personalityNotice) && (
+          <div className="command-alert" role="alert">
+            {uiError ??
+              (fullyInfected
+                ? 'Development world fully infected. Automatic playback is paused; Single turn remains a manual cost-incurring diagnostic action.'
+                : (personalityNotice ??
+                  'Select an available compatible model for every agent before starting.'))}
+          </div>
+        )}
+        {!snapshot.providerConfigured && (
+          <div className="command-alert" role="alert">
+            Model calls unavailable. Set OPENROUTER_API_KEY on the Game API
+            server and restart pnpm dev.
+          </div>
+        )}
+      </div>
 
       <div className="workspace">
         <AgentRoster
@@ -765,6 +888,8 @@ export function WorldLab() {
           agents={snapshot.world.agents}
           events={publicMessages}
           turns={snapshot.turns}
+          collapsed={chatCollapsed}
+          onCollapsedChange={setChatCollapsed}
         />
         <EventLog turns={snapshot.turns} agents={snapshot.world.agents} />
       </div>
@@ -777,18 +902,24 @@ function ModelConsole({
   loading,
   snapshot,
   disabled,
+  verifications,
+  verifyingModelId,
   onRefresh,
   onUpdate,
+  onVerify,
   onImport,
 }: {
   catalog: ModelCatalogResponse | null;
   loading: boolean;
   snapshot: SimulationSnapshot;
   disabled: boolean;
+  verifications: Record<string, ModelVerification>;
+  verifyingModelId: string | null;
   onRefresh: () => Promise<void>;
   onUpdate: (
     configuration: Omit<ExperimentModelConfiguration, 'locked'>,
   ) => Promise<boolean>;
+  onVerify: (modelId: string, force?: boolean) => Promise<void>;
   onImport: (file: File) => Promise<void>;
 }) {
   const [search, setSearch] = useState('');
@@ -822,7 +953,10 @@ function ModelConsole({
   const selected = catalog?.models.find(
     ({ id }) => id === configuration.globalModelId,
   );
-  const locked = configuration.locked || disabled;
+  const locked = disabled;
+  const verification = configuration.globalModelId
+    ? verifications[configuration.globalModelId]
+    : undefined;
 
   const save = (next: Omit<ExperimentModelConfiguration, 'locked'>) =>
     void onUpdate(next);
@@ -837,7 +971,7 @@ function ModelConsole({
           <div>
             <strong>Compatible OpenRouter models</strong>
             <p>
-              {catalog?.models.length ?? 0} available ·{' '}
+              {catalog?.models.length ?? 0} catalog compatible ·{' '}
               {catalog?.filteredOutCount ?? 0} filtered out
             </p>
           </div>
@@ -923,6 +1057,50 @@ function ModelConsole({
         >
           Apply global model to all agents
         </button>
+        <div className="model-verification">
+          <span>
+            Catalog compatible:{' '}
+            {selected ? 'yes — required metadata advertised' : 'not selected'}
+          </span>
+          <span>
+            Runtime verified:{' '}
+            {verification?.status === 'verified'
+              ? 'yes'
+              : verification?.status === 'failed'
+                ? 'failed'
+                : 'not tested'}
+          </span>
+          {verification?.failure && (
+            <p className="catalog-state error" role="status">
+              {verification.failure.message}
+            </p>
+          )}
+          <button
+            disabled={
+              locked ||
+              !configuration.globalModelId ||
+              verifyingModelId === configuration.globalModelId
+            }
+            type="button"
+            onClick={() =>
+              configuration.globalModelId &&
+              void onVerify(
+                configuration.globalModelId,
+                verification?.status === 'failed',
+              )
+            }
+          >
+            {verifyingModelId === configuration.globalModelId
+              ? 'Testing model…'
+              : verification?.status === 'failed'
+                ? 'Retry model test'
+                : 'Test selected model'}
+          </button>
+          <small>
+            Sends one genuine, non-mutating OpenRouter request using the
+            production decision contract and may incur a small charge.
+          </small>
+        </div>
         {selected && <ModelFacts model={selected} />}
         <div className="agent-model-overrides">
           <strong>Agent overrides</strong>
@@ -970,16 +1148,14 @@ function ModelConsole({
             );
           })}
         </div>
-        {configuration.locked && (
-          <p className="catalog-state">
-            Assignments locked after the first completed turn. Reset starts a
-            new experiment and unlocks selection.
-          </p>
-        )}
+        <p className="catalog-state">
+          Model changes are available between provider requests and are recorded
+          at the next turn boundary.
+        </p>
         <label className="model-import-label">
           Import saved experiment model assignments
           <input
-            disabled={configuration.locked || disabled}
+            disabled={disabled}
             type="file"
             accept="application/json,.json"
             onChange={(event) => {
@@ -1023,7 +1199,7 @@ function ModelFacts({ model }: { model: CompatibleModel }) {
       </div>
       <div>
         <dt>Capability</dt>
-        <dd>Required contract supported</dd>
+        <dd>Catalog compatible: tool decision contract advertised</dd>
       </div>
     </dl>
   );
@@ -1084,6 +1260,8 @@ function PublicWorldChat({
   agents,
   events,
   turns,
+  collapsed,
+  onCollapsedChange,
 }: {
   agents: SimulationSnapshot['world']['agents'];
   events: Array<
@@ -1093,8 +1271,9 @@ function PublicWorldChat({
     >
   >;
   turns: AgentTurnRecord[];
+  collapsed: boolean;
+  onCollapsedChange: (collapsed: boolean) => void;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const [newMessages, setNewMessages] = useState(0);
   const feedRef = useRef<HTMLOListElement | null>(null);
@@ -1124,7 +1303,10 @@ function PublicWorldChat({
   };
 
   return (
-    <section className="panel world-chat-panel" aria-label="Public world chat">
+    <section
+      className={`panel world-chat-panel${collapsed ? ' chat-collapsed' : ''}`}
+      aria-label="Public world chat"
+    >
       <div className="dock-heading">
         <div>
           <p className="panel-kicker">Visible to every agent</p>
@@ -1133,7 +1315,7 @@ function PublicWorldChat({
         <button
           type="button"
           aria-expanded={!collapsed}
-          onClick={() => setCollapsed((value) => !value)}
+          onClick={() => onCollapsedChange(!collapsed)}
         >
           {collapsed ? 'Expand' : 'Collapse'}
         </button>
@@ -1718,6 +1900,10 @@ function AgentInspector({
               </div>
               <p className="provider-meta">
                 {latestTurn.provider.provider} · {latestTurn.provider.model} ·{' '}
+                {latestTurn.provider.resolvedModel &&
+                latestTurn.provider.resolvedModel !== latestTurn.provider.model
+                  ? `resolved ${latestTurn.provider.resolvedModel} · `
+                  : ''}
                 {latestTurn.provider.latencyMs}ms ·{' '}
                 {latestTurn.provider.promptTokens ?? '—'} prompt /{' '}
                 {latestTurn.provider.completionTokens ?? '—'} completion
@@ -1733,11 +1919,41 @@ function AgentInspector({
             <>
               <p className="callout error">
                 {latestTurn.failure.code}: {latestTurn.failure.message}
+                {latestTurn.failure.providerMessage
+                  ? ` Provider: ${latestTurn.failure.providerMessage}`
+                  : ''}
+              </p>
+              <p className="provider-meta">
+                Model{' '}
+                {latestTurn.failure.model ??
+                  latestTurn.provider?.model ??
+                  'unavailable'}
+                {latestTurn.failure.httpStatus
+                  ? ` · HTTP ${latestTurn.failure.httpStatus}`
+                  : ''}
+                {latestTurn.failure.providerCode
+                  ? ` · ${latestTurn.failure.providerCode}`
+                  : ''}
+                {latestTurn.failure.requestId
+                  ? ` · request ${latestTurn.failure.requestId}`
+                  : ''}
+                {latestTurn.failure.finishReason
+                  ? ` · finish ${latestTurn.failure.finishReason}`
+                  : ''}
+                {latestTurn.failure.nativeFinishReason
+                  ? ` · native ${latestTurn.failure.nativeFinishReason}`
+                  : ''}
               </p>
               {latestTurn.provider && (
                 <p className="provider-meta">
                   {latestTurn.provider.provider} · {latestTurn.provider.model} ·{' '}
                   {latestTurn.provider.latencyMs}ms
+                  {latestTurn.provider.requestId
+                    ? ` · request ${latestTurn.provider.requestId}`
+                    : ''}
+                  {latestTurn.provider.finishReason
+                    ? ` · finish ${latestTurn.provider.finishReason}`
+                    : ''}
                 </p>
               )}
             </>

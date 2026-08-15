@@ -20,6 +20,12 @@ const compatible = {
   pricing: { prompt: '0.0000015', completion: '0.000004', request: '0' },
   supported_parameters: [...OPENROUTER_REQUIRED_PARAMETERS, 'temperature'],
   expiration_date: null,
+  reasoning: {
+    supported_efforts: ['high', 'low', 'minimal'],
+    default_effort: 'low',
+    default_enabled: true,
+    mandatory: true,
+  },
 };
 
 describe('OpenRouter model catalog', () => {
@@ -31,6 +37,10 @@ describe('OpenRouter model catalog', () => {
       inputPricePerToken: '0.0000015',
       outputPricePerToken: '0.000004',
       isFree: false,
+      reasoning: {
+        supportedEfforts: ['high', 'low', 'minimal'],
+        mandatory: true,
+      },
     });
     expect(
       sanitizeCompatibleModel({
@@ -41,14 +51,9 @@ describe('OpenRouter model catalog', () => {
   });
 
   it.each([
-    [
-      'structured_outputs',
-      { supported_parameters: ['max_tokens', 'response_format'] },
-    ],
-    [
-      'response_format',
-      { supported_parameters: ['max_tokens', 'structured_outputs'] },
-    ],
+    ['max_tokens', { supported_parameters: ['tools', 'tool_choice'] }],
+    ['tools', { supported_parameters: ['max_tokens', 'tool_choice'] }],
+    ['tool_choice', { supported_parameters: ['max_tokens', 'tools'] }],
     ['context', { context_length: OPENROUTER_MODEL_CONTEXT_MINIMUM - 1 }],
     [
       'text output',

@@ -19,7 +19,7 @@ import {
   type DiplomacyResult,
   type ExportedCommunication,
   type ExportedControlChange,
-  type PersonalityConfigurationEvent,
+  type ExperimentConfigurationEvent,
   type ProviderMetadata,
   type WorldSnapshot,
 } from '@agentborne/shared';
@@ -33,7 +33,7 @@ export interface ExperimentSource {
   turns: readonly AgentTurnRecord[];
   initialAgents: readonly Agent[];
   currentAgents: readonly Agent[];
-  configurationEvents: readonly PersonalityConfigurationEvent[];
+  configurationEvents: readonly ExperimentConfigurationEvent[];
   initialWorld: WorldSnapshot;
   currentWorld: WorldSnapshot;
   modelConfiguration: ExperimentModelConfiguration;
@@ -516,13 +516,14 @@ export function createExperimentExport(
       lastMatchingTurn: filtered.at(-1)?.turnNumber,
     },
     agents: selectedAgents,
-    ...(include.personalityHistory
-      ? {
-          configurationEvents: source.configurationEvents
-            .filter(({ agentId }) => selectedSet.has(agentId))
-            .map((event) => structuredClone(event)),
-        }
-      : {}),
+    configurationEvents: source.configurationEvents
+      .filter((event) =>
+        'type' in event
+          ? event.scope === 'global' ||
+            (event.agentId !== undefined && selectedSet.has(event.agentId))
+          : include.personalityHistory && selectedSet.has(event.agentId),
+      )
+      .map((event) => structuredClone(event)),
     ...(include.metrics
       ? {
           metrics: calculateExperimentMetrics(
@@ -906,6 +907,24 @@ function compactProvider(provider: ProviderMetadata): ProviderMetadata {
   return {
     provider: provider.provider,
     model: provider.model,
+    ...(provider.selectedModel === undefined
+      ? {}
+      : { selectedModel: provider.selectedModel }),
+    ...(provider.resolvedModel === undefined
+      ? {}
+      : { resolvedModel: provider.resolvedModel }),
+    ...(provider.requestId === undefined
+      ? {}
+      : { requestId: provider.requestId }),
+    ...(provider.httpStatus === undefined
+      ? {}
+      : { httpStatus: provider.httpStatus }),
+    ...(provider.finishReason === undefined
+      ? {}
+      : { finishReason: provider.finishReason }),
+    ...(provider.nativeFinishReason === undefined
+      ? {}
+      : { nativeFinishReason: provider.nativeFinishReason }),
     latencyMs: provider.latencyMs,
     ...(provider.promptTokens === undefined
       ? {}

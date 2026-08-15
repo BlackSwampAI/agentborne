@@ -2,12 +2,15 @@ import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import {
   BrowserTestAgentProvider,
+  AgentProviderError,
   OpenRouterModelCatalog,
   OpenRouterAgentProvider,
   type AgentProvider,
 } from '@agentborne/agent-runtime';
 import {
   apiErrorSchema,
+  AGENT_DECISION_CONTRACT_VERSION,
+  cancelSimulationResponseSchema,
   experimentExportRequestSchema,
   experimentExportPreviewSchema,
   experimentExportResponseSchema,
@@ -15,6 +18,7 @@ import {
   experimentImportResponseSchema,
   healthResponseSchema,
   modelCatalogResponseSchema,
+  modelVerificationSchema,
   PERSONALITY_MAX_LENGTH,
   resetSimulationResponseSchema,
   restoreDefaultPersonalitiesResponseSchema,
@@ -24,7 +28,10 @@ import {
   updateAgentPersonalityResponseSchema,
   updateExperimentModelsRequestSchema,
   updateExperimentModelsResponseSchema,
+  verifyModelRequestSchema,
+  verifyModelResponseSchema,
   worldSnapshotSchema,
+  type ModelVerification,
 } from '@agentborne/shared';
 import { createDevelopmentWorld } from '@agentborne/world-engine';
 import {
@@ -61,6 +68,7 @@ export function createApp(options: AppOptions = {}) {
   const catalog =
     options.catalog ??
     new OpenRouterModelCatalog({ apiKey: process.env.OPENROUTER_API_KEY });
+  const modelVerifications = new Map<string, ModelVerification>();
 
   app.use(
     '/api/*',
@@ -105,6 +113,83 @@ export function createApp(options: AppOptions = {}) {
     );
     service.setCompatibleModels(response.models);
     return context.json(response);
+  });
+
+  app.post('/api/simulation/models/verify', async (context) => {
+    const request = verifyModelRequestSchema.safeParse(
+      await context.req.json().catch(() => undefined),
+    );
+    if (!request.success)
+      return context.json(
+        apiErrorSchema.parse({
+          error: {
+            code: 'invalid_request',
+            message: 'A valid model ID is required.',
+          },
+        }),
+        400,
+      );
+    const cacheKey = `${request.data.modelId}:${AGENT_DECISION_CONTRACT_VERSION}`;
+    const cached = modelVerifications.get(cacheKey);
+    if (cached && !request.data.force)
+      return context.json(
+        verifyModelResponseSchema.parse({ verification: cached }),
+      );
+    const currentCatalog = modelCatalogResponseSchema.parse(
+      await catalog.getCatalog(false),
+    );
+    service.setCompatibleModels(currentCatalog.models);
+    try {
+      const provider = await service.verifyModel(request.data.modelId);
+      const verification = modelVerificationSchema.parse({
+        modelId: request.data.modelId,
+        contractVersion: AGENT_DECISION_CONTRACT_VERSION,
+        status: 'verified',
+        testedAt: new Date().toISOString(),
+        provider,
+      });
+      modelVerifications.set(cacheKey, verification);
+      return context.json(verifyModelResponseSchema.parse({ verification }));
+    } catch (error) {
+      if (error instanceof AgentProviderError) {
+        const verification = modelVerificationSchema.parse({
+          modelId: request.data.modelId,
+          contractVersion: AGENT_DECISION_CONTRACT_VERSION,
+          status: 'failed',
+          testedAt: new Date().toISOString(),
+          failure: {
+            code: error.failure.code,
+            message: error.failure.providerMessage
+              ? `${error.failure.message} ${error.failure.providerMessage}`.slice(
+                  0,
+                  240,
+                )
+              : error.failure.message,
+          },
+          provider: error.metadata,
+        });
+        modelVerifications.set(cacheKey, verification);
+        return context.json(verifyModelResponseSchema.parse({ verification }));
+      }
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: {
+              code: 'model_verification_conflict',
+              message: error.message,
+            },
+          }),
+          409,
+        );
+      if (error instanceof SimulationValidationError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: error.code, message: error.message },
+          }),
+          400,
+        );
+      throw error;
+    }
   });
 
   app.post('/api/simulation/experiment/models', async (context) => {
@@ -178,6 +263,25 @@ export function createApp(options: AppOptions = {}) {
         return context.json(
           apiErrorSchema.parse({
             error: { code: error.code, message: error.message },
+          }),
+          409,
+        );
+      throw error;
+    }
+  });
+
+  app.post('/api/simulation/turn/cancel', (context) => {
+    try {
+      return context.json(
+        cancelSimulationResponseSchema.parse({
+          snapshot: service.cancelCurrentRequest(),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'cancel_conflict', message: error.message },
           }),
           409,
         );

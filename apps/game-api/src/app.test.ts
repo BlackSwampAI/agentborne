@@ -18,6 +18,7 @@ import {
   singleTurnResponseSchema,
   updateAgentPersonalityResponseSchema,
   updateExperimentModelsResponseSchema,
+  verifyModelResponseSchema,
 } from '@agentborne/shared';
 import { createApp } from './app';
 
@@ -55,11 +56,7 @@ describe('game API simulation boundary', () => {
           contextLength: 32_768,
           inputPricePerToken: '0.000001',
           outputPricePerToken: '0.000002',
-          supportedParameters: [
-            'max_tokens',
-            'response_format',
-            'structured_outputs',
-          ],
+          supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
           isFree: false,
         },
       ],
@@ -69,11 +66,7 @@ describe('game API simulation boundary', () => {
         input: 'text',
         output: 'text',
         endpoint: 'chat-completions',
-        requiredParameters: [
-          'max_tokens',
-          'response_format',
-          'structured_outputs',
-        ],
+        requiredParameters: ['max_tokens', 'tools', 'tool_choice'],
         minimumContextLength: 16_384,
         streaming: false,
       },
@@ -111,6 +104,73 @@ describe('game API simulation boundary', () => {
     expect(JSON.stringify({ catalog, assigned, refreshed })).not.toContain(
       secret,
     );
+  });
+
+  it('caches an explicit model probe without advancing the world', async () => {
+    let calls = 0;
+    const provider: AgentProvider = {
+      mode: 'openrouter',
+      configured: true,
+      async decide(_observation, model) {
+        calls += 1;
+        return {
+          decision: { worldAction: { type: 'wait' }, summary: 'Probe.' },
+          metadata: { provider: 'openrouter', model, latencyMs: 1 },
+        };
+      },
+    };
+    const catalogResponse = modelCatalogResponseSchema.parse({
+      models: [
+        {
+          id: 'example/probe-model',
+          name: 'Probe model',
+          author: 'example',
+          contextLength: 16_384,
+          inputPricePerToken: '0',
+          outputPricePerToken: '0',
+          supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
+          isFree: true,
+        },
+      ],
+      filteredOutCount: 0,
+      stale: false,
+      requirements: {
+        input: 'text',
+        output: 'text',
+        endpoint: 'chat-completions',
+        requiredParameters: ['max_tokens', 'tools', 'tool_choice'],
+        minimumContextLength: 16_384,
+        streaming: false,
+      },
+    });
+    const app = createApp({
+      provider,
+      catalog: {
+        async getCatalog() {
+          return catalogResponse;
+        },
+      },
+    });
+    const before = simulationSnapshotSchema.parse(
+      await (await app.request('/api/simulation')).json(),
+    );
+    for (let index = 0; index < 2; index += 1) {
+      const response = await app.request('/api/simulation/models/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelId: 'example/probe-model' }),
+      });
+      expect(
+        verifyModelResponseSchema.parse(await response.json()).verification
+          .status,
+      ).toBe('verified');
+    }
+    const after = simulationSnapshotSchema.parse(
+      await (await app.request('/api/simulation')).json(),
+    );
+    expect(calls).toBe(1);
+    expect(after.world).toEqual(before.world);
+    expect(after.turnNumber).toBe(0);
   });
 
   it('returns accepted and rejected single-turn records with valid response shapes', async () => {

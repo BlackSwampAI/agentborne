@@ -10,11 +10,14 @@ export const RECENT_ALLIANCE_EVENT_LIMIT = 8;
 export const PERSONALITY_MAX_LENGTH = 600;
 export const PROVIDER_ERROR_MAX_LENGTH = 240;
 export const OPENROUTER_MODEL_CONTEXT_MINIMUM = 16_384;
-export const OPENROUTER_MAX_OUTPUT_TOKENS = 1_024;
+export const OPENROUTER_MAX_OUTPUT_TOKENS = 4_096;
+export const OPENROUTER_PROVIDER_TIMEOUT_MS = 75_000;
+export const AGENT_DECISION_TOOL_NAME = 'submit_agent_decision';
+export const AGENT_DECISION_CONTRACT_VERSION = 'tool-v1';
 export const OPENROUTER_REQUIRED_PARAMETERS = [
   'max_tokens',
-  'response_format',
-  'structured_outputs',
+  'tools',
+  'tool_choice',
 ] as const;
 export const DEVELOPMENT_WORLD_CONFIG = {
   latitude: 41.6528,
@@ -780,6 +783,25 @@ const priceStringSchema = z
   .regex(/^\d+(?:\.\d+)?$/)
   .max(80);
 
+export const reasoningEffortSchema = z.enum([
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]);
+export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
+
+export const compatibleModelReasoningSchema = z.object({
+  supportedEfforts: z.array(reasoningEffortSchema).nullable().optional(),
+  defaultEffort: reasoningEffortSchema.optional(),
+  defaultEnabled: z.boolean().optional(),
+  supportsMaxTokens: z.boolean().optional(),
+  mandatory: z.boolean(),
+});
+
 export const compatibleModelSchema = z.object({
   id: modelIdSchema,
   name: z.string().trim().min(1).max(160),
@@ -792,6 +814,7 @@ export const compatibleModelSchema = z.object({
   createdAt: z.iso.datetime().optional(),
   expirationDate: z.iso.date().nullable().optional(),
   isFree: z.boolean(),
+  reasoning: compatibleModelReasoningSchema.optional(),
 });
 export type CompatibleModel = z.infer<typeof compatibleModelSchema>;
 
@@ -805,7 +828,8 @@ export const experimentModelConfigurationSchema = z
     overrides: z
       .array(modelOverrideSchema)
       .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
-    locked: z.boolean(),
+    /** Retained for version-6 import compatibility; runtime selection is never turn-locked. */
+    locked: z.boolean().default(false),
   })
   .strict()
   .refine(
@@ -869,10 +893,42 @@ export const updateExperimentModelsResponseSchema = z.object({
   snapshot: z.lazy(() => simulationSnapshotSchema),
 });
 
+export const modelVerificationStatusSchema = z.enum([
+  'untested',
+  'verified',
+  'failed',
+]);
+export const modelVerificationSchema = z.object({
+  modelId: modelIdSchema,
+  contractVersion: z.literal(AGENT_DECISION_CONTRACT_VERSION),
+  status: modelVerificationStatusSchema,
+  testedAt: z.iso.datetime().optional(),
+  failure: z
+    .object({
+      code: z.string().trim().min(1).max(80),
+      message: z.string().trim().min(1).max(PROVIDER_ERROR_MAX_LENGTH),
+    })
+    .optional(),
+  provider: z.lazy(() => providerMetadataSchema).optional(),
+});
+export type ModelVerification = z.infer<typeof modelVerificationSchema>;
+
+export const verifyModelRequestSchema = z
+  .object({ modelId: modelIdSchema, force: z.boolean().optional() })
+  .strict();
+export const verifyModelResponseSchema = z.object({
+  verification: modelVerificationSchema,
+});
+
 export const providerMetadataSchema = z.object({
   provider: providerModeSchema,
   model: modelIdSchema,
+  selectedModel: modelIdSchema.optional(),
+  resolvedModel: modelIdSchema.optional(),
   requestId: z.string().trim().min(1).max(160).optional(),
+  httpStatus: z.number().int().min(100).max(599).optional(),
+  finishReason: z.string().trim().min(1).max(80).optional(),
+  nativeFinishReason: z.string().trim().min(1).max(120).optional(),
   latencyMs: z.number().int().nonnegative().max(300_000),
   promptTokens: z.number().int().nonnegative().optional(),
   completionTokens: z.number().int().nonnegative().optional(),
@@ -891,11 +947,31 @@ export const providerFailureSchema = z.object({
     'network',
     'model-unavailable',
     'provider-http',
+    'cancelled',
     'malformed-response',
     'unsupported-response',
+    'output-length',
+    'missing-tool-call',
+    'multiple-tool-calls',
+    'wrong-tool',
+    'invalid-tool-arguments',
+    'invalid-decision',
   ]),
   message: z.string().trim().min(1).max(PROVIDER_ERROR_MAX_LENGTH),
   retryable: z.boolean(),
+  latencyMs: z.number().int().nonnegative().max(300_000).optional(),
+  httpStatus: z.number().int().min(100).max(599).optional(),
+  providerCode: z.string().trim().min(1).max(80).optional(),
+  providerMessage: z
+    .string()
+    .trim()
+    .min(1)
+    .max(PROVIDER_ERROR_MAX_LENGTH)
+    .optional(),
+  requestId: z.string().trim().min(1).max(160).optional(),
+  model: modelIdSchema.optional(),
+  finishReason: z.string().trim().min(1).max(80).optional(),
+  nativeFinishReason: z.string().trim().min(1).max(120).optional(),
 });
 export type ProviderFailure = z.infer<typeof providerFailureSchema>;
 
@@ -960,6 +1036,7 @@ export const simulationSnapshotSchema = z
     turnNumber: z.number().int().nonnegative(),
     nextAgentId: agentIdSchema,
     activeAgentId: agentIdSchema.nullable(),
+    cancellationRequested: z.boolean().default(false),
     status: simulationStatusSchema,
     providerMode: providerModeSchema,
     providerConfigured: z.boolean(),
@@ -1092,6 +1169,9 @@ export const resetSimulationResponseSchema = z.object({
 export type ResetSimulationResponse = z.infer<
   typeof resetSimulationResponseSchema
 >;
+export const cancelSimulationResponseSchema = z.object({
+  snapshot: simulationSnapshotSchema,
+});
 
 export const updateAgentPersonalityRequestSchema = z
   .object({ personality: personalitySchema })
@@ -1135,6 +1215,8 @@ export const apiErrorCodeSchema = z.enum([
   'model_configuration_conflict',
   'invalid_model_configuration',
   'models_unavailable',
+  'model_verification_conflict',
+  'cancel_conflict',
   'invalid_import',
   'not_found',
   'internal_error',
@@ -1161,6 +1243,42 @@ export const personalityConfigurationEventSchema = z.object({
 });
 export type PersonalityConfigurationEvent = z.infer<
   typeof personalityConfigurationEventSchema
+>;
+
+export const modelConfigurationEventSchema = z
+  .object({
+    type: z.literal('model-assignment-changed'),
+    timestamp: z.iso.datetime(),
+    scope: z.enum(['global', 'agent']),
+    agentId: agentIdSchema.optional(),
+    previousModelId: modelIdSchema.nullable(),
+    newModelId: modelIdSchema.nullable(),
+    effectiveTurn: z.number().int().positive(),
+  })
+  .strict()
+  .superRefine((event, context) => {
+    if (event.scope === 'agent' && event.agentId === undefined)
+      context.addIssue({
+        code: 'custom',
+        path: ['agentId'],
+        message: 'Agent-scoped model changes require an agent ID.',
+      });
+    if (event.scope === 'global' && event.agentId !== undefined)
+      context.addIssue({
+        code: 'custom',
+        path: ['agentId'],
+        message: 'Global model changes must not include an agent ID.',
+      });
+  });
+export type ModelConfigurationEvent = z.infer<
+  typeof modelConfigurationEventSchema
+>;
+export const experimentConfigurationEventSchema = z.union([
+  personalityConfigurationEventSchema,
+  modelConfigurationEventSchema,
+]);
+export type ExperimentConfigurationEvent = z.infer<
+  typeof experimentConfigurationEventSchema
 >;
 
 export const experimentManifestSchema = z.object({
@@ -1549,9 +1667,7 @@ export const experimentExportDocumentSchema = z
       )
       .min(1)
       .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
-    configurationEvents: z
-      .array(personalityConfigurationEventSchema)
-      .optional(),
+    configurationEvents: z.array(experimentConfigurationEventSchema).optional(),
     metrics: experimentMetricsSchema.optional(),
     currentTerritory: territoryScoreboardSchema.optional(),
     currentAlliances: z.array(allianceTerritorySummarySchema).max(4).optional(),
@@ -1584,7 +1700,16 @@ export const experimentExportDocumentSchema = z
       });
     const personalityHistory =
       level === 'full-safe' || custom?.personalityTextHistory;
-    if (Boolean(document.configurationEvents) !== Boolean(personalityHistory))
+    if (personalityHistory && document.configurationEvents === undefined)
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Personality history inclusion does not match the export level.',
+      });
+    if (
+      !personalityHistory &&
+      document.configurationEvents?.some((event) => !('type' in event))
+    )
       context.addIssue({
         code: 'custom',
         message:

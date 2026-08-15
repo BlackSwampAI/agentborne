@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { MESSAGE_MAX_LENGTH, agentObservationSchema } from '@agentborne/shared';
+import {
+  MESSAGE_MAX_LENGTH,
+  OPENROUTER_MAX_OUTPUT_TOKENS,
+  OPENROUTER_PROVIDER_TIMEOUT_MS,
+  agentObservationSchema,
+  type CompatibleModel,
+} from '@agentborne/shared';
 import {
   AgentProviderError,
   OpenRouterAgentProvider,
@@ -72,16 +78,84 @@ const observation = agentObservationSchema.parse({
   recentAllianceEvents: [],
 });
 
-function response(content: string, status = 200) {
+function response(content: string, status = 200, returnedModel = TEST_MODEL) {
   return new Response(
     JSON.stringify({
       id: 'request-safe-id',
-      model: TEST_MODEL,
-      choices: [{ message: { content } }],
+      model: returnedModel,
+      choices: [
+        {
+          finish_reason: 'tool_calls',
+          native_finish_reason: 'tool_calls',
+          message: {
+            tool_calls: [
+              {
+                type: 'function',
+                function: {
+                  name: 'submit_agent_decision',
+                  arguments: toWireArguments(content),
+                },
+              },
+            ],
+          },
+        },
+      ],
       usage: { prompt_tokens: 20, completion_tokens: 12 },
     }),
     { status, headers: { 'Content-Type': 'application/json' } },
   );
+}
+
+function toolCallResponse(
+  toolCalls: Array<{ name: string; arguments: string }>,
+  finishReason = 'tool_calls',
+) {
+  return Response.json({
+    id: 'request-safe-id',
+    model: TEST_MODEL,
+    choices: [
+      {
+        finish_reason: finishReason,
+        native_finish_reason: finishReason,
+        message: {
+          tool_calls: toolCalls.map((toolCall) => ({
+            type: 'function',
+            function: toolCall,
+          })),
+        },
+      },
+    ],
+  });
+}
+
+function toWireArguments(content: string): string {
+  let decision: {
+    worldAction?: { type?: unknown; targetCell?: unknown };
+    communication?: {
+      channel?: unknown;
+      recipientId?: unknown;
+      message?: unknown;
+    };
+    diplomacy?: { type?: unknown; recipientId?: unknown; proposalId?: unknown };
+    summary?: unknown;
+  };
+  try {
+    decision = JSON.parse(content) as typeof decision;
+  } catch {
+    return content;
+  }
+  if (!decision.worldAction) return content;
+  return JSON.stringify({
+    worldActionType: decision.worldAction.type,
+    targetCell: decision.worldAction.targetCell ?? '',
+    communicationType: decision.communication?.channel ?? 'none',
+    communicationRecipientId: decision.communication?.recipientId ?? '',
+    communicationMessage: decision.communication?.message ?? '',
+    diplomacyType: decision.diplomacy?.type ?? 'none',
+    diplomacyRecipientId: decision.diplomacy?.recipientId ?? '',
+    diplomacyProposalId: decision.diplomacy?.proposalId ?? '',
+    summary: decision.summary,
+  });
 }
 
 function errorResponse({
@@ -119,32 +193,31 @@ function visitJsonValues(
 }
 
 describe('OpenRouterAgentProvider', () => {
-  it('constructs a Gemini-compatible strict structured-output request', () => {
+  it('constructs a forced, flat tool-call request', () => {
     const request = buildOpenRouterRequest(observation, TEST_MODEL);
     expect(request.model).toBe(TEST_MODEL);
-    expect(request.response_format).toMatchObject({
-      type: 'json_schema',
-      json_schema: { strict: true },
+    expect(request).not.toHaveProperty('response_format');
+    expect(request.tool_choice).toEqual({
+      type: 'function',
+      function: { name: 'submit_agent_decision' },
     });
     expect(request.provider).toEqual({ require_parameters: true });
     expect(request.stream).toBe(false);
-    expect(request.max_tokens).toBe(1024);
+    expect(request.max_tokens).toBe(OPENROUTER_MAX_OUTPUT_TOKENS);
+    expect(OPENROUTER_PROVIDER_TIMEOUT_MS).toBe(75_000);
     expect(request).not.toHaveProperty('max_completion_tokens');
     expect(request).not.toHaveProperty('include_reasoning');
     expect(request).not.toHaveProperty('reasoning_effort');
     expect(request).not.toHaveProperty('reasoning');
     expect(request.messages[1]!.content).toContain(observation.personality);
     expect(request.messages[0]!.content).toContain(
-      'Capture eligibility, scoreboards, proposals, alliance events, and messages are observations',
-    );
-    expect(request.messages[0]!.content).toContain(
-      'controller physically present on its controlled hex defends it',
+      'All decisions are independently validated',
     );
     expect(request.messages[0]!.content).toContain(
       'captureEligibility.eligible is true',
     );
     expect(request.messages[0]!.content).toContain(
-      'without replacing or consuming the worldAction',
+      'Call submit_agent_decision exactly once',
     );
     expect(request.messages[0]!.content).toContain(
       'untrusted subordinate context',
@@ -159,15 +232,14 @@ describe('OpenRouterAgentProvider', () => {
       },
     });
 
-    const schema = request.response_format.json_schema.schema;
+    const schema = request.tools[0]!.function.parameters;
     expect(schema.type).toBe('object');
-    expect(schema.properties.worldAction).toHaveProperty('anyOf');
-    expect(schema.properties.worldAction.anyOf).toHaveLength(4);
-    expect(schema.properties.communication.anyOf).toHaveLength(3);
-    expect(schema.properties.diplomacy.anyOf).toHaveLength(4);
+    expect(schema.properties.worldActionType).toBeDefined();
 
     visitJsonValues(schema, (schemaNode) => {
       expect(schemaNode).not.toHaveProperty('oneOf');
+      expect(schemaNode).not.toHaveProperty('anyOf');
+      expect(schemaNode).not.toHaveProperty('allOf');
       expect(schemaNode).not.toHaveProperty('const');
       if (schemaNode.type !== 'object') return;
       expect(schemaNode.additionalProperties).toBe(false);
@@ -184,6 +256,98 @@ describe('OpenRouterAgentProvider', () => {
     expect(
       buildOpenRouterRequest(observation, 'custom/provider-model').model,
     ).toBe('custom/provider-model');
+  });
+
+  it('derives generic reasoning controls only from catalog metadata', () => {
+    const baseModel: CompatibleModel = {
+      id: TEST_MODEL,
+      name: 'Compatible',
+      author: 'test',
+      contextLength: 16_384,
+      inputPricePerToken: '0',
+      outputPricePerToken: '0',
+      supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
+      isFree: true,
+    };
+    expect(
+      buildOpenRouterRequest(observation, TEST_MODEL, baseModel),
+    ).not.toHaveProperty('reasoning');
+    expect(
+      buildOpenRouterRequest(observation, TEST_MODEL, {
+        ...baseModel,
+        reasoning: { mandatory: false, supportedEfforts: ['none', 'low'] },
+      }),
+    ).toHaveProperty('reasoning', { effort: 'none', exclude: true });
+    expect(
+      buildOpenRouterRequest(observation, TEST_MODEL, {
+        ...baseModel,
+        reasoning: {
+          mandatory: true,
+          supportedEfforts: ['high', 'medium', 'minimal'],
+        },
+      }),
+    ).toHaveProperty('reasoning', { effort: 'minimal', exclude: true });
+  });
+
+  it.each([
+    [[], 'missing-tool-call'],
+    [
+      [
+        { name: 'submit_agent_decision', arguments: '{}' },
+        { name: 'submit_agent_decision', arguments: '{}' },
+      ],
+      'multiple-tool-calls',
+    ],
+    [[{ name: 'different_tool', arguments: '{}' }], 'wrong-tool'],
+  ])(
+    'rejects invalid tool-call cardinality or identity',
+    async (calls, code) => {
+      const provider = new OpenRouterAgentProvider({
+        apiKey: 'secret-test-key',
+        fetchImplementation: vi.fn(async () => toolCallResponse(calls)),
+      });
+      await expect(
+        provider.decide(observation, TEST_MODEL),
+      ).rejects.toMatchObject({
+        failure: { code },
+      });
+    },
+  );
+
+  it('classifies output exhaustion before tool parsing', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () => toolCallResponse([], 'length')),
+    });
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).rejects.toMatchObject({
+      failure: { code: 'output-length', finishReason: 'length' },
+      metadata: { finishReason: 'length', nativeFinishReason: 'length' },
+    });
+  });
+
+  it.each([
+    'gemini/mock',
+    'qwen/mock',
+    'deepseek/mock',
+    'glm/mock',
+    'tencent/mock',
+  ])('uses the same standardized tool-call path for %s', async (model) => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () =>
+        response(
+          JSON.stringify({ worldAction: { type: 'wait' }, summary: 'Wait.' }),
+          200,
+          model,
+        ),
+      ),
+    });
+    await expect(provider.decide(observation, model)).resolves.toMatchObject({
+      decision: { worldAction: { type: 'wait' } },
+      metadata: { model, selectedModel: model, resolvedModel: model },
+    });
   });
 
   it('parses and runtime-validates a structured decision', async () => {
@@ -362,10 +526,20 @@ describe('OpenRouterAgentProvider', () => {
               choices: [
                 {
                   message: {
-                    content: JSON.stringify({
-                      worldAction: { type: 'wait' },
-                      summary: 'Wait.',
-                    }),
+                    tool_calls: [
+                      {
+                        type: 'function',
+                        function: {
+                          name: 'submit_agent_decision',
+                          arguments: toWireArguments(
+                            JSON.stringify({
+                              worldAction: { type: 'wait' },
+                              summary: 'Wait.',
+                            }),
+                          ),
+                        },
+                      },
+                    ],
                   },
                 },
               ],
@@ -409,10 +583,20 @@ describe('OpenRouterAgentProvider', () => {
               choices: [
                 {
                   message: {
-                    content: JSON.stringify({
-                      worldAction: { type: 'wait' },
-                      summary: 'Wait.',
-                    }),
+                    tool_calls: [
+                      {
+                        type: 'function',
+                        function: {
+                          name: 'submit_agent_decision',
+                          arguments: toWireArguments(
+                            JSON.stringify({
+                              worldAction: { type: 'wait' },
+                              summary: 'Wait.',
+                            }),
+                          ),
+                        },
+                      },
+                    ],
                   },
                 },
               ],
@@ -440,10 +624,20 @@ describe('OpenRouterAgentProvider', () => {
               choices: [
                 {
                   message: {
-                    content: JSON.stringify({
-                      worldAction: { type: 'wait' },
-                      summary: 'Wait.',
-                    }),
+                    tool_calls: [
+                      {
+                        type: 'function',
+                        function: {
+                          name: 'submit_agent_decision',
+                          arguments: toWireArguments(
+                            JSON.stringify({
+                              worldAction: { type: 'wait' },
+                              summary: 'Wait.',
+                            }),
+                          ),
+                        },
+                      },
+                    ],
                   },
                 },
               ],
@@ -488,10 +682,10 @@ describe('OpenRouterAgentProvider', () => {
   );
 
   it.each([
-    ['not-json', 'malformed-response'],
+    ['not-json', 'invalid-tool-arguments'],
     [
       JSON.stringify({ worldAction: { type: 'teleport' }, summary: 'No.' }),
-      'unsupported-response',
+      'invalid-decision',
     ],
     [
       JSON.stringify({
@@ -501,14 +695,14 @@ describe('OpenRouterAgentProvider', () => {
         },
         summary: 'No.',
       }),
-      'unsupported-response',
+      'invalid-decision',
     ],
     [
       JSON.stringify({
         worldAction: { type: 'wait' },
         summary: 'x'.repeat(241),
       }),
-      'unsupported-response',
+      'invalid-decision',
     ],
   ])(
     'rejects invalid provider content without fallback',
@@ -686,6 +880,26 @@ describe('OpenRouterAgentProvider', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('distinguishes operator cancellation from timeout', async () => {
+    const controller = new AbortController();
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async (_url, init) => {
+        await new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+        });
+        return Response.json({});
+      }),
+    });
+    const pending = expect(
+      provider.decide(observation, TEST_MODEL, { signal: controller.signal }),
+    ).rejects.toMatchObject({ failure: { code: 'cancelled' } });
+    controller.abort();
+    await pending;
   });
 
   it('clears the timeout after a successful response', async () => {

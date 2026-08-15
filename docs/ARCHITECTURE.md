@@ -25,7 +25,9 @@ The Game API also owns one process-local experiment record. Each completed safe 
 - `POST /api/simulation/experiment/export` — construct one schema-versioned safe JSON document
 - `GET /api/simulation/models` — return the cached, sanitized compatible model catalog
 - `POST /api/simulation/models/refresh` — explicitly refresh that catalog
+- `POST /api/simulation/models/verify` — make one explicit, non-mutating compatibility probe
 - `POST /api/simulation/experiment/models` — replace the unlocked global/per-agent assignment
+- `POST /api/simulation/turn/cancel` — abort the active provider request without mutating the world
 - `POST /api/simulation/experiment/import` — restore model assignments from a validated export
 
 The legacy `GET /api/development-world` and `GET /health` endpoints remain for low-level diagnostics.
@@ -34,11 +36,11 @@ The Game API is authoritative for session personality configuration. World reset
 
 ## Turn flow
 
-The development world is a deterministic H3 resolution-nine radius-six disk (127 cells) around Toledo with eight fixed profiles and unique perimeter starts. One agent acts per turn in stable array order, so 200 completed turns give every agent exactly 25 turns. The service makes exactly one structured provider request returning one required `worldAction`, zero or one `communication`, and zero or one `diplomacy` intent (`propose-alliance`, `accept-alliance`, or `leave-alliance`). There are no social ticks, background inference calls, or automatic replies.
+The development world is a deterministic H3 resolution-nine radius-six disk (127 cells) around Toledo with eight fixed profiles and unique perimeter starts. One agent acts per turn in stable array order, so 200 completed turns give every agent exactly 25 turns. The service makes exactly one forced `submit_agent_decision` tool call returning one required `worldAction`, zero or one `communication`, and zero or one `diplomacy` intent (`propose-alliance`, `accept-alliance`, or `leave-alliance`). Flat sentinel-bearing arguments normalize into the internal unions before existing Zod and engine validation. There are no social ticks, background inference calls, or automatic replies.
 
 Names, colors, stable IDs, and starting cells remain fixed. Personality text is mutable session configuration, but each observation copies the active value at turn start. Completed observations and turn records remain immutable, so a newly edited active personality can intentionally differ from the latest historical observation until that agent acts again.
 
-The engine alone accepts or rejects all components and creates events. The service preserves the pre-decision state, then applies world action, communication, diplomacy, and automatic proposal expiry in that deterministic order. Direct-message eligibility uses the preserved pre-action state. Each rejected component leaves the others intact; malformed diplomacy is sanitized without retaining raw output. A wholly malformed root response follows the provider-failure path and applies none of its requested components. Provider-error turns still count and can deterministically expire proposals.
+The engine alone accepts or rejects all components and creates events. The service preserves the pre-decision state, then applies world action, communication, diplomacy, and automatic proposal expiry in that deterministic order. Direct-message eligibility uses the preserved pre-action state. Each rejected component leaves the others intact. A missing, duplicate, wrong, malformed, contradictory, cancelled, timed-out, or truncated tool call follows the provider-failure path, stops all playback, and preserves the world without expiring proposals. The active request and browser request settle before between-turn model editing is re-enabled.
 
 ## Formal alliance state
 
@@ -64,13 +66,13 @@ The agent runtime follows [OpenRouter's usage-accounting contract](https://openr
 
 `packages/world-engine` remains deterministic and has no model, HTTP, UI, storage, or credential dependency. It validates world action, communication, and diplomacy independently and is the sole alliance mutation authority. Direct proximity is derived from a separately supplied pre-action state.
 
-`packages/agent-runtime` contains the OpenRouter adapter and server-only catalog client. The contract requires text input/output, chat completions, `max_tokens`, `response_format`, `structured_outputs`, non-streaming operation, and at least 16,384 context tokens. The 16,384 floor covers the bounded complete observation and fixed prompt plus the 1,024-token response budget with substantial safety headroom. Catalog requests use matching server filters, then locally validate every entry. No model-family logic, allowlist, reasoning option, tool requirement, or model default exists.
+`packages/agent-runtime` contains the OpenRouter adapter and server-only catalog client. The contract requires text input/output, chat completions, `max_tokens`, `tools`, forced `tool_choice`, non-streaming operation, and at least 16,384 context tokens. The centralized floor covers the bounded complete observation and fixed prompt while reserving a 4,096-token completion ceiling for mandatory reasoning and the final call. Catalog requests use matching server filters, then locally validate every entry. Reasoning controls are derived only from sanitized metadata; no model-family logic, allowlist, compatibility flag, or model default exists.
 
 The catalog has an eight-second timeout and five-minute in-memory TTL. A successful response replaces the cache. A timeout, transport/HTTP failure, or malformed response retains the last successful catalog and marks it stale with a safe error; without a prior success it returns an empty error state. Manual refresh bypasses TTL while coalescing concurrent refreshes.
 
-Every agent resolves an explicit global assignment or per-agent override before execution. The acting agent's resolved slug is passed to its request. Assignments lock after the first completed turn; reset creates a new experiment while preserving and unlocking them. No unavailable or missing model is substituted.
+Every agent resolves an explicit global assignment or per-agent override before execution. The acting agent's resolved slug and sanitized metadata are passed to its request. Assignments may change while playback is paused and no provider/reset mutation is active. Each change is exported with timestamp, scope, prior/new slug, and effective next-turn boundary. No unavailable or missing model is substituted.
 
-The provider abort timeout covers the complete response lifecycle, including body reading, JSON decoding, response extraction, and schema validation, and is cleared after every outcome. Non-success responses retain only bounded, sanitized in-process diagnostics for the opt-in CLI smoke; those details do not enter simulation records or API responses. Scripted providers are explicit deterministic seams selected only by tests or `AGENTBORNE_PROVIDER=scripted`; there is no automatic fallback.
+The centralized 75-second provider abort timeout covers the complete response lifecycle, including body reading, JSON decoding, tool extraction, normalization, and schema validation, and is cleared after every outcome. The same AbortController supports an explicit operator cancellation. Safe records expose only bounded status/code/message/request ID/model/finish-reason/latency/usage fields. Scripted providers are explicit deterministic seams selected only by tests or `AGENTBORNE_PROVIDER=scripted`; there is no automatic fallback. Manual probes use the exact contract, never mutate the world, may incur a small charge, and are cached only for the current server session by model ID plus contract version.
 
 The rationale and deferrals are recorded in [ADR 0002](adr/0002-first-visible-llm-invasion.md).
 Personality ownership and reset semantics are recorded in [ADR 0003](adr/0003-session-personality-configuration.md).

@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   experimentExportDocumentSchema,
   modelCatalogResponseSchema,
+  agentTurnRecordSchema,
   simulationSnapshotSchema,
   type SimulationSnapshot,
 } from '@agentborne/shared';
@@ -733,11 +734,7 @@ const compatibleCatalog = modelCatalogResponseSchema.parse({
       inputPricePerToken: '0.000001',
       outputPricePerToken: '0.000002',
       requestPrice: '0',
-      supportedParameters: [
-        'max_tokens',
-        'response_format',
-        'structured_outputs',
-      ],
+      supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
       createdAt: '2026-08-01T00:00:00.000Z',
       isFree: false,
     },
@@ -748,11 +745,7 @@ const compatibleCatalog = modelCatalogResponseSchema.parse({
       contextLength: 65_536,
       inputPricePerToken: '0',
       outputPricePerToken: '0',
-      supportedParameters: [
-        'max_tokens',
-        'response_format',
-        'structured_outputs',
-      ],
+      supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
       createdAt: '2026-08-02T00:00:00.000Z',
       isFree: true,
     },
@@ -765,7 +758,7 @@ const compatibleCatalog = modelCatalogResponseSchema.parse({
     input: 'text',
     output: 'text',
     endpoint: 'chat-completions',
-    requiredParameters: ['max_tokens', 'response_format', 'structured_outputs'],
+    requiredParameters: ['max_tokens', 'tools', 'tool_choice'],
     minimumContextLength: 16_384,
     streaming: false,
   },
@@ -1386,7 +1379,9 @@ describe('WorldLab', () => {
     expect(screen.getByText('$1/M')).toBeInTheDocument();
     expect(screen.getByText('$2/M')).toBeInTheDocument();
     expect(screen.getByText('32,768 tokens')).toBeInTheDocument();
-    expect(screen.getByText('Required contract supported')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Catalog compatible: tool decision contract advertised/),
+    ).toBeInTheDocument();
 
     await user.selectOptions(
       modelConsole.getByLabelText('Global model'),
@@ -1411,6 +1406,60 @@ describe('WorldLab', () => {
       .mocked(fetch)
       .mock.calls.filter(([url]) => String(url).endsWith('/experiment/models'));
     expect(JSON.parse(String(updates.at(-1)?.[1]?.body)).overrides).toEqual([]);
+  });
+
+  it('recovers from a failed compatibility probe without changing the world', async () => {
+    const current = openRouterSnapshot('example/alpha');
+    let probeCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/models/verify')) {
+          probeCalls += 1;
+          return jsonResponse({
+            verification: {
+              modelId: 'example/alpha',
+              contractVersion: 'tool-v1',
+              status: probeCalls === 1 ? 'failed' : 'verified',
+              testedAt: '2026-08-15T12:00:00.000Z',
+              ...(probeCalls === 1
+                ? {
+                    failure: {
+                      code: 'missing-tool-call',
+                      message: 'The model did not call submit_agent_decision.',
+                    },
+                  }
+                : {
+                    provider: {
+                      provider: 'openrouter',
+                      model: 'example/alpha',
+                      latencyMs: 20,
+                    },
+                  }),
+            },
+          });
+        }
+        if (url.endsWith('/models')) return jsonResponse(compatibleCatalog);
+        return jsonResponse(current);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await user.click(await screen.findByText('Model: Alpha'));
+    await user.click(
+      screen.getByRole('button', { name: 'Test selected model' }),
+    );
+    expect(
+      await screen.findByText(/did not call submit_agent_decision/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Global model')).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Retry model test' }));
+    expect(
+      await screen.findByText('Runtime verified: yes'),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/may incur a small charge/)).toBeInTheDocument();
+    expect(screen.getByText('Turn 0')).toBeInTheDocument();
   });
 
   it('shows stale catalog and unavailable saved-model states without substitution', async () => {
@@ -1447,6 +1496,70 @@ describe('WorldLab', () => {
     expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
   });
 
+  it('stops playback after provider failure and unlocks model selection', async () => {
+    vi.useFakeTimers();
+    try {
+      const current = openRouterSnapshot('example/alpha');
+      const template = afterInfection().turns[0]!;
+      const failedTurn = agentTurnRecordSchema.parse({
+        turnNumber: 1,
+        agentId: template.agentId,
+        startedAt: template.startedAt,
+        completedAt: template.completedAt,
+        observation: template.observation,
+        allianceEvents: [],
+        outcome: 'provider-error',
+        failure: {
+          code: 'timeout',
+          message: 'The model request timed out.',
+          retryable: true,
+          model: 'example/alpha',
+        },
+      });
+      const failed = simulationSnapshotSchema.parse({
+        ...current,
+        status: 'provider-error',
+        turnNumber: 1,
+        turns: [failedTurn],
+        experiment: {
+          ...current.experiment,
+          totalCompletedTurns: 1,
+          retainedTurns: 1,
+          firstRetainedTurn: 1,
+          lastRetainedTurn: 1,
+        },
+      });
+      let turnRequests = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.endsWith('/models')) return jsonResponse(compatibleCatalog);
+          if (url.endsWith('/turn')) {
+            turnRequests += 1;
+            return jsonResponse({ snapshot: failed, turn: failedTurn });
+          }
+          return jsonResponse(current);
+        }),
+      );
+      render(<WorldLab />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+      await act(async () => void (await vi.advanceTimersByTimeAsync(1_000)));
+      expect(screen.getByText(/Turn stopped/)).toHaveTextContent('example/alpha');
+      fireEvent.click(screen.getByText('Model: Alpha'));
+      expect(screen.getByLabelText('Global model')).toBeEnabled();
+      await act(async () => void (await vi.advanceTimersByTimeAsync(10_000)));
+      expect(turnRequests).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('collapses and expands the bounded public chat dock', async () => {
     vi.stubGlobal(
       'fetch',
@@ -1455,9 +1568,12 @@ describe('WorldLab', () => {
     const user = userEvent.setup();
     render(<WorldLab />);
     const chat = await screen.findByLabelText('Public world chat');
+    expect(document.querySelector('main')).toHaveClass('world-lab-shell');
     await user.click(screen.getByRole('button', { name: 'Collapse' }));
+    expect(document.querySelector('main')).toHaveClass('chat-collapsed');
     expect(chat).not.toHaveTextContent(HOSTILE_MESSAGE);
     await user.click(screen.getByRole('button', { name: 'Expand' }));
+    expect(document.querySelector('main')).not.toHaveClass('chat-collapsed');
     expect(chat).toHaveTextContent(HOSTILE_MESSAGE);
   });
 

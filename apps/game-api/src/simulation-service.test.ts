@@ -34,11 +34,7 @@ const compatibleModels: CompatibleModel[] = [
     contextLength: 16_384,
     inputPricePerToken: '0.000001',
     outputPricePerToken: '0.000002',
-    supportedParameters: [
-      'max_tokens',
-      'response_format',
-      'structured_outputs',
-    ],
+    supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
     isFree: false,
   },
   {
@@ -48,11 +44,7 @@ const compatibleModels: CompatibleModel[] = [
     contextLength: 32_768,
     inputPricePerToken: '0',
     outputPricePerToken: '0',
-    supportedParameters: [
-      'max_tokens',
-      'response_format',
-      'structured_outputs',
-    ],
+    supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
     isFree: true,
   },
 ];
@@ -2066,7 +2058,42 @@ describe('SimulationService', () => {
     expect(simulation.getSnapshot().turnNumber).toBe(1);
   });
 
-  it('resolves global and per-agent models, passes them per turn, and locks after execution', async () => {
+  it('cancels an active provider request without mutating the world', async () => {
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'cancel-test',
+      configured: true,
+      async decide(_observation, _model, options) {
+        await new Promise<void>((resolve) => {
+          options?.signal?.addEventListener('abort', () => resolve());
+        });
+        return {
+          decision: { worldAction: { type: 'wait' }, summary: 'Too late.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'cancel-test',
+            latencyMs: 1,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    const before = simulation.getSnapshot().world;
+    const pending = simulation.executeNextTurn();
+    expect(simulation.cancelCurrentRequest().cancellationRequested).toBe(true);
+    await expect(pending).resolves.toMatchObject({
+      outcome: 'provider-error',
+      failure: { code: 'cancelled' },
+    });
+    expect(simulation.getSnapshot()).toMatchObject({
+      activeAgentId: null,
+      cancellationRequested: false,
+      status: 'provider-error',
+    });
+    expect(simulation.getSnapshot().world).toEqual(before);
+  });
+
+  it('resolves models per turn and records between-turn model changes', async () => {
     const usedModels: string[] = [];
     const provider: AgentProvider = {
       mode: 'openrouter',
@@ -2112,13 +2139,42 @@ describe('SimulationService', () => {
       compatibleModels[0]!.id,
       compatibleModels[1]!.id,
     ]);
-    expect(simulation.getSnapshot().modelConfiguration.locked).toBe(true);
+    expect(simulation.getSnapshot().modelConfiguration.locked).toBe(false);
     expect(() =>
       simulation.updateModelConfiguration({
         globalModelId: compatibleModels[1]!.id,
         overrides: [],
       }),
-    ).toThrow(SimulationConflictError);
+    ).not.toThrow();
+    await simulation.executeNextTurn();
+    expect(usedModels.at(-1)).toBe(compatibleModels[1]!.id);
+    const fourth = simulation.getSnapshot().world.agents[3]!;
+    simulation.updateModelConfiguration({
+      globalModelId: compatibleModels[1]!.id,
+      overrides: [{ agentId: fourth.id, modelId: compatibleModels[0]!.id }],
+    });
+    await simulation.executeNextTurn();
+    expect(usedModels.at(-1)).toBe(compatibleModels[0]!.id);
+    const exported = simulation.generateExperimentExport(
+      exportRequest('full-safe'),
+    );
+    expect(exported.configurationEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'model-assignment-changed',
+          scope: 'global',
+          effectiveTurn: 3,
+        }),
+        expect.objectContaining({
+          type: 'model-assignment-changed',
+          scope: 'agent',
+          agentId: fourth.id,
+          previousModelId: compatibleModels[1]!.id,
+          newModelId: compatibleModels[0]!.id,
+          effectiveTurn: 4,
+        }),
+      ]),
+    );
   });
 
   it('removes overrides, preserves unavailable imports, and migrates legacy exports safely', () => {

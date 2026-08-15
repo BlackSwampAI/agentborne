@@ -33,6 +33,22 @@ const rawModelSchema = z.object({
   }),
   supported_parameters: z.array(z.string().trim().min(1).max(80)).max(80),
   expiration_date: z.string().nullable().optional(),
+  reasoning: z
+    .object({
+      supported_efforts: z
+        .array(
+          z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
+        )
+        .nullable()
+        .optional(),
+      default_effort: z
+        .enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+        .optional(),
+      default_enabled: z.boolean().optional(),
+      supports_max_tokens: z.boolean().optional(),
+      mandatory: z.boolean().optional(),
+    })
+    .optional(),
 });
 
 const rawCatalogSchema = z.object({ data: z.array(z.unknown()) });
@@ -206,16 +222,28 @@ export function sanitizeCompatibleModel(
     outputPricePerToken: model.pricing.completion,
     requestPrice,
     supportedParameters: [...new Set(model.supported_parameters)].toSorted(),
-    createdAt:
-      model.created === undefined
-        ? undefined
-        : new Date(model.created * 1_000).toISOString(),
+    createdAt: normalizeCreatedAt(model.created),
     expirationDate,
     isFree:
       Number(model.pricing.prompt) === 0 &&
       Number(model.pricing.completion) === 0 &&
       Number(requestPrice ?? '0') === 0,
+    reasoning: model.reasoning
+      ? {
+          supportedEfforts: model.reasoning.supported_efforts,
+          defaultEffort: model.reasoning.default_effort,
+          defaultEnabled: model.reasoning.default_enabled,
+          supportsMaxTokens: model.reasoning.supports_max_tokens,
+          mandatory: model.reasoning.mandatory ?? false,
+        }
+      : undefined,
   });
+}
+
+function normalizeCreatedAt(value: number | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const date = new Date(value * 1_000);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
 function normalizeExpirationDate(
