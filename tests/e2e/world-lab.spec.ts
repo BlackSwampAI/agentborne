@@ -38,7 +38,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await page.goto('/');
 
   try {
-    await expect(page.getByText('Automated-test provider')).toBeVisible({
+    await expect(page.getByText('Deterministic test model')).toBeVisible({
       timeout: 30_000,
     });
   } catch (error) {
@@ -113,7 +113,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
     '0 rendered infected',
   );
   await expect(worldMap).toHaveAttribute('data-controller-colors', '');
-  await expect(page.getByText('No controller')).toBeVisible();
+  await expect(page.getByLabel('Selected hex details')).toHaveCount(0);
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Rook0');
   await expect(page.getByLabel('Territory scoreboard')).toContainText(
     'Mingle0',
@@ -238,7 +238,9 @@ test('runs the complete deterministic World Lab browser flow', async ({
     'Gained',
   );
   await page.getByRole('button', { name: 'Select agent Ember' }).click();
-  await page.getByRole('button', { name: 'Export this agent' }).click();
+  await page.getByRole('button', { name: 'Export' }).click();
+  await page.getByRole('button', { name: 'Clear' }).click();
+  await page.getByRole('checkbox', { name: 'Ember', exact: true }).click();
   await expect(
     page.getByRole('checkbox', { name: 'Ember', exact: true }),
   ).toBeChecked();
@@ -271,10 +273,10 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await page.getByRole('button', { name: 'Preview' }).click();
   await expect(page.getByLabel('Export preview')).toContainText('0 turns');
   await expect(page.getByLabel('Export preview')).toContainText('1 matched');
-  await page.getByRole('button', { name: 'Generate' }).click();
-  await expect(page.getByText(/schema-validated/)).toBeVisible();
+  await page.getByRole('button', { name: 'Generate export' }).click();
+  await expect(page.getByText(/Export ready/)).toBeVisible();
   const downloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Download' }).click();
+  await page.getByRole('button', { name: 'Download JSON' }).click();
   const download = await downloadPromise;
   const downloadedPath = await download.path();
   expect(downloadedPath).not.toBeNull();
@@ -327,7 +329,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
     '0 rendered infected',
   );
   await expect(worldMap).toHaveAttribute('data-controller-colors', '');
-  await expect(page.getByText('No controller')).toBeVisible();
+  await expect(page.getByLabel('Selected hex details')).toHaveCount(0);
   await expect(markers).toHaveCount(8);
   for (let index = 0; index < 8; index += 1) {
     await expect(markers.nth(index)).toBeVisible();
@@ -351,6 +353,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
     '1',
   );
   page.once('dialog', (dialog) => dialog.accept());
+  await page.getByLabel('More World Lab actions').click();
   await page
     .getByRole('button', { name: 'Restore default personalities' })
     .click();

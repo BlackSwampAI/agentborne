@@ -21,7 +21,10 @@ import type {
   Hex,
   HexState,
   Alliance,
+  SimulationSnapshot,
 } from '@agentborne/shared';
+import { resolveAgentColor } from './ui-color';
+import { DARK_TILE_ATTRIBUTION, DARK_TILE_URLS } from './map-config';
 
 interface WorldMapProps {
   latitude: number;
@@ -29,9 +32,10 @@ interface WorldMapProps {
   hexes: Hex[];
   agents: AgentProfile[];
   alliances: Alliance[];
-  selectedCell: H3Cell;
+  selectedCell: H3Cell | null;
   selectedAgentId: AgentId | null;
   onSelectCell: (cell: H3Cell) => void;
+  onClearCellSelection: () => void;
   onSelectAgent: (agentId: AgentId) => void;
 }
 
@@ -62,14 +66,17 @@ function asGeoJson(
   hexes: WorldMapProps['hexes'],
   agents: AgentProfile[],
   alliances: Alliance[],
-  selectedCell: H3Cell,
+  selectedCell: H3Cell | null,
 ) {
   const agentById = new globalThis.Map(
     agents.map((agent) => [agent.id, agent]),
   );
+  const colorState = { world: { agents, alliances } } as unknown as Pick<
+    SimulationSnapshot,
+    'world'
+  >;
   const effectiveColor = (agentId: AgentId) =>
-    alliances.find(({ memberAgentIds }) => memberAgentIds.includes(agentId))
-      ?.color ?? agentById.get(agentId)?.color;
+    resolveAgentColor(colorState, agentId);
   return {
     type: 'FeatureCollection' as const,
     features: hexes.map((hex) => ({
@@ -111,12 +118,14 @@ export function WorldMap(props: WorldMapProps) {
     selectedCell,
     selectedAgentId,
     onSelectCell,
+    onClearCellSelection,
     onSelectAgent,
   } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
   const markersRef = useRef<Marker[]>([]);
   const onSelectCellRef = useRef(onSelectCell);
+  const onClearCellSelectionRef = useRef(onClearCellSelection);
   const onSelectAgentRef = useRef(onSelectAgent);
   const initialHexes = useRef(hexes);
   const initialAgents = useRef(agents);
@@ -135,8 +144,9 @@ export function WorldMap(props: WorldMapProps) {
 
   useEffect(() => {
     onSelectCellRef.current = onSelectCell;
+    onClearCellSelectionRef.current = onClearCellSelection;
     onSelectAgentRef.current = onSelectAgent;
-  }, [onSelectAgent, onSelectCell]);
+  }, [onClearCellSelection, onSelectAgent, onSelectCell]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -148,16 +158,14 @@ export function WorldMap(props: WorldMapProps) {
       style: {
         version: 8,
         sources: {
-          'osm-development': {
+          'carto-dark': {
             type: 'raster',
-            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+            tiles: [...DARK_TILE_URLS],
             tileSize: 256,
-            attribution: '© OpenStreetMap contributors',
+            attribution: DARK_TILE_ATTRIBUTION,
           },
         },
-        layers: [
-          { id: 'osm-development', type: 'raster', source: 'osm-development' },
-        ],
+        layers: [{ id: 'carto-dark', type: 'raster', source: 'carto-dark' }],
       },
     });
     mapRef.current = map;
@@ -249,9 +257,17 @@ export function WorldMap(props: WorldMapProps) {
         map.triggerRepaint();
       }
     };
+    let cellSelectedThisClick = false;
     const selectRenderedCell = (event: MapLayerMouseEvent) => {
       const cell = event.features?.[0]?.properties?.cell;
-      if (typeof cell === 'string') onSelectCellRef.current(cell as H3Cell);
+      if (typeof cell === 'string') {
+        cellSelectedThisClick = true;
+        onSelectCellRef.current(cell as H3Cell);
+      }
+    };
+    const clearSelectedCell = () => {
+      if (!cellSelectedThisClick) onClearCellSelectionRef.current();
+      cellSelectedThisClick = false;
     };
     const showCellCursor = () => {
       map.getCanvas().style.cursor = 'pointer';
@@ -279,8 +295,8 @@ export function WorldMap(props: WorldMapProps) {
             'fill-opacity': [
               'case',
               ['boolean', ['get', 'selected'], false],
-              0.72,
-              0.38,
+              0.78,
+              0.48,
             ],
           },
         });
@@ -292,8 +308,8 @@ export function WorldMap(props: WorldMapProps) {
             'line-color': [
               'case',
               ['boolean', ['get', 'selected'], false],
-              '#fff2c9',
-              '#b8d4cc',
+              '#ede5a6',
+              '#b2d3a8',
             ],
             'line-opacity': 0.95,
             'line-width': [
@@ -305,6 +321,7 @@ export function WorldMap(props: WorldMapProps) {
           },
         });
         map.on('click', fillLayerId, selectRenderedCell);
+        map.on('click', clearSelectedCell);
         map.on('mouseenter', fillLayerId, showCellCursor);
         map.on('mouseleave', fillLayerId, clearCellCursor);
 
@@ -339,6 +356,7 @@ export function WorldMap(props: WorldMapProps) {
       map.off('sourcedata', inspectLoadedH3Source);
       map.off('render', inspectAfterRender);
       map.off('click', fillLayerId, selectRenderedCell);
+      map.off('click', clearSelectedCell);
       map.off('mouseenter', fillLayerId, showCellCursor);
       map.off('mouseleave', fillLayerId, clearCellCursor);
       markersRef.current.forEach((marker) => marker.remove());
@@ -382,10 +400,13 @@ export function WorldMap(props: WorldMapProps) {
       element.dataset.agentId = agent.id;
       element.setAttribute('aria-label', `Select agent ${agent.name}`);
       element.title = `${agent.name} · ${agent.currentCell}`;
-      const effectiveColor =
-        alliances.find(({ memberAgentIds }) =>
-          memberAgentIds.includes(agent.id),
-        )?.color ?? agent.color;
+      const effectiveColor = resolveAgentColor(
+        { world: { agents, alliances } } as unknown as Pick<
+          SimulationSnapshot,
+          'world'
+        >,
+        agent.id,
+      );
       element.style.setProperty('--agent-color', effectiveColor);
       element.dataset.baseColor = agent.color;
       element.dataset.effectiveColor = effectiveColor;

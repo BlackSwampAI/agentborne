@@ -30,6 +30,7 @@ const mapLibreMock = vi.hoisted(() => ({
   mapClick: undefined as
     | ((event: { features: Array<{ properties: { cell: string } }> }) => void)
     | undefined,
+  mapBackgroundClick: undefined as (() => void) | undefined,
   layers: [] as Array<{
     id: string;
     paint?: Record<string, unknown>;
@@ -128,6 +129,8 @@ vi.mock('maplibre-gl', () => {
       }
       if (event === 'click' && typeof callback === 'function') {
         mapLibreMock.mapClick = callback;
+      } else if (event === 'click' && typeof layerOrCallback === 'function') {
+        mapLibreMock.mapBackgroundClick = layerOrCallback as () => void;
       } else if (
         event !== 'style.load' &&
         typeof layerOrCallback === 'function'
@@ -143,6 +146,8 @@ vi.mock('maplibre-gl', () => {
         this.listeners.get(event)?.delete(layerOrCallback as () => void);
       }
       if (event === 'click' && callback) mapLibreMock.mapClick = undefined;
+      if (event === 'click' && !callback)
+        mapLibreMock.mapBackgroundClick = undefined;
     }
     triggerRepaint() {
       const completeRender = () => this.emit('render');
@@ -842,6 +847,7 @@ function withPersonality(
 
 beforeEach(() => {
   window.localStorage.clear();
+  window.sessionStorage.clear();
   mapLibreMock.renderMode = 'complete';
   mapLibreMock.rejectSource = false;
   mapLibreMock.rejectLayers = false;
@@ -849,6 +855,7 @@ beforeEach(() => {
   mapLibreMock.autoRender = true;
   mapLibreMock.pendingRenderCallbacks = [];
   mapLibreMock.mapClick = undefined;
+  mapLibreMock.mapBackgroundClick = undefined;
   mapLibreMock.layers = [];
   mapLibreMock.queryRenderedFeatures.mockReset();
   mapLibreMock.setData.mockReset();
@@ -893,9 +900,28 @@ describe('WorldLab', () => {
     ).toBeEnabled();
     expect(screen.getByLabelText('Playback speed')).toBeInTheDocument();
     expect(
+      screen.getByRole('banner', { name: 'World Lab command bar' }),
+    ).toBeInTheDocument();
+    expect(document.querySelector('.command-bar')).not.toBeInTheDocument();
+    expect(document.querySelector('.provider-badge')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Export this agent' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen
+        .getAllByRole('option', { name: /^(25|50|100|200|500|1000)$/ })
+        .map((option) => Number((option as HTMLOptionElement).value)),
+    ).toEqual([25, 50, 100, 200, 500, 1000]);
+    expect(
+      screen.getByLabelText('Experiment details. Turn 0, paused'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText('Experiment details. Turn 0, paused'),
+    ).toHaveTextContent('0.0 credits');
+    expect(
       await screen.findAllByRole('button', { name: /Select agent/ }),
     ).toHaveLength(8);
-    expect(screen.getByText('Automated-test provider')).toBeInTheDocument();
+    expect(screen.getByText('Deterministic test model')).toBeInTheDocument();
   });
 
   it('runs exactly 194 additional turns from turn 6 and never schedules turn 201', async () => {
@@ -949,12 +975,10 @@ describe('WorldLab', () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(
-        screen.getByText(/Experiment progress: 6\/200/),
-      ).toBeInTheDocument();
+      expect(screen.getByText('Turn 6')).toBeInTheDocument();
 
       await act(async () => {
-        screen.getByRole('button', { name: 'Run to turn 200' }).click();
+        screen.getByRole('button', { name: 'Run to 200' }).click();
       });
       for (let expectedTurn = 7; expectedTurn <= 200; expectedTurn += 1) {
         await act(async () => {
@@ -962,9 +986,7 @@ describe('WorldLab', () => {
         });
       }
 
-      expect(
-        screen.getByText(/Experiment progress: 200\/200/),
-      ).toBeInTheDocument();
+      expect(screen.getByText('Turn 200')).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
       expect(turnRequests - 1).toBe(194);
       expect(fetch).toHaveBeenCalledTimes(195);
@@ -978,6 +1000,24 @@ describe('WorldLab', () => {
       vi.useRealTimers();
     }
   }, 15_000);
+
+  it('keeps run targets absolute and makes current or past targets unavailable', async () => {
+    const at50 = simulationSnapshotSchema.parse({
+      ...initial,
+      turnNumber: 50,
+      experiment: { ...initial.experiment, totalCompletedTurns: 50 },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(at50)),
+    );
+    render(<WorldLab />);
+    const selector = await screen.findByLabelText('Run target');
+    expect(screen.getByRole('option', { name: '25' })).toBeDisabled();
+    expect(screen.getByRole('option', { name: '50' })).toBeDisabled();
+    expect(screen.getByRole('option', { name: '100' })).toBeEnabled();
+    expect(selector).toHaveValue('200');
+  });
 
   it('derives allied marker and existing-territory colors while retaining individual ownership labels', async () => {
     const progressed = afterInfection();
@@ -1438,7 +1478,11 @@ describe('WorldLab', () => {
     await user.click(
       await screen.findByRole('button', { name: 'Select agent Rook' }),
     );
-    expect(screen.getByText('Rook', { selector: 'dd' })).toBeInTheDocument();
+    expect(
+      within(screen.getByLabelText('Agent inspector')).getByRole('heading', {
+        name: /Rook/,
+      }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText('Recent territory changes')).toHaveTextContent(
       'Gained',
     );
@@ -1515,13 +1559,20 @@ describe('WorldLab', () => {
     render(<WorldLab />);
     await screen.findByRole('button', { name: 'Select agent Ember' });
     const target = world.hexes[1]!.cell;
-    act(() =>
+    act(() => {
       mapLibreMock.mapClick?.({
         features: [{ properties: { cell: target } }],
-      }),
+      });
+      mapLibreMock.mapBackgroundClick?.();
+    });
+    expect(screen.getByLabelText('Selected hex details')).toHaveTextContent(
+      target,
     );
-    expect(screen.getByText(target)).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /Ember/ })).toBeInTheDocument();
+    act(() => mapLibreMock.mapBackgroundClick?.());
+    expect(
+      screen.queryByLabelText('Selected hex details'),
+    ).not.toBeInTheDocument();
   });
 
   it('renders missing configuration without enabling cost-incurring controls', async () => {
@@ -1667,8 +1718,11 @@ describe('WorldLab', () => {
     expect(
       screen.queryByRole('dialog', { name: 'Model selection' }),
     ).toBeNull();
-    expect(screen.getByText('Model: Beta Free')).toHaveFocus();
-    await user.click(screen.getByText('Model: Beta Free'));
+    const agentControllerTrigger = screen.getByRole('button', {
+      name: /Open Agent Controller.*Beta Free/,
+    });
+    expect(agentControllerTrigger).toHaveFocus();
+    await user.click(agentControllerTrigger);
     fireEvent.mouseDown(
       screen.getByRole('dialog', { name: 'Model selection' }),
     );
@@ -2232,12 +2286,12 @@ describe('WorldLab', () => {
     );
   });
 
-  it('preselects one agent, supports multi-select and previews server-owned export', async () => {
+  it('supports agent selection and previews server-owned export', async () => {
     const user = userEvent.setup();
     render(<WorldLab />);
-    await user.click(
-      await screen.findByRole('button', { name: 'Export this agent' }),
-    );
+    await user.click(await screen.findByRole('button', { name: 'Export' }));
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    await user.click(screen.getByRole('checkbox', { name: /Ember/ }));
     expect(screen.getByRole('checkbox', { name: /Ember/ })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: /Rook/ })).not.toBeChecked();
     await user.click(screen.getByRole('checkbox', { name: /Rook/ }));
@@ -2405,23 +2459,36 @@ describe('WorldLab', () => {
       .spyOn(HTMLAnchorElement.prototype, 'click')
       .mockImplementation(() => undefined);
     render(<WorldLab />);
-    await user.click(
-      await screen.findByRole('button', { name: 'Export this agent' }),
-    );
+    await user.click(await screen.findByRole('button', { name: 'Export' }));
+    expect(screen.getByRole('button', { name: 'Copy JSON' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Download JSON' }),
+    ).toBeDisabled();
     const document = minimalExportDocument(progressed);
     vi.mocked(fetch).mockImplementationOnce(() => jsonResponse({ document }));
-    await user.click(screen.getByRole('button', { name: 'Generate' }));
-    await user.click(await screen.findByRole('button', { name: 'Copy' }));
+    await user.click(screen.getByRole('button', { name: 'Generate export' }));
+    await user.click(await screen.findByRole('button', { name: 'Copy JSON' }));
     expect(clipboardWrite).toHaveBeenCalledWith(
       JSON.stringify(experimentExportDocumentSchema.parse(document)),
     );
     clipboardWrite.mockRejectedValueOnce(new Error('denied'));
-    await user.click(screen.getByRole('button', { name: 'Copy' }));
+    await user.click(screen.getByRole('button', { name: 'Copy JSON' }));
     expect(await screen.findByText(/Copy failed/)).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Download' }));
+    await user.click(screen.getByRole('button', { name: 'Download JSON' }));
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:experiment');
     expect(click).toHaveBeenCalledTimes(1);
+    await user.selectOptions(
+      screen.getByLabelText('JSON serialization'),
+      'pretty',
+    );
+    expect(screen.getByRole('button', { name: 'Copy JSON' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Download JSON' }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText('Options changed — regenerate export.'),
+    ).toBeInTheDocument();
     click.mockRestore();
   });
 

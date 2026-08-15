@@ -51,6 +51,8 @@ Seventh focused slice: polish the production World Lab with newest-first bounded
 
 Eighth focused slice: add versioned objective/personality/strategy prompt layers, reproducible seeded behavior assignment, engine-derived diplomacy affordances, specific safe validation detail codes, a cohesive Agent Controller, and behavior-attributed safe telemetry. Behavior locks after the experiment begins; arbitrary prompts and mid-experiment reassignment remain deferred.
 
+Ninth focused slice: consolidate World Lab controls into one responsive command navbar, add browser-session absolute run targets through turn 1,000, make export generation explicitly artifact-based, unify model-option presentation, synchronize effective alliance colors across activity surfaces, and adopt a tokenless dark basemap plus semantic dark chrome. Simulation rules, model decisions, retry behavior, telemetry meaning, and export contents remain unchanged.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.

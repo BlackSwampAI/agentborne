@@ -14,6 +14,10 @@ The Game API also owns one process-local experiment record. Each completed safe 
 
 `apps/world-lab` is a Next.js App Router developer/admin surface. It fetches runtime-validated simulation snapshots through a local rewrite, controls one turn at a time, and updates MapLibre's existing H3 GeoJSON source without recreating the map. Agent markers are fully visible and use deterministic offsets when sharing cells.
 
+Its command navbar is the single persistent application-control row. Browser-session run-target selection remains client orchestration and preserves absolute turn semantics; execution and reconciliation still consume authoritative API snapshots. Global and per-agent selectors share one deduplicating, case-insensitive model-option builder. Current alliance membership is the first UI color authority for map, roster, chat, and log accents, followed by retained effective color, base agent color, and a neutral fallback.
+
+The default basemap is tokenless CARTO Dark Matter with OpenStreetMap and CARTO attribution. Deterministic tests inspect its configuration and mocked MapLibre H3 sources without requesting external tiles.
+
 `apps/game-api` is a Hono service bound conservatively to loopback. Its single in-memory `SimulationService` owns the development session, monotonic completed-turn count, turn cursor, bounded histories, and overlap lock. It exposes:
 
 - `GET /api/simulation` — current authoritative snapshot
