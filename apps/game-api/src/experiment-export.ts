@@ -57,12 +57,24 @@ export class ExperimentMetricAccumulator {
     addToMutable(this.#records.get('aggregate')!, turn, true);
     const agent = this.#records.get(turn.agentId);
     if (agent) addToMutable(agent, turn);
-    if (turn.outcome === 'accepted' && turn.event.type === 'agent-messaged') {
-      const recipient = this.#records.get(turn.event.recipientId);
-      if (recipient) recipient.receivedCommunications += 1;
+    if (
+      turn.outcome !== 'provider-error' &&
+      turn.communicationResult.requested &&
+      turn.communicationResult.accepted &&
+      turn.communicationResult.event.channel === 'direct'
+    ) {
+      const recipient = this.#records.get(
+        turn.communicationResult.event.recipientId,
+      );
+      if (recipient) recipient.directMessagesReceived += 1;
     }
-    if (turn.outcome === 'accepted' && turn.event.type === 'hex-captured') {
-      const displaced = this.#records.get(turn.event.previousControllerAgentId);
+    if (
+      turn.outcome === 'accepted' &&
+      turn.worldActionResult.event.type === 'hex-captured'
+    ) {
+      const displaced = this.#records.get(
+        turn.worldActionResult.event.previousControllerAgentId,
+      );
       if (displaced) displaced.territoryLostThroughCapture += 1;
     }
   }
@@ -97,17 +109,24 @@ interface MutableMetrics {
   requestedMoves: number;
   requestedInfections: number;
   requestedCaptures: number;
-  requestedMessages: number;
   requestedWaits: number;
   acceptedMovements: number;
   infections: number;
   successfulCaptures: number;
+  acceptedWaits: number;
+  rejectedWorldActions: number;
   territoryGainedThroughInfection: number;
   territoryGainedThroughCapture: number;
   territoryLostThroughCapture: number;
-  deliveredMessages: number;
-  sentCommunications: number;
-  receivedCommunications: number;
+  publicMessagesRequested: number;
+  publicMessagesAccepted: number;
+  publicMessagesRejected: number;
+  directMessagesRequested: number;
+  directMessagesDelivered: number;
+  directMessagesRejected: number;
+  publicMessagesSent: number;
+  directMessagesSent: number;
+  directMessagesReceived: number;
   latencyTotal: number;
   latencyCount: number;
   tokens: Record<(typeof metricTokenFields)[number], number>;
@@ -126,17 +145,24 @@ function mutableMetrics(): MutableMetrics {
     requestedMoves: 0,
     requestedInfections: 0,
     requestedCaptures: 0,
-    requestedMessages: 0,
     requestedWaits: 0,
     acceptedMovements: 0,
     infections: 0,
     successfulCaptures: 0,
+    acceptedWaits: 0,
+    rejectedWorldActions: 0,
     territoryGainedThroughInfection: 0,
     territoryGainedThroughCapture: 0,
     territoryLostThroughCapture: 0,
-    deliveredMessages: 0,
-    sentCommunications: 0,
-    receivedCommunications: 0,
+    publicMessagesRequested: 0,
+    publicMessagesAccepted: 0,
+    publicMessagesRejected: 0,
+    directMessagesRequested: 0,
+    directMessagesDelivered: 0,
+    directMessagesRejected: 0,
+    publicMessagesSent: 0,
+    directMessagesSent: 0,
+    directMessagesReceived: 0,
     latencyTotal: 0,
     latencyCount: 0,
     tokens: Object.fromEntries(
@@ -162,31 +188,58 @@ function addToMutable(
   ] += 1;
   metrics.visited.add(turn.observation.currentCell.cell);
   if (turn.outcome !== 'provider-error') {
-    if (turn.requestedAction.type === 'move') metrics.requestedMoves += 1;
-    if (turn.requestedAction.type === 'infect')
-      metrics.requestedInfections += 1;
-    if (turn.requestedAction.type === 'capture') metrics.requestedCaptures += 1;
-    if (turn.requestedAction.type === 'message') metrics.requestedMessages += 1;
-    if (turn.requestedAction.type === 'wait') metrics.requestedWaits += 1;
+    if (turn.worldAction.type === 'move') metrics.requestedMoves += 1;
+    if (turn.worldAction.type === 'infect') metrics.requestedInfections += 1;
+    if (turn.worldAction.type === 'capture') metrics.requestedCaptures += 1;
+    if (turn.worldAction.type === 'wait') metrics.requestedWaits += 1;
+    if (turn.outcome === 'rejected') metrics.rejectedWorldActions += 1;
+    if (turn.communicationResult.requested) {
+      const channel = turn.communicationResult.accepted
+        ? turn.communicationResult.event.channel
+        : turn.communicationResult.attempt.channel;
+      if (channel === 'public') metrics.publicMessagesRequested += 1;
+      else metrics.directMessagesRequested += 1;
+      if (turn.communicationResult.accepted) {
+        if (turn.communicationResult.event.channel === 'public') {
+          metrics.publicMessagesAccepted += 1;
+          metrics.publicMessagesSent += 1;
+        } else {
+          metrics.directMessagesDelivered += 1;
+          metrics.directMessagesSent += 1;
+          if (aggregate) metrics.directMessagesReceived += 1;
+        }
+      } else if (turn.communicationResult.attempt.channel === 'public') {
+        metrics.publicMessagesRejected += 1;
+      } else metrics.directMessagesRejected += 1;
+    }
   }
-  if (turn.outcome === 'accepted' && turn.event.type === 'agent-moved') {
+  if (
+    turn.outcome === 'accepted' &&
+    turn.worldActionResult.event.type === 'agent-moved'
+  ) {
     metrics.acceptedMovements += 1;
-    metrics.visited.add(turn.event.toCell);
+    metrics.visited.add(turn.worldActionResult.event.toCell);
   }
-  if (turn.outcome === 'accepted' && turn.event.type === 'hex-infected') {
+  if (
+    turn.outcome === 'accepted' &&
+    turn.worldActionResult.event.type === 'hex-infected'
+  ) {
     metrics.infections += 1;
     metrics.territoryGainedThroughInfection += 1;
   }
-  if (turn.outcome === 'accepted' && turn.event.type === 'hex-captured') {
+  if (
+    turn.outcome === 'accepted' &&
+    turn.worldActionResult.event.type === 'hex-captured'
+  ) {
     metrics.successfulCaptures += 1;
     metrics.territoryGainedThroughCapture += 1;
     if (aggregate) metrics.territoryLostThroughCapture += 1;
   }
-  if (turn.outcome === 'accepted' && turn.event.type === 'agent-messaged') {
-    metrics.deliveredMessages += 1;
-    metrics.sentCommunications += 1;
-    if (aggregate) metrics.receivedCommunications += 1;
-  }
+  if (
+    turn.outcome === 'accepted' &&
+    turn.worldActionResult.event.type === 'agent-waited'
+  )
+    metrics.acceptedWaits += 1;
   if (turn.provider) {
     metrics.latencyTotal += turn.provider.latencyMs;
     metrics.latencyCount += 1;
@@ -219,17 +272,24 @@ function finalizeMutable(metrics: MutableMetrics) {
     requestedMoves: metrics.requestedMoves,
     requestedInfections: metrics.requestedInfections,
     requestedCaptures: metrics.requestedCaptures,
-    requestedMessages: metrics.requestedMessages,
     requestedWaits: metrics.requestedWaits,
     acceptedMovements: metrics.acceptedMovements,
     successfullyInfectedCells: metrics.infections,
     successfulCaptures: metrics.successfulCaptures,
+    acceptedWaits: metrics.acceptedWaits,
+    rejectedWorldActions: metrics.rejectedWorldActions,
     territoryGainedThroughInfection: metrics.territoryGainedThroughInfection,
     territoryGainedThroughCapture: metrics.territoryGainedThroughCapture,
     territoryLostThroughCapture: metrics.territoryLostThroughCapture,
-    deliveredMessages: metrics.deliveredMessages,
-    sentCommunications: metrics.sentCommunications,
-    receivedCommunications: metrics.receivedCommunications,
+    publicMessagesRequested: metrics.publicMessagesRequested,
+    publicMessagesAccepted: metrics.publicMessagesAccepted,
+    publicMessagesRejected: metrics.publicMessagesRejected,
+    directMessagesRequested: metrics.directMessagesRequested,
+    directMessagesDelivered: metrics.directMessagesDelivered,
+    directMessagesRejected: metrics.directMessagesRejected,
+    publicMessagesSent: metrics.publicMessagesSent,
+    directMessagesSent: metrics.directMessagesSent,
+    directMessagesReceived: metrics.directMessagesReceived,
     uniqueVisitedCells: metrics.visited.size,
     ...(metrics.latencyCount > 0
       ? { averageLatencyMs: metrics.latencyTotal / metrics.latencyCount }
@@ -291,7 +351,7 @@ export function createExperimentExport(
           },
     );
   const document: ExperimentExportDocument = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedAt,
     experiment: {
       id: source.id,
@@ -305,7 +365,7 @@ export function createExperimentExport(
     filters: structuredClone(request),
     selection: {
       selectedAgentIds,
-      matchingRecordCount: filtered.length,
+      matchingTurnCount: filtered.length,
       matchingCommunicationCount: communications.length,
       matchingControlChangeCount: controlChanges.length,
       firstMatchingTurn: filtered[0]?.turnNumber,
@@ -344,11 +404,10 @@ export function createExperimentExport(
           worldEvents: filtered.flatMap((turn) => {
             if (
               turn.outcome !== 'accepted' ||
-              turn.event.type === 'agent-messaged' ||
-              turn.event.type === 'hex-captured'
+              turn.worldActionResult.event.type === 'hex-captured'
             )
               return [];
-            return [structuredClone(turn.event)];
+            return [structuredClone(turn.worldActionResult.event)];
           }),
         }
       : {}),
@@ -416,7 +475,7 @@ export function createExperimentPreview(
   );
   return experimentExportPreviewSchema.parse({
     experimentId: source.id,
-    matchingRecordCount: document.selection.matchingRecordCount,
+    matchingTurnCount: document.selection.matchingTurnCount,
     matchingCommunicationCount: document.selection.matchingCommunicationCount,
     matchingControlChangeCount: document.selection.matchingControlChangeCount,
     selectedAgentCount: document.selection.selectedAgentIds.length,
@@ -459,7 +518,7 @@ function filterTurns(
       selected.has(turn.agentId) &&
       request.outcomes.includes(turn.outcome) &&
       (turn.outcome === 'provider-error' ||
-        request.actions.includes(turn.requestedAction.type)),
+        request.actions.includes(turn.worldAction.type)),
   );
   if (request.turns.mode === 'range') {
     const range = request.turns;
@@ -478,20 +537,43 @@ function filterCommunications(
   request: ExperimentExportRequest,
   selected: Set<AgentId>,
 ): ExportedCommunication[] {
-  if (
-    !request.outcomes.includes('accepted') ||
-    !request.actions.includes('message')
-  )
-    return [];
   let communications = source.turns.flatMap((turn) => {
     if (
-      turn.outcome !== 'accepted' ||
-      turn.event.type !== 'agent-messaged' ||
-      (!selected.has(turn.agentId) && !selected.has(turn.event.recipientId))
+      turn.outcome === 'provider-error' ||
+      !turn.communicationResult.requested
     )
       return [];
+    const result = turn.communicationResult;
+    const communication = result.accepted ? result.event : result.attempt;
+    const selectedByParticipant =
+      communication.channel === 'public'
+        ? selected.has(communication.agentId)
+        : selected.has(communication.agentId) ||
+          (communication.recipientId !== null &&
+            selected.has(communication.recipientId));
+    const selectedByChannel =
+      request.communications.channel === 'all' ||
+      request.communications.channel === communication.channel;
+    const status = result.accepted
+      ? ('accepted' as const)
+      : ('rejected' as const);
+    const selectedByStatus =
+      request.communications.status === 'all' ||
+      request.communications.status === status;
+    if (!selectedByParticipant || !selectedByChannel || !selectedByStatus)
+      return [];
     return [
-      { ...structuredClone(turn.event), originatingTurn: turn.turnNumber },
+      {
+        ...structuredClone(communication),
+        originatingTurn: turn.turnNumber,
+        status,
+        ...(!result.accepted
+          ? {
+              rejectionReason: result.reason,
+              rejectionDetails: result.details,
+            }
+          : {}),
+      },
     ];
   });
   if (request.turns.mode === 'range') {
@@ -501,7 +583,12 @@ function filterCommunications(
         originatingTurn >= range.fromTurn && originatingTurn <= range.toTurn,
     );
   } else if (request.turns.mode === 'latest') {
-    communications = communications.slice(-request.turns.count);
+    const firstIncludedTurn = source.turns.at(-request.turns.count)?.turnNumber;
+    communications = firstIncludedTurn
+      ? communications.filter(
+          ({ originatingTurn }) => originatingTurn >= firstIncludedTurn,
+        )
+      : communications;
   }
   return communications;
 }
@@ -519,13 +606,16 @@ function filterControlChanges(
   let controlChanges = source.turns.flatMap((turn) => {
     if (
       turn.outcome !== 'accepted' ||
-      turn.event.type !== 'hex-captured' ||
-      (!selected.has(turn.event.controllerAgentId) &&
-        !selected.has(turn.event.previousControllerAgentId))
+      turn.worldActionResult.event.type !== 'hex-captured' ||
+      (!selected.has(turn.worldActionResult.event.controllerAgentId) &&
+        !selected.has(turn.worldActionResult.event.previousControllerAgentId))
     )
       return [];
     return [
-      { ...structuredClone(turn.event), originatingTurn: turn.turnNumber },
+      {
+        ...structuredClone(turn.worldActionResult.event),
+        originatingTurn: turn.turnNumber,
+      },
     ];
   });
   if (request.turns.mode === 'range') {
@@ -638,11 +728,29 @@ function exportTurn(
     ...(turn.outcome === 'provider-error'
       ? { failure: structuredClone(turn.failure) }
       : {
-          requestedAction: structuredClone(turn.requestedAction),
+          worldAction: structuredClone(turn.worldAction),
+          ...(turn.communication
+            ? { communication: structuredClone(turn.communication) }
+            : {}),
           summary: turn.summary,
-          ...(turn.outcome === 'rejected'
-            ? { validationReason: turn.validation.reason }
-            : { eventSummary: summarizeEvent(turn.event) }),
+          worldActionSummary: turn.worldActionResult.accepted
+            ? summarizeEvent(turn.worldActionResult.event)
+            : `Rejected: ${turn.worldActionResult.reason}.`,
+          ...(turn.communicationResult.requested
+            ? {
+                communicationSummary: turn.communicationResult.accepted
+                  ? summarizeCommunication(
+                      turn.communicationResult.event.channel,
+                      turn.communicationResult.event.channel === 'direct'
+                        ? turn.communicationResult.event.recipientId
+                        : undefined,
+                      turn.communicationResult.event.channel === 'direct'
+                        ? turn.communicationResult.event.distance
+                        : undefined,
+                    )
+                  : `Rejected: ${turn.communicationResult.reason}.`,
+              }
+            : {}),
         }),
   };
   if (includePersonality) base.personality = turn.observation.personality;
@@ -653,16 +761,21 @@ function exportTurn(
     if (!includePersonality) delete observation.personality;
     if (custom && !custom.nearbyAgents) delete observation.nearbyAgents;
     if (custom && !custom.recentEvents) delete observation.recentEvents;
-    if (custom && !custom.recentCommunications)
-      delete observation.recentCommunications;
+    if (custom && !custom.recentPublicMessages)
+      delete observation.recentPublicMessages;
+    if (custom && !custom.recentDirectMessages)
+      delete observation.recentDirectMessages;
     if (custom && !custom.recentControlChanges)
       delete observation.recentControlChanges;
     base.observation = observation;
   }
-  if (turn.outcome !== 'provider-error' && includeValidation)
-    base.validation = structuredClone(turn.validation);
-  if (turn.outcome === 'accepted' && includeEvent)
-    base.event = structuredClone(turn.event);
+  if (
+    turn.outcome !== 'provider-error' &&
+    (includeValidation || includeEvent)
+  ) {
+    base.worldActionResult = structuredClone(turn.worldActionResult);
+    base.communicationResult = structuredClone(turn.communicationResult);
+  }
   if (includeProvider && turn.provider)
     base.provider = full
       ? structuredClone(turn.provider)
@@ -671,16 +784,27 @@ function exportTurn(
 }
 
 function summarizeEvent(
-  event: Extract<AgentTurnRecord, { outcome: 'accepted' }>['event'],
+  event: Extract<
+    AgentTurnRecord,
+    { outcome: 'accepted' }
+  >['worldActionResult']['event'],
 ): string {
   if (event.type === 'agent-moved')
     return `Moved from ${event.fromCell} to ${event.toCell}.`;
   if (event.type === 'hex-infected') return `Infected ${event.cell}.`;
   if (event.type === 'hex-captured')
     return `Captured ${event.cell} from ${event.previousControllerAgentId}.`;
-  if (event.type === 'agent-messaged')
-    return `Messaged ${event.recipientId} from distance ${event.distance}.`;
   return 'Waited.';
+}
+
+function summarizeCommunication(
+  channel: 'public' | 'direct',
+  recipientId?: AgentId,
+  distance?: number,
+): string {
+  return channel === 'public'
+    ? 'Published to world chat.'
+    : `Delivered directly to ${recipientId} from distance ${distance}.`;
 }
 
 export function calculateExperimentMetrics(
@@ -709,8 +833,11 @@ export function calculateExperimentMetrics(
     const visited = new Set<string>();
     for (const turn of records) {
       visited.add(turn.observation.currentCell.cell);
-      if (turn.outcome === 'accepted' && turn.event.type === 'agent-moved')
-        visited.add(turn.event.toCell);
+      if (
+        turn.outcome === 'accepted' &&
+        turn.worldActionResult.event.type === 'agent-moved'
+      )
+        visited.add(turn.worldActionResult.event.toCell);
     }
     const costs = records.flatMap(({ provider }) =>
       provider?.costCredits === undefined ? [] : [provider.costCredits],
@@ -724,44 +851,49 @@ export function calculateExperimentMetrics(
       ).length,
       requestedMoves: records.filter(
         (turn) =>
-          turn.outcome !== 'provider-error' &&
-          turn.requestedAction.type === 'move',
+          turn.outcome !== 'provider-error' && turn.worldAction.type === 'move',
       ).length,
       requestedInfections: records.filter(
         (turn) =>
           turn.outcome !== 'provider-error' &&
-          turn.requestedAction.type === 'infect',
+          turn.worldAction.type === 'infect',
       ).length,
       requestedCaptures: records.filter(
         (turn) =>
           turn.outcome !== 'provider-error' &&
-          turn.requestedAction.type === 'capture',
-      ).length,
-      requestedMessages: records.filter(
-        (turn) =>
-          turn.outcome !== 'provider-error' &&
-          turn.requestedAction.type === 'message',
+          turn.worldAction.type === 'capture',
       ).length,
       requestedWaits: records.filter(
         (turn) =>
-          turn.outcome !== 'provider-error' &&
-          turn.requestedAction.type === 'wait',
+          turn.outcome !== 'provider-error' && turn.worldAction.type === 'wait',
       ).length,
       acceptedMovements: records.filter(
         (turn) =>
-          turn.outcome === 'accepted' && turn.event.type === 'agent-moved',
+          turn.outcome === 'accepted' &&
+          turn.worldActionResult.event.type === 'agent-moved',
       ).length,
       successfullyInfectedCells: records.filter(
         (turn) =>
-          turn.outcome === 'accepted' && turn.event.type === 'hex-infected',
+          turn.outcome === 'accepted' &&
+          turn.worldActionResult.event.type === 'hex-infected',
       ).length,
       successfulCaptures: records.filter(
         (turn) =>
-          turn.outcome === 'accepted' && turn.event.type === 'hex-captured',
+          turn.outcome === 'accepted' &&
+          turn.worldActionResult.event.type === 'hex-captured',
+      ).length,
+      acceptedWaits: records.filter(
+        (turn) =>
+          turn.outcome === 'accepted' &&
+          turn.worldActionResult.event.type === 'agent-waited',
+      ).length,
+      rejectedWorldActions: records.filter(
+        ({ outcome }) => outcome === 'rejected',
       ).length,
       territoryGainedThroughInfection: records.filter(
         (turn) =>
-          turn.outcome === 'accepted' && turn.event.type === 'hex-infected',
+          turn.outcome === 'accepted' &&
+          turn.worldActionResult.event.type === 'hex-infected',
       ).length,
       territoryGainedThroughCapture: agentId
         ? relevantControlChanges.filter(
@@ -778,25 +910,7 @@ export function calculateExperimentMetrics(
         : relevantControlChanges.filter(({ previousControllerAgentId }) =>
             agentIds.includes(previousControllerAgentId),
           ).length,
-      deliveredMessages: agentId
-        ? relevantCommunications.filter(
-            ({ agentId: senderId }) => senderId === agentId,
-          ).length
-        : relevantCommunications.length,
-      sentCommunications: agentId
-        ? relevantCommunications.filter(
-            ({ agentId: senderId }) => senderId === agentId,
-          ).length
-        : relevantCommunications.filter(({ agentId: senderId }) =>
-            agentIds.includes(senderId),
-          ).length,
-      receivedCommunications: agentId
-        ? relevantCommunications.filter(
-            ({ recipientId }) => recipientId === agentId,
-          ).length
-        : relevantCommunications.filter(({ recipientId }) =>
-            agentIds.includes(recipientId),
-          ).length,
+      ...communicationMetrics(relevantCommunications, agentIds, agentId),
       uniqueVisitedCells: visited.size,
       ...(latencies.length > 0
         ? {
@@ -824,6 +938,57 @@ export function calculateExperimentMetrics(
       ),
     })),
   });
+}
+
+function communicationMetrics(
+  communications: readonly ExportedCommunication[],
+  agentIds: readonly AgentId[],
+  agentId?: AgentId,
+) {
+  const authoredBySelection = ({ agentId: senderId }: ExportedCommunication) =>
+    agentId ? senderId === agentId : agentIds.includes(senderId);
+  const receivedBySelection = (communication: ExportedCommunication) =>
+    communication.channel === 'direct' &&
+    (agentId
+      ? communication.recipientId === agentId
+      : communication.recipientId !== undefined &&
+        communication.recipientId !== null &&
+        agentIds.includes(communication.recipientId));
+  const publicAuthored = communications.filter(
+    (communication) =>
+      communication.channel === 'public' && authoredBySelection(communication),
+  );
+  const directAuthored = communications.filter(
+    (communication) =>
+      communication.channel === 'direct' && authoredBySelection(communication),
+  );
+  return {
+    publicMessagesRequested: publicAuthored.length,
+    publicMessagesAccepted: publicAuthored.filter(
+      ({ status }) => status === 'accepted',
+    ).length,
+    publicMessagesRejected: publicAuthored.filter(
+      ({ status }) => status === 'rejected',
+    ).length,
+    directMessagesRequested: directAuthored.length,
+    directMessagesDelivered: directAuthored.filter(
+      ({ status }) => status === 'accepted',
+    ).length,
+    directMessagesRejected: directAuthored.filter(
+      ({ status }) => status === 'rejected',
+    ).length,
+    publicMessagesSent: publicAuthored.filter(
+      ({ status }) => status === 'accepted',
+    ).length,
+    directMessagesSent: directAuthored.filter(
+      ({ status }) => status === 'accepted',
+    ).length,
+    directMessagesReceived: communications.filter(
+      (communication) =>
+        communication.status === 'accepted' &&
+        receivedBySelection(communication),
+    ).length,
+  };
 }
 
 export function serializeExperimentExport(

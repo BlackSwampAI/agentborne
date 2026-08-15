@@ -586,6 +586,38 @@ dd {
   color: #d8e2df;
   white-space: pre-wrap;
 }
+.communication-history small,
+.world-chat-feed small {
+  color: #82938e;
+}
+.world-chat-feed {
+  list-style: none;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 12px 0 0;
+  padding: 0 4px 0 0;
+}
+.world-chat-feed li {
+  border-bottom: 1px solid #26332f;
+  padding: 8px 0;
+}
+.world-chat-feed li:last-child {
+  border-bottom: 0;
+}
+.world-chat-feed div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.world-chat-feed p {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.component-result {
+  border-left: 2px solid #4e766a;
+  padding-left: 8px;
+}
 .observation-communications li {
   margin-top: 4px;
   overflow-wrap: anywhere;

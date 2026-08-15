@@ -8,11 +8,13 @@ import {
   agentIdSchema,
   agentObservationSchema,
   agentTurnRecordSchema,
+  communicationIntentSchema,
   experimentIdSchema,
   experimentExportDocumentSchema,
   experimentExportPreviewSchema,
   h3CellSchema,
-  RECENT_COMMUNICATION_LIMIT,
+  RECENT_DIRECT_MESSAGE_LIMIT,
+  RECENT_PUBLIC_MESSAGE_LIMIT,
   RECENT_CONTROL_CHANGE_LIMIT,
   PERSONALITY_MAX_LENGTH,
   personalitySchema,
@@ -32,7 +34,8 @@ import {
   type WorldEvent,
 } from '@agentborne/shared';
 import {
-  applyRequestedAction,
+  applyCommunication,
+  applyWorldAction,
   createDevelopmentWorld,
   DEVELOPMENT_AGENT_BLUEPRINTS,
   getCaptureEligibility,
@@ -353,16 +356,41 @@ export class SimulationService {
         return record;
       }
 
-      const applied = applyRequestedAction(
-        this.#state,
+      const preActionState = this.#state;
+      const occurredAt = this.#now();
+      const communicationInput =
+        providerResult.decision.communication ?? undefined;
+      const parsedCommunication =
+        communicationIntentSchema.safeParse(communicationInput);
+      const communication = parsedCommunication.success
+        ? parsedCommunication.data
+        : undefined;
+      const context = {
+        now: () => occurredAt,
+        createEventId: this.#createEventId,
+      };
+      const appliedAction = applyWorldAction(
+        preActionState,
         agent.id,
-        providerResult.decision.requestedAction,
-        { now: this.#now, createEventId: this.#createEventId },
+        providerResult.decision.worldAction,
+        context,
+      );
+      const appliedCommunication = applyCommunication(
+        appliedAction.state,
+        preActionState,
+        agent.id,
+        communicationInput,
+        context,
       );
       let record: AgentTurnRecord;
-      let candidateState = this.#state;
+      const candidateState = {
+        ...appliedCommunication.state,
+        events: appliedCommunication.state.events.slice(
+          -MAX_WORLD_EVENT_HISTORY,
+        ),
+      };
 
-      if (applied.result.accepted) {
+      if (appliedAction.result.accepted) {
         record = agentTurnRecordSchema.parse({
           turnNumber,
           agentId: agent.id,
@@ -370,16 +398,13 @@ export class SimulationService {
           completedAt: this.#now(),
           observation,
           outcome: 'accepted',
-          requestedAction: providerResult.decision.requestedAction,
+          worldAction: providerResult.decision.worldAction,
+          communication,
           summary: providerResult.decision.summary,
-          validation: { accepted: true },
-          event: applied.result.event,
+          worldActionResult: appliedAction.result,
+          communicationResult: appliedCommunication.result,
           provider: providerResult.metadata,
         });
-        candidateState = {
-          ...applied.state,
-          events: applied.state.events.slice(-MAX_WORLD_EVENT_HISTORY),
-        };
       } else {
         record = agentTurnRecordSchema.parse({
           turnNumber,
@@ -388,9 +413,11 @@ export class SimulationService {
           completedAt: this.#now(),
           observation,
           outcome: 'rejected',
-          requestedAction: providerResult.decision.requestedAction,
+          worldAction: providerResult.decision.worldAction,
+          communication,
           summary: providerResult.decision.summary,
-          validation: applied.result,
+          worldActionResult: appliedAction.result,
+          communicationResult: appliedCommunication.result,
           provider: providerResult.metadata,
         });
       }
@@ -479,8 +506,17 @@ export class SimulationService {
       .slice(0, 5);
     const recentEvents = this.#state.events
       .filter(
-        (event): event is Exclude<WorldEvent, { type: 'agent-messaged' }> =>
-          event.type !== 'agent-messaged',
+        (
+          event,
+        ): event is Extract<
+          WorldEvent,
+          {
+            type:
+              'agent-moved' | 'hex-infected' | 'hex-captured' | 'agent-waited';
+          }
+        > =>
+          event.type !== 'public-message-sent' &&
+          event.type !== 'direct-message-sent',
       )
       .slice(-8)
       .map((event) => ({
@@ -489,13 +525,34 @@ export class SimulationService {
         occurredAt: event.occurredAt,
         summary: summarizeEvent(event, this.#state),
       }));
-    const recentCommunications = this.#state.events
+    const recentPublicMessages = this.#state.events
       .filter(
-        (event): event is Extract<WorldEvent, { type: 'agent-messaged' }> =>
-          event.type === 'agent-messaged' &&
+        (
+          event,
+        ): event is Extract<WorldEvent, { type: 'public-message-sent' }> =>
+          event.type === 'public-message-sent',
+      )
+      .slice(-RECENT_PUBLIC_MESSAGE_LIMIT)
+      .map((event) => {
+        const sender = this.#state.agents.get(event.agentId);
+        if (!sender) throw new Error('A public-message sender does not exist.');
+        return {
+          eventId: event.id,
+          senderId: sender.id,
+          senderName: sender.name,
+          message: event.message,
+          occurredAt: event.occurredAt,
+        };
+      });
+    const recentDirectMessages = this.#state.events
+      .filter(
+        (
+          event,
+        ): event is Extract<WorldEvent, { type: 'direct-message-sent' }> =>
+          event.type === 'direct-message-sent' &&
           (event.agentId === agent.id || event.recipientId === agent.id),
       )
-      .slice(-RECENT_COMMUNICATION_LIMIT)
+      .slice(-RECENT_DIRECT_MESSAGE_LIMIT)
       .map((event) => {
         const sender = this.#state.agents.get(event.agentId);
         const recipient = this.#state.agents.get(event.recipientId);
@@ -547,7 +604,8 @@ export class SimulationService {
       adjacentCells,
       nearbyAgents,
       recentEvents,
-      recentCommunications,
+      recentPublicMessages,
+      recentDirectMessages,
       territoryScoreboard: this.#territoryScoreboard(),
       recentControlChanges,
     });
@@ -582,7 +640,12 @@ function safeDistance(from: H3Cell, to: H3Cell): number {
 }
 
 function summarizeEvent(
-  event: Exclude<WorldEvent, { type: 'agent-messaged' }>,
+  event: Extract<
+    WorldEvent,
+    {
+      type: 'agent-moved' | 'hex-infected' | 'hex-captured' | 'agent-waited';
+    }
+  >,
   state: WorldState,
 ): string {
   const name = state.agents.get(event.agentId)?.name ?? 'An agent';

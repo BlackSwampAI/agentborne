@@ -212,17 +212,24 @@ function emptyMetrics() {
     requestedMoves: 0,
     requestedInfections: 0,
     requestedCaptures: 0,
-    requestedMessages: 0,
     requestedWaits: 0,
     acceptedMovements: 0,
     successfullyInfectedCells: 0,
     successfulCaptures: 0,
+    acceptedWaits: 0,
+    rejectedWorldActions: 0,
     territoryGainedThroughInfection: 0,
     territoryGainedThroughCapture: 0,
     territoryLostThroughCapture: 0,
-    deliveredMessages: 0,
-    sentCommunications: 0,
-    receivedCommunications: 0,
+    publicMessagesRequested: 0,
+    publicMessagesAccepted: 0,
+    publicMessagesRejected: 0,
+    directMessagesRequested: 0,
+    directMessagesDelivered: 0,
+    directMessagesRejected: 0,
+    publicMessagesSent: 0,
+    directMessagesSent: 0,
+    directMessagesReceived: 0,
     uniqueVisitedCells: 0,
     tokens: {},
     knownCostCredits: 0,
@@ -268,15 +275,16 @@ function afterInfection(): SimulationSnapshot {
       ],
       nearbyAgents: [],
       recentEvents: [],
-      recentCommunications: [],
+      recentPublicMessages: [],
+      recentDirectMessages: [],
       territoryScoreboard: emptyTerritory,
       recentControlChanges: [],
     },
     outcome: 'accepted' as const,
-    requestedAction: { type: 'infect' as const },
+    worldAction: { type: 'infect' as const },
     summary: 'Infecting this open cell.',
-    validation: { accepted: true as const },
-    event,
+    worldActionResult: { accepted: true as const, event },
+    communicationResult: { requested: false as const },
     provider: {
       provider: 'scripted-test' as const,
       model: 'test',
@@ -357,9 +365,16 @@ function afterMessage(): SimulationSnapshot {
     agentId: sender.id,
     recipientId: recipient.id,
     occurredAt: '2026-08-13T12:00:01.000Z',
-    type: 'agent-messaged' as const,
+    type: 'direct-message-sent' as const,
+    channel: 'direct' as const,
     message,
     distance: 2,
+  };
+  const waitEvent = {
+    id: '77bb21b9-fc78-4b04-9f92-9862bf346f97',
+    agentId: sender.id,
+    occurredAt: '2026-08-13T12:00:01.000Z',
+    type: 'agent-waited' as const,
   };
   const turn = {
     turnNumber: 1,
@@ -395,19 +410,25 @@ function afterMessage(): SimulationSnapshot {
         },
       ],
       recentEvents: [],
-      recentCommunications: [],
+      recentPublicMessages: [],
+      recentDirectMessages: [],
       territoryScoreboard: emptyTerritory,
       recentControlChanges: [],
     },
     outcome: 'accepted' as const,
-    requestedAction: {
-      type: 'message' as const,
+    worldAction: { type: 'wait' as const },
+    communication: {
+      channel: 'direct' as const,
       recipientId: recipient.id,
       message,
     },
     summary: 'Sending a nearby message.',
-    validation: { accepted: true as const },
-    event,
+    worldActionResult: { accepted: true as const, event: waitEvent },
+    communicationResult: {
+      requested: true as const,
+      accepted: true as const,
+      event,
+    },
     provider: {
       provider: 'scripted-test' as const,
       model: 'test',
@@ -417,7 +438,7 @@ function afterMessage(): SimulationSnapshot {
   };
   return simulationSnapshotSchema.parse({
     ...initial,
-    world: { ...world, events: [event] },
+    world: { ...world, events: [waitEvent, event] },
     turnNumber: 1,
     nextAgentId: recipient.id,
     turns: [turn],
@@ -432,10 +453,12 @@ function afterMessage(): SimulationSnapshot {
           ...emptyMetrics(),
           totalTurns: 1,
           accepted: 1,
-          requestedMessages: 1,
-          deliveredMessages: 1,
-          sentCommunications: 1,
-          receivedCommunications: 1,
+          requestedWaits: 1,
+          acceptedWaits: 1,
+          directMessagesRequested: 1,
+          directMessagesDelivered: 1,
+          directMessagesSent: 1,
+          directMessagesReceived: 1,
           uniqueVisitedCells: 1,
           averageLatencyMs: 0,
         },
@@ -447,18 +470,53 @@ function afterMessage(): SimulationSnapshot {
                   ...emptyMetrics(),
                   totalTurns: 1,
                   accepted: 1,
-                  requestedMessages: 1,
-                  deliveredMessages: 1,
-                  sentCommunications: 1,
+                  requestedWaits: 1,
+                  acceptedWaits: 1,
+                  directMessagesRequested: 1,
+                  directMessagesDelivered: 1,
+                  directMessagesSent: 1,
                   uniqueVisitedCells: 1,
                   averageLatencyMs: 0,
                 }
               : index === 1
-                ? { ...emptyMetrics(), receivedCommunications: 1 }
+                ? { ...emptyMetrics(), directMessagesReceived: 1 }
                 : entry.metrics,
         })),
       },
     },
+  });
+}
+
+function afterPublicMessage(): SimulationSnapshot {
+  const direct = afterMessage();
+  const turn = direct.turns[0]!;
+  if (turn.outcome !== 'accepted' || !turn.worldActionResult.accepted)
+    throw new Error('Expected accepted fixture turn.');
+  const event = {
+    id: '88cc21b9-fc78-4b04-9f92-9862bf346f98',
+    agentId: turn.agentId,
+    occurredAt: turn.completedAt,
+    type: 'public-message-sent' as const,
+    channel: 'public' as const,
+    message: HOSTILE_MESSAGE,
+  };
+  return simulationSnapshotSchema.parse({
+    ...direct,
+    world: {
+      ...direct.world,
+      events: [turn.worldActionResult.event, event],
+    },
+    turns: [
+      {
+        ...turn,
+        communication: { channel: 'public', message: HOSTILE_MESSAGE },
+        communicationResult: {
+          requested: true,
+          accepted: true,
+          event,
+        },
+      },
+    ],
   });
 }
 
@@ -509,7 +567,8 @@ function afterCapture(): SimulationSnapshot {
         },
       ],
       recentEvents: [],
-      recentCommunications: [],
+      recentPublicMessages: [],
+      recentDirectMessages: [],
       territoryScoreboard: emptyTerritory.map((entry, index) => ({
         ...entry,
         controlledCellCount: index === 0 ? 1 : 0,
@@ -517,10 +576,10 @@ function afterCapture(): SimulationSnapshot {
       recentControlChanges: [],
     },
     outcome: 'accepted' as const,
-    requestedAction: { type: 'capture' as const },
+    worldAction: { type: 'capture' as const },
     summary: 'Capturing this contested hex.',
-    validation: { accepted: true as const },
-    event: captureEvent,
+    worldActionResult: { accepted: true as const, event: captureEvent },
+    communicationResult: { requested: false as const },
     provider: {
       provider: 'scripted-test' as const,
       model: 'test',
@@ -768,7 +827,7 @@ describe('WorldLab', () => {
     expect(screen.getByText(world.agents[1]!.personality)).toBeInTheDocument();
     expect(screen.getByText(world.agents[1]!.id)).toBeInTheDocument();
     expect(
-      screen.getByText('No communications for this agent yet.'),
+      screen.getByText('No direct messages for this agent yet.'),
     ).toBeInTheDocument();
   });
 
@@ -789,18 +848,31 @@ describe('WorldLab', () => {
       await screen.findByRole('button', { name: 'Single turn' }),
     );
     expect(
-      await screen.findByText(/Message · Ember → Rook/),
+      await screen.findByText(/Waited.*direct message accepted/),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText('Recent communications')).toHaveTextContent(
-      'Outbound Ember → Rook',
+    expect(screen.getByLabelText('Direct-message history')).toHaveTextContent(
+      'Sent Rook',
     );
     expect(screen.getAllByText(HOSTILE_MESSAGE).length).toBeGreaterThan(0);
     expect(document.querySelector('img[src="x"]')).toBeNull();
 
     await user.click(screen.getByRole('button', { name: 'Select agent Rook' }));
-    expect(screen.getByLabelText('Recent communications')).toHaveTextContent(
-      'Inbound Ember → Rook',
+    expect(screen.getByLabelText('Direct-message history')).toHaveTextContent(
+      'Received Ember',
     );
+  });
+
+  it('renders bounded public world chat with sender, turn, time, and plain text', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(afterPublicMessage())),
+    );
+    render(<WorldLab />);
+    const feed = await screen.findByLabelText('Public world chat');
+    expect(feed).toHaveTextContent('Ember');
+    expect(feed).toHaveTextContent('Turn 1');
+    expect(feed).toHaveTextContent(HOSTILE_MESSAGE);
+    expect(document.querySelector('img[src="x"]')).toBeNull();
   });
 
   it('clears visible communications after reset', async () => {
@@ -815,11 +887,11 @@ describe('WorldLab', () => {
     const user = userEvent.setup();
     render(<WorldLab />);
     expect(
-      await screen.findByLabelText('Recent communications'),
-    ).toHaveTextContent('Outbound Ember → Rook');
+      await screen.findByLabelText('Direct-message history'),
+    ).toHaveTextContent('Sent Rook');
     await user.click(screen.getByRole('button', { name: 'Reset world' }));
     expect(
-      await screen.findByText('No communications for this agent yet.'),
+      await screen.findByText('No direct messages for this agent yet.'),
     ).toBeInTheDocument();
     expect(screen.queryByText(HOSTILE_MESSAGE)).not.toBeInTheDocument();
   });
@@ -1265,7 +1337,7 @@ describe('WorldLab', () => {
     vi.mocked(fetch).mockImplementationOnce(() =>
       jsonResponse({
         experimentId: initial.experiment.id,
-        matchingRecordCount: 0,
+        matchingTurnCount: 0,
         matchingCommunicationCount: 0,
         matchingControlChangeCount: 0,
         selectedAgentCount: 2,
@@ -1316,7 +1388,22 @@ describe('WorldLab', () => {
     expect(level).toHaveTextContent('Full safe');
     expect(level).toHaveTextContent('Custom');
     expect(screen.getByLabelText('JSON serialization')).toHaveValue('compact');
-    expect(screen.getByRole('checkbox', { name: 'message' })).toBeChecked();
+    expect(screen.getByLabelText('Communication channel')).toHaveValue('all');
+    expect(screen.getByLabelText('Communication result')).toHaveValue('all');
+    await user.selectOptions(
+      screen.getByLabelText('Communication channel'),
+      'direct',
+    );
+    await user.selectOptions(
+      screen.getByLabelText('Communication result'),
+      'rejected',
+    );
+    expect(screen.getByLabelText('Communication channel')).toHaveValue(
+      'direct',
+    );
+    expect(screen.getByLabelText('Communication result')).toHaveValue(
+      'rejected',
+    );
     await user.selectOptions(
       screen.getByLabelText('JSON serialization'),
       'pretty',
@@ -1335,7 +1422,12 @@ describe('WorldLab', () => {
     ).toBeDisabled();
     expect(
       screen.getByRole('checkbox', {
-        name: 'Recent communications in observations',
+        name: 'Recent public messages in observations',
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole('checkbox', {
+        name: 'Recent direct messages in observations',
       }),
     ).toBeDisabled();
     expect(
@@ -1429,7 +1521,7 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
   const turn = snapshot.turns[0]!;
   const agent = snapshot.world.agents[0]!;
   return {
-    schemaVersion: 3 as const,
+    schemaVersion: 4 as const,
     generatedAt: '2026-08-13T12:00:02.000Z',
     experiment: {
       id: snapshot.experiment.id,
@@ -1450,12 +1542,13 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
       agents: { mode: 'selected' as const, agentIds: [agent.id] },
       turns: { mode: 'entire-retained' as const },
       outcomes: ['accepted', 'rejected', 'provider-error'] as const,
-      actions: ['move', 'infect', 'capture', 'message', 'wait'] as const,
+      actions: ['move', 'infect', 'capture', 'wait'] as const,
+      communications: { channel: 'all' as const, status: 'all' as const },
       level: 'minimal' as const,
     },
     selection: {
       selectedAgentIds: [agent.id],
-      matchingRecordCount: 1,
+      matchingTurnCount: 1,
       matchingCommunicationCount: 0,
       matchingControlChangeCount: 0,
       firstMatchingTurn: 1,
@@ -1478,9 +1571,9 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
         outcome: turn.outcome,
         ...(turn.outcome === 'accepted'
           ? {
-              requestedAction: turn.requestedAction,
+              worldAction: turn.worldAction,
               summary: turn.summary,
-              eventSummary: `Infected ${agent.currentCell}.`,
+              worldActionSummary: `Infected ${agent.currentCell}.`,
               provider: turn.provider,
             }
           : {}),

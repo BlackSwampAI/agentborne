@@ -2,7 +2,8 @@ import { gridDisk, gridDistance, latLngToCell } from 'h3-js';
 import { describe, expect, it } from 'vitest';
 import { agentIdSchema, h3CellSchema, type Agent } from '@agentborne/shared';
 import {
-  applyRequestedAction,
+  applyCommunication,
+  applyWorldAction,
   areAdjacent,
   createDevelopmentWorld,
   getCaptureEligibility,
@@ -67,7 +68,7 @@ describe('H3 movement', () => {
     expect(areAdjacent(center, adjacent)).toBe(true));
 
   it('moves to an adjacent world cell and emits an event', () => {
-    const result = applyRequestedAction(
+    const result = applyWorldAction(
       stateWithAgent(),
       agentId,
       { type: 'move', targetCell: adjacent },
@@ -82,7 +83,7 @@ describe('H3 movement', () => {
 
   it('rejects non-adjacent movement without changing state', () => {
     const before = stateWithAgent();
-    const result = applyRequestedAction(
+    const result = applyWorldAction(
       before,
       agentId,
       { type: 'move', targetCell: distant },
@@ -107,7 +108,7 @@ describe('infection', () => {
       ...before,
       agents: new Map([[agentId, { ...agent, currentCell: openCell }]]),
     };
-    const result = applyRequestedAction(
+    const result = applyWorldAction(
       positioned,
       agentId,
       { type: 'infect' },
@@ -127,13 +128,13 @@ describe('infection', () => {
   });
 
   it('rejects repeated infection', () => {
-    const infected = applyRequestedAction(
+    const infected = applyWorldAction(
       stateWithAgent(),
       agentId,
       { type: 'infect' },
       context,
     );
-    const result = applyRequestedAction(
+    const result = applyWorldAction(
       infected.state,
       agentId,
       { type: 'infect' },
@@ -147,13 +148,13 @@ describe('infection', () => {
 
   it('persists infection after the agent moves away', () => {
     const before = stateWithAgent();
-    const infected = applyRequestedAction(
+    const infected = applyWorldAction(
       before,
       agentId,
       { type: 'infect' },
       context,
     );
-    const moved = applyRequestedAction(
+    const moved = applyWorldAction(
       infected.state,
       agentId,
       { type: 'move', targetCell: adjacent },
@@ -214,7 +215,7 @@ describe('capture', () => {
     const infectedBefore = [...before.hexes.values()].filter(
       ({ state }) => state === 'infected',
     ).length;
-    const result = applyRequestedAction(
+    const result = applyWorldAction(
       before,
       agentId,
       { type: 'capture' },
@@ -244,7 +245,7 @@ describe('capture', () => {
 
   it('does not require the previous controller to remain present', () => {
     const before = contestedState(false);
-    const result = applyRequestedAction(
+    const result = applyWorldAction(
       before,
       agentId,
       { type: 'capture' },
@@ -255,7 +256,7 @@ describe('capture', () => {
 
   it('rejects capture while the current controller is physically present', () => {
     const before = contestedState();
-    const result = applyRequestedAction(
+    const result = applyWorldAction(
       before,
       agentId,
       { type: 'capture' },
@@ -277,7 +278,7 @@ describe('capture', () => {
       name: 'Mingle',
       currentCell: center,
     });
-    const result = applyRequestedAction(
+    const result = applyWorldAction(
       { ...before, agents },
       agentId,
       { type: 'capture' },
@@ -288,19 +289,19 @@ describe('capture', () => {
 
   it('prevents immediate same-cell recapture while the new controller remains', () => {
     const abandoned = contestedState(false);
-    const captured = applyRequestedAction(
+    const captured = applyWorldAction(
       abandoned,
       agentId,
       { type: 'capture' },
       context,
     );
-    const returned = applyRequestedAction(
+    const returned = applyWorldAction(
       captured.state,
       recipientId,
       { type: 'move', targetCell: center },
       context,
     );
-    const recapture = applyRequestedAction(
+    const recapture = applyWorldAction(
       returned.state,
       recipientId,
       { type: 'capture' },
@@ -329,7 +330,7 @@ describe('capture', () => {
       'already-controller',
     ],
   ] as const)('rejects invalid capture without mutation', (before, reason) => {
-    const result = applyRequestedAction(
+    const result = applyWorldAction(
       before,
       agentId,
       { type: 'capture' },
@@ -345,11 +346,12 @@ describe('nearby messaging', () => {
     'delivers at inclusive grid distance %s without moving or infecting',
     (distance) => {
       const before = stateWithRecipientAt(distance);
-      const result = applyRequestedAction(
+      const result = applyCommunication(
+        before,
         before,
         agentId,
         {
-          type: 'message',
+          channel: 'direct',
           recipientId,
           message: '  Hold this position.  ',
         },
@@ -358,7 +360,7 @@ describe('nearby messaging', () => {
       expect(result.result).toMatchObject({
         accepted: true,
         event: {
-          type: 'agent-messaged',
+          type: 'direct-message-sent',
           agentId,
           recipientId,
           message: 'Hold this position.',
@@ -373,10 +375,11 @@ describe('nearby messaging', () => {
 
   it('rejects distance four without creating or delivering an event', () => {
     const before = stateWithRecipientAt(4);
-    const result = applyRequestedAction(
+    const result = applyCommunication(
+      before,
       before,
       agentId,
-      { type: 'message', recipientId, message: 'Too far.' },
+      { channel: 'direct', recipientId, message: 'Too far.' },
       context,
     );
     expect(result.state).toBe(before);
@@ -392,27 +395,69 @@ describe('nearby messaging', () => {
     ['6b58a30d-5d47-4ea3-8c1c-43edcc919553', 'unknown-recipient'],
   ] as const)('rejects invalid recipient %s as %s', (target, reason) => {
     const before = stateWithRecipientAt(1);
-    const result = applyRequestedAction(
+    const result = applyCommunication(
+      before,
       before,
       agentId,
-      { type: 'message', recipientId: target, message: 'Hello.' },
+      { channel: 'direct', recipientId: target, message: 'Hello.' },
       context,
     );
     expect(result.state).toBe(before);
     expect(result.result).toMatchObject({ accepted: false, reason });
     expect(result.state.events).toHaveLength(0);
   });
+
+  it.each([
+    { channel: 'direct', recipientId: 'Verge', message: 'Hello.' },
+    { channel: 'direct', message: 'Hello.' },
+  ])('preserves a malformed direct attempt as direct', (communication) => {
+    const before = stateWithRecipientAt(1);
+    const result = applyCommunication(
+      before,
+      before,
+      agentId,
+      communication,
+      context,
+    );
+    expect(result.state).toBe(before);
+    expect(result.result).toMatchObject({
+      requested: true,
+      accepted: false,
+      reason: 'invalid-communication',
+      attempt: {
+        channel: 'direct',
+        recipientId: null,
+        message: 'Hello.',
+        distance: null,
+      },
+    });
+  });
+
+  it('publishes trimmed world chat without a recipient or range check', () => {
+    const before = stateWithRecipientAt(4);
+    const result = applyCommunication(
+      before,
+      before,
+      agentId,
+      { channel: 'public', message: '  Hello, world.  ' },
+      context,
+    );
+    expect(result.result).toMatchObject({
+      requested: true,
+      accepted: true,
+      event: {
+        type: 'public-message-sent',
+        channel: 'public',
+        message: 'Hello, world.',
+      },
+    });
+  });
 });
 
 describe('wait and deterministic development world', () => {
   it('records a wait without changing cells or hex states', () => {
     const before = stateWithAgent();
-    const result = applyRequestedAction(
-      before,
-      agentId,
-      { type: 'wait' },
-      context,
-    );
+    const result = applyWorldAction(before, agentId, { type: 'wait' }, context);
     expect(result.result).toMatchObject({
       accepted: true,
       event: { type: 'agent-waited' },

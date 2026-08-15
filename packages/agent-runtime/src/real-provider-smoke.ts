@@ -51,7 +51,8 @@ const observation = agentObservationSchema.parse({
   adjacentCells,
   nearbyAgents: [],
   recentEvents: [],
-  recentCommunications: [],
+  recentPublicMessages: [],
+  recentDirectMessages: [],
   territoryScoreboard: [
     ['128f3f38-6b7d-4db7-9e95-751b4ce2681e', 'Ember', '#ff6b57'],
     ['2507bb46-7ae4-45ca-8dda-644c4f85ca14', 'Rook', '#ffd166'],
