@@ -38,6 +38,8 @@ and approximately 768×900 with deterministic scripted data only.
 
 Behavior coverage verifies registry uniqueness/versioning, deterministic balanced and fully random assignment, independent profile dimensions, turn-one locking, reset semantics, exact diplomacy affordances, layered prompt trust language, bounded structural detail codes, turn attribution, and export preservation. Agent Controller coverage verifies accessible Overview/Models/Behavior tabs, default readiness, manual pre-turn selection, post-start locking, responsive dialog layout, and compact roster summaries.
 
+Schema-v8 reconciliation tests require personality and strategy subtotals to match global logical-turn totals and verify that repaired validation attempts retain both `invalid-action-fields` and their stable structural detail code. The conversational-invitation regression expects contradictory diplomacy fields when a model supplies a chat participant as the recipient while omitting the required formal proposal ID. A well-formed but unavailable proposal UUID remains an engine-authoritative, non-retried rejection.
+
 Attempt-accounting coverage verifies that schema-v7 metrics count every initial,
 automatic-repair, automatic-transport-retry, and manual-retry call exactly once,
 reconcile logical outcomes independently,

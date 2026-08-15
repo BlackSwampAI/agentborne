@@ -4,6 +4,8 @@ import {
   assignBehavior,
   behaviorAssignmentSchema,
   behaviorConfigurationSchema,
+  personalityProfileIdSchema,
+  strategyProfileIdSchema,
 } from './behavior';
 
 export const MODEL_SUMMARY_MAX_LENGTH = 240;
@@ -1189,6 +1191,8 @@ export const providerFailureSchema = z.object({
         'unexpected-formal-proposal-id',
         'invalid-formal-proposal-reference',
         'ineligible-alliance-recipient',
+        'missing-alliance-recipient',
+        'unexpected-alliance-recipient',
       ]),
     )
     .max(8)
@@ -1708,6 +1712,32 @@ export const experimentMetricsSchema = z.object({
   byAgent: z.array(
     z.object({ agentId: agentIdSchema, metrics: metricCountsSchema }),
   ),
+  byPersonality: z
+    .array(
+      z.object({
+        personalityId: personalityProfileIdSchema,
+        metrics: metricCountsSchema,
+      }),
+    )
+    .default([]),
+  byStrategy: z
+    .array(
+      z.object({
+        strategyId: strategyProfileIdSchema,
+        metrics: metricCountsSchema,
+      }),
+    )
+    .default([]),
+  byBehaviorCombination: z
+    .array(
+      z.object({
+        personalityId: personalityProfileIdSchema,
+        strategyId: strategyProfileIdSchema,
+        metrics: metricCountsSchema,
+      }),
+    )
+    .max(36)
+    .default([]),
 });
 export type ExperimentMetrics = z.infer<typeof experimentMetricsSchema>;
 
@@ -1882,6 +1912,7 @@ export const experimentExportTurnSchema = z.object({
   startedAt: z.iso.datetime(),
   completedAt: z.iso.datetime(),
   agentId: agentIdSchema,
+  behavior: behaviorAssignmentSchema.optional(),
   outcome: exportOutcomeSchema,
   worldAction: worldActionSchema.optional(),
   communication: communicationIntentSchema.optional(),

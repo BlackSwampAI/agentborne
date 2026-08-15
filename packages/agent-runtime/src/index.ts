@@ -301,6 +301,20 @@ function validationCodesForFlatDecision(
       'contradictory-diplomacy-fields',
     ];
   if (
+    wire.diplomacyType === 'propose-alliance' &&
+    !wire.diplomacyRecipientId.trim()
+  )
+    return ['invalid-action-fields', 'missing-alliance-recipient'];
+  if (
+    wire.diplomacyType !== 'propose-alliance' &&
+    wire.diplomacyRecipientId.trim()
+  )
+    return [
+      'invalid-action-fields',
+      'unexpected-alliance-recipient',
+      'contradictory-diplomacy-fields',
+    ];
+  if (
     wire.diplomacyType === 'accept-alliance' &&
     !wire.diplomacyProposalId.trim()
   )

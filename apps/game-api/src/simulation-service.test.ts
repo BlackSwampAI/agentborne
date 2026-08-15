@@ -663,6 +663,30 @@ describe('SimulationService', () => {
       actions: ['capture'],
     });
     expect(exported.schemaVersion).toBe(8);
+    const behavior = exported.turns[0]!.behavior!;
+    expect(
+      exported.metrics!.byPersonality.find(
+        ({ personalityId }) => personalityId === behavior.personalityId,
+      )?.metrics.totalTurns,
+    ).toBe(1);
+    expect(
+      exported.metrics!.byStrategy.find(
+        ({ strategyId }) => strategyId === behavior.strategyId,
+      )?.metrics.rejected,
+    ).toBe(1);
+    expect(
+      exported.metrics!.byBehaviorCombination.find(
+        (entry) =>
+          entry.personalityId === behavior.personalityId &&
+          entry.strategyId === behavior.strategyId,
+      )?.metrics.modelCalls,
+    ).toBe(exported.metrics!.aggregate.modelCalls);
+    expect(
+      exported.metrics!.byPersonality.reduce(
+        (sum, entry) => sum + entry.metrics.totalTurns,
+        0,
+      ),
+    ).toBe(exported.metrics!.aggregate.totalTurns);
     expect(exported.turns).toMatchObject([
       {
         outcome: 'rejected',
