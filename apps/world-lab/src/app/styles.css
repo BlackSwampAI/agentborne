@@ -239,6 +239,16 @@ h2 {
   margin: 0;
   flex-wrap: wrap;
 }
+.cancel-request-slot {
+  display: inline-flex;
+  width: 82px;
+}
+.cancel-request-slot.inactive {
+  visibility: hidden;
+}
+.cancel-request-slot button {
+  width: 100%;
+}
 .command-secondary {
   grid-column: 1 / -1;
   display: flex;

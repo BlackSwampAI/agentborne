@@ -74,6 +74,13 @@ export class SimulationConflictError extends Error {
   }
 }
 
+export class SimulationTurnCancelledError extends Error {
+  constructor() {
+    super('The active model request was cancelled without consuming a turn.');
+    this.name = 'SimulationTurnCancelledError';
+  }
+}
+
 export type SimulationValidationCode =
   | 'invalid_agent_id'
   | 'unknown_agent'
@@ -527,7 +534,6 @@ export class SimulationService {
       const result = await this.#provider.decide(
         structuredClone(this.#buildObservation(agent.id)),
         modelId,
-        { modelMetadata: model },
       );
       return result.metadata;
     } finally {
@@ -570,7 +576,6 @@ export class SimulationService {
           providerObservation,
           selectedModel,
           {
-            modelMetadata: this.#availableModels.get(selectedModel),
             signal: this.#activeRequestController.signal,
           },
         );
@@ -583,6 +588,10 @@ export class SimulationService {
           });
       } catch (error) {
         const providerError = asProviderError(error);
+        if (providerError.failure.code === 'cancelled') {
+          this.#status = 'paused';
+          throw new SimulationTurnCancelledError();
+        }
         const record = agentTurnRecordSchema.parse({
           turnNumber,
           agentId: agent.id,

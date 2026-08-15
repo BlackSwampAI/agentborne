@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   PERSONALITY_MAX_LENGTH,
   cancelSimulationResponseSchema,
+  cancelledTurnResponseSchema,
   experimentExportPreviewSchema,
   experimentExportRequestSchema,
   experimentExportResponseSchema,
@@ -266,7 +267,14 @@ export function WorldLab() {
         return;
       }
       if (!response.ok) throw new Error('turn request failed');
-      const payload = singleTurnResponseSchema.parse(await response.json());
+      const body: unknown = await response.json();
+      const cancellation = cancelledTurnResponseSchema.safeParse(body);
+      if (cancellation.success) {
+        applySnapshot(cancellation.data.snapshot);
+        setUiError('The request was cancelled without consuming a turn.');
+        return;
+      }
+      const payload = singleTurnResponseSchema.parse(body);
       applySnapshot(payload.snapshot);
       if (payload.turn.outcome === 'provider-error') {
         setRunning(false);
@@ -616,18 +624,30 @@ export function WorldLab() {
           >
             Run to turn 200
           </button>
-          {(inFlight || snapshot.activeAgentId !== null) && (
+          <span
+            className={`cancel-request-slot${
+              inFlight || snapshot.activeAgentId !== null ? '' : ' inactive'
+            }`}
+          >
             <button
               className="secondary-action"
-              disabled={cancelling || snapshot.cancellationRequested}
+              aria-hidden={!(inFlight || snapshot.activeAgentId !== null)}
+              disabled={
+                cancelling ||
+                snapshot.cancellationRequested ||
+                !(inFlight || snapshot.activeAgentId !== null)
+              }
+              tabIndex={
+                inFlight || snapshot.activeAgentId !== null ? undefined : -1
+              }
               type="button"
               onClick={() => void cancelCurrentRequest()}
             >
               {snapshot.cancellationRequested || cancelling
-                ? 'Cancelling request…'
-                : 'Cancel current request'}
+                ? 'Cancel…'
+                : 'Cancel'}
             </button>
-          )}
+          </span>
         </div>
         {snapshot.providerMode === 'openrouter' ? (
           <ModelConsole
@@ -1199,7 +1219,7 @@ function ModelFacts({ model }: { model: CompatibleModel }) {
       </div>
       <div>
         <dt>Capability</dt>
-        <dd>Catalog compatible: tool decision contract advertised</dd>
+        <dd>Catalog compatible: text and context requirements met</dd>
       </div>
     </dl>
   );

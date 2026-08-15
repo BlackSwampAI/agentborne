@@ -20,6 +20,7 @@ import { DEVELOPMENT_AGENT_BLUEPRINTS } from '@agentborne/world-engine';
 import {
   SimulationConflictError,
   SimulationService,
+  SimulationTurnCancelledError,
   SimulationValidationError,
 } from './simulation-service';
 import { serializeExperimentExport } from './experiment-export';
@@ -34,7 +35,7 @@ const compatibleModels: CompatibleModel[] = [
     contextLength: 16_384,
     inputPricePerToken: '0.000001',
     outputPricePerToken: '0.000002',
-    supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
+    supportedParameters: ['max_tokens'],
     isFree: false,
   },
   {
@@ -44,7 +45,7 @@ const compatibleModels: CompatibleModel[] = [
     contextLength: 32_768,
     inputPricePerToken: '0',
     outputPricePerToken: '0',
-    supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
+    supportedParameters: ['max_tokens'],
     isFree: true,
   },
 ];
@@ -2058,7 +2059,7 @@ describe('SimulationService', () => {
     expect(simulation.getSnapshot().turnNumber).toBe(1);
   });
 
-  it('cancels an active provider request without mutating the world', async () => {
+  it('cancels an active provider request without mutating or consuming a turn', async () => {
     const provider: AgentProvider = {
       mode: 'scripted-test',
       model: 'cancel-test',
@@ -2081,14 +2082,14 @@ describe('SimulationService', () => {
     const before = simulation.getSnapshot().world;
     const pending = simulation.executeNextTurn();
     expect(simulation.cancelCurrentRequest().cancellationRequested).toBe(true);
-    await expect(pending).resolves.toMatchObject({
-      outcome: 'provider-error',
-      failure: { code: 'cancelled' },
-    });
+    await expect(pending).rejects.toBeInstanceOf(SimulationTurnCancelledError);
     expect(simulation.getSnapshot()).toMatchObject({
       activeAgentId: null,
       cancellationRequested: false,
-      status: 'provider-error',
+      status: 'paused',
+      turnNumber: 0,
+      turns: [],
+      experiment: { totalCompletedTurns: 0 },
     });
     expect(simulation.getSnapshot().world).toEqual(before);
   });

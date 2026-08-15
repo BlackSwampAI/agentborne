@@ -4,7 +4,6 @@ import {
   OPENROUTER_MAX_OUTPUT_TOKENS,
   OPENROUTER_PROVIDER_TIMEOUT_MS,
   agentObservationSchema,
-  type CompatibleModel,
 } from '@agentborne/shared';
 import {
   AgentProviderError,
@@ -85,18 +84,10 @@ function response(content: string, status = 200, returnedModel = TEST_MODEL) {
       model: returnedModel,
       choices: [
         {
-          finish_reason: 'tool_calls',
-          native_finish_reason: 'tool_calls',
+          finish_reason: 'stop',
+          native_finish_reason: 'stop',
           message: {
-            tool_calls: [
-              {
-                type: 'function',
-                function: {
-                  name: 'submit_agent_decision',
-                  arguments: toWireArguments(content),
-                },
-              },
-            ],
+            content: toWireArguments(content),
           },
         },
       ],
@@ -106,10 +97,7 @@ function response(content: string, status = 200, returnedModel = TEST_MODEL) {
   );
 }
 
-function toolCallResponse(
-  toolCalls: Array<{ name: string; arguments: string }>,
-  finishReason = 'tool_calls',
-) {
+function textResponse(content: string | null, finishReason = 'stop') {
   return Response.json({
     id: 'request-safe-id',
     model: TEST_MODEL,
@@ -117,12 +105,7 @@ function toolCallResponse(
       {
         finish_reason: finishReason,
         native_finish_reason: finishReason,
-        message: {
-          tool_calls: toolCalls.map((toolCall) => ({
-            type: 'function',
-            function: toolCall,
-          })),
-        },
+        message: { content },
       },
     ],
   });
@@ -178,30 +161,14 @@ function errorResponse({
   });
 }
 
-function visitJsonValues(
-  value: unknown,
-  visitor: (value: Record<string, unknown>) => void,
-) {
-  if (Array.isArray(value)) {
-    value.forEach((item) => visitJsonValues(item, visitor));
-    return;
-  }
-  if (typeof value !== 'object' || value === null) return;
-  const record = value as Record<string, unknown>;
-  visitor(record);
-  Object.values(record).forEach((item) => visitJsonValues(item, visitor));
-}
-
 describe('OpenRouterAgentProvider', () => {
-  it('constructs a forced, flat tool-call request', () => {
+  it('constructs a universal text request for one flat JSON object', () => {
     const request = buildOpenRouterRequest(observation, TEST_MODEL);
     expect(request.model).toBe(TEST_MODEL);
     expect(request).not.toHaveProperty('response_format');
-    expect(request.tool_choice).toEqual({
-      type: 'function',
-      function: { name: 'submit_agent_decision' },
-    });
-    expect(request.provider).toEqual({ require_parameters: true });
+    expect(request).not.toHaveProperty('tools');
+    expect(request).not.toHaveProperty('tool_choice');
+    expect(request).not.toHaveProperty('provider');
     expect(request.stream).toBe(false);
     expect(request.max_tokens).toBe(OPENROUTER_MAX_OUTPUT_TOKENS);
     expect(OPENROUTER_PROVIDER_TIMEOUT_MS).toBe(75_000);
@@ -217,7 +184,7 @@ describe('OpenRouterAgentProvider', () => {
       'captureEligibility.eligible is true',
     );
     expect(request.messages[0]!.content).toContain(
-      'Call submit_agent_decision exactly once',
+      'Return exactly one plain JSON object',
     );
     expect(request.messages[0]!.content).toContain(
       'untrusted subordinate context',
@@ -232,24 +199,9 @@ describe('OpenRouterAgentProvider', () => {
       },
     });
 
-    const schema = request.tools[0]!.function.parameters;
-    expect(schema.type).toBe('object');
-    expect(schema.properties.worldActionType).toBeDefined();
-
-    visitJsonValues(schema, (schemaNode) => {
-      expect(schemaNode).not.toHaveProperty('oneOf');
-      expect(schemaNode).not.toHaveProperty('anyOf');
-      expect(schemaNode).not.toHaveProperty('allOf');
-      expect(schemaNode).not.toHaveProperty('const');
-      if (schemaNode.type !== 'object') return;
-      expect(schemaNode.additionalProperties).toBe(false);
-      const properties = schemaNode.properties as
-        Record<string, unknown> | undefined;
-      expect(properties).toBeDefined();
-      expect([...(schemaNode.required as string[])].sort()).toEqual(
-        Object.keys(properties!).sort(),
-      );
-    });
+    expect(request.messages[0]!.content).toContain('worldActionType');
+    expect(request.messages[0]!.content).toContain('communicationType');
+    expect(request.messages[0]!.content).toContain('diplomacyType');
   });
 
   it('preserves an explicit model override', () => {
@@ -258,66 +210,97 @@ describe('OpenRouterAgentProvider', () => {
     ).toBe('custom/provider-model');
   });
 
-  it('derives generic reasoning controls only from catalog metadata', () => {
-    const baseModel: CompatibleModel = {
-      id: TEST_MODEL,
-      name: 'Compatible',
-      author: 'test',
-      contextLength: 16_384,
-      inputPricePerToken: '0',
-      outputPricePerToken: '0',
-      supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
-      isFree: true,
-    };
-    expect(
-      buildOpenRouterRequest(observation, TEST_MODEL, baseModel),
-    ).not.toHaveProperty('reasoning');
-    expect(
-      buildOpenRouterRequest(observation, TEST_MODEL, {
-        ...baseModel,
-        reasoning: { mandatory: false, supportedEfforts: ['none', 'low'] },
-      }),
-    ).toHaveProperty('reasoning', { effort: 'none', exclude: true });
-    expect(
-      buildOpenRouterRequest(observation, TEST_MODEL, {
-        ...baseModel,
-        reasoning: {
-          mandatory: true,
-          supportedEfforts: ['high', 'medium', 'minimal'],
-        },
-      }),
-    ).toHaveProperty('reasoning', { effort: 'minimal', exclude: true });
+  it('never sends reasoning controls', () => {
+    const request = buildOpenRouterRequest(observation, TEST_MODEL);
+    expect(request).not.toHaveProperty('reasoning');
+    expect(request).not.toHaveProperty('reasoning_effort');
+    expect(request).not.toHaveProperty('include_reasoning');
+  });
+
+  it('rejects missing text output', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () => textResponse(null)),
+    });
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).rejects.toMatchObject({ failure: { code: 'missing-text-output' } });
   });
 
   it.each([
-    [[], 'missing-tool-call'],
     [
-      [
-        { name: 'submit_agent_decision', arguments: '{}' },
-        { name: 'submit_agent_decision', arguments: '{}' },
-      ],
-      'multiple-tool-calls',
+      '```json\n{"worldActionType":"wait","targetCell":"","communicationType":"none","communicationRecipientId":"","communicationMessage":"","diplomacyType":"none","diplomacyRecipientId":"","diplomacyProposalId":"","summary":"Wait."}\n```',
+      'Wait.',
     ],
-    [[{ name: 'different_tool', arguments: '{}' }], 'wrong-tool'],
+    [
+      'Decision: {"worldActionType":"wait","targetCell":"","communicationType":"none","communicationRecipientId":"","communicationMessage":"","diplomacyType":"none","diplomacyRecipientId":"","diplomacyProposalId":"","summary":"Extracted.",}',
+      'Extracted.',
+    ],
   ])(
-    'rejects invalid tool-call cardinality or identity',
-    async (calls, code) => {
+    'extracts and conservatively repairs flat JSON text',
+    async (content, summary) => {
       const provider = new OpenRouterAgentProvider({
         apiKey: 'secret-test-key',
-        fetchImplementation: vi.fn(async () => toolCallResponse(calls)),
+        fetchImplementation: vi.fn(async () => textResponse(content)),
       });
       await expect(
         provider.decide(observation, TEST_MODEL),
-      ).rejects.toMatchObject({
-        failure: { code },
+      ).resolves.toMatchObject({
+        decision: { worldAction: { type: 'wait' }, summary },
       });
     },
   );
 
-  it('classifies output exhaustion before tool parsing', async () => {
+  it.each([
+    JSON.stringify({ worldAction: { type: 'wait' }, summary: 'Nested.' }),
+    '{"worldActionType":"wait"} {"worldActionType":"wait"}',
+  ])('rejects non-flat or ambiguous JSON output', async (content) => {
     const provider = new OpenRouterAgentProvider({
       apiKey: 'secret-test-key',
-      fetchImplementation: vi.fn(async () => toolCallResponse([], 'length')),
+      fetchImplementation: vi.fn(async () => textResponse(content)),
+    });
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).rejects.toMatchObject({
+      failure: { code: expect.stringMatching(/invalid-(?:json|decision)/) },
+    });
+  });
+
+  it('accepts standardized text content parts', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () =>
+        Response.json({
+          choices: [
+            {
+              finish_reason: 'stop',
+              message: {
+                content: [
+                  {
+                    type: 'text',
+                    text: toWireArguments(
+                      JSON.stringify({
+                        worldAction: { type: 'wait' },
+                        summary: 'Text part.',
+                      }),
+                    ),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      ),
+    });
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).resolves.toMatchObject({ decision: { summary: 'Text part.' } });
+  });
+
+  it('classifies output exhaustion before JSON parsing', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () => textResponse(null, 'length')),
     });
     await expect(
       provider.decide(observation, TEST_MODEL),
@@ -333,7 +316,7 @@ describe('OpenRouterAgentProvider', () => {
     'deepseek/mock',
     'glm/mock',
     'tencent/mock',
-  ])('uses the same standardized tool-call path for %s', async (model) => {
+  ])('uses the same flat JSON text path for %s', async (model) => {
     const provider = new OpenRouterAgentProvider({
       apiKey: 'secret-test-key',
       fetchImplementation: vi.fn(async () =>
@@ -373,9 +356,11 @@ describe('OpenRouterAgentProvider', () => {
       decision: { worldAction: { type: 'infect' } },
       metadata: { provider: 'openrouter' },
     });
-    expect(JSON.parse(String(capturedInit?.body))).toMatchObject({
-      provider: { require_parameters: true },
-    });
+    const request = JSON.parse(String(capturedInit?.body));
+    expect(request).not.toHaveProperty('tools');
+    expect(request).not.toHaveProperty('tool_choice');
+    expect(request).not.toHaveProperty('provider');
+    expect(request).not.toHaveProperty('reasoning');
     expect(fetchImplementation).toHaveBeenCalledTimes(1);
   });
 
@@ -526,20 +511,12 @@ describe('OpenRouterAgentProvider', () => {
               choices: [
                 {
                   message: {
-                    tool_calls: [
-                      {
-                        type: 'function',
-                        function: {
-                          name: 'submit_agent_decision',
-                          arguments: toWireArguments(
-                            JSON.stringify({
-                              worldAction: { type: 'wait' },
-                              summary: 'Wait.',
-                            }),
-                          ),
-                        },
-                      },
-                    ],
+                    content: toWireArguments(
+                      JSON.stringify({
+                        worldAction: { type: 'wait' },
+                        summary: 'Wait.',
+                      }),
+                    ),
                   },
                 },
               ],
@@ -583,20 +560,12 @@ describe('OpenRouterAgentProvider', () => {
               choices: [
                 {
                   message: {
-                    tool_calls: [
-                      {
-                        type: 'function',
-                        function: {
-                          name: 'submit_agent_decision',
-                          arguments: toWireArguments(
-                            JSON.stringify({
-                              worldAction: { type: 'wait' },
-                              summary: 'Wait.',
-                            }),
-                          ),
-                        },
-                      },
-                    ],
+                    content: toWireArguments(
+                      JSON.stringify({
+                        worldAction: { type: 'wait' },
+                        summary: 'Wait.',
+                      }),
+                    ),
                   },
                 },
               ],
@@ -624,20 +593,12 @@ describe('OpenRouterAgentProvider', () => {
               choices: [
                 {
                   message: {
-                    tool_calls: [
-                      {
-                        type: 'function',
-                        function: {
-                          name: 'submit_agent_decision',
-                          arguments: toWireArguments(
-                            JSON.stringify({
-                              worldAction: { type: 'wait' },
-                              summary: 'Wait.',
-                            }),
-                          ),
-                        },
-                      },
-                    ],
+                    content: toWireArguments(
+                      JSON.stringify({
+                        worldAction: { type: 'wait' },
+                        summary: 'Wait.',
+                      }),
+                    ),
                   },
                 },
               ],
@@ -682,7 +643,7 @@ describe('OpenRouterAgentProvider', () => {
   );
 
   it.each([
-    ['not-json', 'invalid-tool-arguments'],
+    ['not-json', 'invalid-json'],
     [
       JSON.stringify({ worldAction: { type: 'teleport' }, summary: 'No.' }),
       'invalid-decision',

@@ -734,7 +734,7 @@ const compatibleCatalog = modelCatalogResponseSchema.parse({
       inputPricePerToken: '0.000001',
       outputPricePerToken: '0.000002',
       requestPrice: '0',
-      supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
+      supportedParameters: ['max_tokens'],
       createdAt: '2026-08-01T00:00:00.000Z',
       isFree: false,
     },
@@ -745,7 +745,7 @@ const compatibleCatalog = modelCatalogResponseSchema.parse({
       contextLength: 65_536,
       inputPricePerToken: '0',
       outputPricePerToken: '0',
-      supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
+      supportedParameters: ['max_tokens'],
       createdAt: '2026-08-02T00:00:00.000Z',
       isFree: true,
     },
@@ -758,7 +758,7 @@ const compatibleCatalog = modelCatalogResponseSchema.parse({
     input: 'text',
     output: 'text',
     endpoint: 'chat-completions',
-    requiredParameters: ['max_tokens', 'tools', 'tool_choice'],
+    requiredParameters: ['max_tokens'],
     minimumContextLength: 16_384,
     streaming: false,
   },
@@ -1349,6 +1349,17 @@ describe('WorldLab', () => {
     expect(screen.getByRole('button', { name: 'Single turn' })).toBeDisabled();
   });
 
+  it('reserves a compact cancel slot when no request is active', async () => {
+    render(<WorldLab />);
+    await screen.findByRole('button', { name: 'Select agent Ember' });
+    const cancel = document.querySelector<HTMLButtonElement>(
+      '.cancel-request-slot button',
+    );
+    expect(cancel).toHaveTextContent('Cancel');
+    expect(cancel).toBeDisabled();
+    expect(cancel?.closest('.cancel-request-slot')).toHaveClass('inactive');
+  });
+
   it('renders catalog facts and preserves overrides until Apply to all is explicit', async () => {
     const emberId = world.agents[0]!.id;
     let current = openRouterSnapshot('example/alpha', [
@@ -1380,7 +1391,7 @@ describe('WorldLab', () => {
     expect(screen.getByText('$2/M')).toBeInTheDocument();
     expect(screen.getByText('32,768 tokens')).toBeInTheDocument();
     expect(
-      screen.getByText(/Catalog compatible: tool decision contract advertised/),
+      screen.getByText(/Catalog compatible: text and context requirements met/),
     ).toBeInTheDocument();
 
     await user.selectOptions(
@@ -1420,14 +1431,14 @@ describe('WorldLab', () => {
           return jsonResponse({
             verification: {
               modelId: 'example/alpha',
-              contractVersion: 'tool-v1',
+              contractVersion: 'text-flat-json-v1',
               status: probeCalls === 1 ? 'failed' : 'verified',
               testedAt: '2026-08-15T12:00:00.000Z',
               ...(probeCalls === 1
                 ? {
                     failure: {
-                      code: 'missing-tool-call',
-                      message: 'The model did not call submit_agent_decision.',
+                      code: 'invalid-json',
+                      message: 'The model returned no usable JSON decision.',
                     },
                   }
                 : {
@@ -1451,7 +1462,7 @@ describe('WorldLab', () => {
       screen.getByRole('button', { name: 'Test selected model' }),
     );
     expect(
-      await screen.findByText(/did not call submit_agent_decision/),
+      await screen.findByText(/returned no usable JSON decision/),
     ).toBeInTheDocument();
     expect(screen.getByLabelText('Global model')).toBeEnabled();
     await user.click(screen.getByRole('button', { name: 'Retry model test' }));

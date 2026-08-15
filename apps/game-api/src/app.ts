@@ -11,6 +11,7 @@ import {
   apiErrorSchema,
   AGENT_DECISION_CONTRACT_VERSION,
   cancelSimulationResponseSchema,
+  cancelledTurnResponseSchema,
   experimentExportRequestSchema,
   experimentExportPreviewSchema,
   experimentExportResponseSchema,
@@ -37,6 +38,7 @@ import { createDevelopmentWorld } from '@agentborne/world-engine';
 import {
   SimulationConflictError,
   SimulationService,
+  SimulationTurnCancelledError,
   SimulationValidationError,
 } from './simulation-service';
 import { ExperimentExportValidationError } from './experiment-export';
@@ -248,6 +250,13 @@ export function createApp(options: AppOptions = {}) {
         }),
       );
     } catch (error) {
+      if (error instanceof SimulationTurnCancelledError)
+        return context.json(
+          cancelledTurnResponseSchema.parse({
+            snapshot: service.getSnapshot(),
+            cancelled: true,
+          }),
+        );
       if (error instanceof SimulationConflictError) {
         return context.json(
           apiErrorSchema.parse({

@@ -7,6 +7,7 @@ import {
   type ProviderDecision,
 } from '@agentborne/agent-runtime';
 import {
+  cancelledTurnResponseSchema,
   h3CellSchema,
   experimentExportPreviewSchema,
   experimentExportResponseSchema,
@@ -44,6 +45,51 @@ describe('game API simulation boundary', () => {
     expect(payload.experiment.currentTerritory).toHaveLength(8);
   });
 
+  it('returns a non-turn-consuming cancellation response', async () => {
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'cancel-test',
+      configured: true,
+      async decide(_observation, _model, options) {
+        requestStarted();
+        await new Promise<void>((resolve) => {
+          options?.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+        throw new AgentProviderError({
+          code: 'cancelled',
+          message: 'The model request was cancelled by the operator.',
+          retryable: false,
+        });
+      },
+    };
+    const app = createApp({ provider });
+    const pendingTurn = app.request('/api/simulation/turn', { method: 'POST' });
+    await started;
+    expect(
+      (await app.request('/api/simulation/turn/cancel', { method: 'POST' }))
+        .status,
+    ).toBe(200);
+    const response = await pendingTurn;
+    expect(response.status).toBe(200);
+    expect(
+      cancelledTurnResponseSchema.parse(await response.json()),
+    ).toMatchObject({
+      cancelled: true,
+      snapshot: {
+        status: 'paused',
+        turnNumber: 0,
+        turns: [],
+        experiment: { totalCompletedTurns: 0 },
+      },
+    });
+  });
+
   it('serves and refreshes sanitized catalogs without exposing the server key', async () => {
     const secret = 'server-only-secret-marker';
     const forced: boolean[] = [];
@@ -56,7 +102,7 @@ describe('game API simulation boundary', () => {
           contextLength: 32_768,
           inputPricePerToken: '0.000001',
           outputPricePerToken: '0.000002',
-          supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
+          supportedParameters: ['max_tokens'],
           isFree: false,
         },
       ],
@@ -66,7 +112,7 @@ describe('game API simulation boundary', () => {
         input: 'text',
         output: 'text',
         endpoint: 'chat-completions',
-        requiredParameters: ['max_tokens', 'tools', 'tool_choice'],
+        requiredParameters: ['max_tokens'],
         minimumContextLength: 16_384,
         streaming: false,
       },
@@ -128,7 +174,7 @@ describe('game API simulation boundary', () => {
           contextLength: 16_384,
           inputPricePerToken: '0',
           outputPricePerToken: '0',
-          supportedParameters: ['max_tokens', 'tools', 'tool_choice'],
+          supportedParameters: ['max_tokens'],
           isFree: true,
         },
       ],
@@ -138,7 +184,7 @@ describe('game API simulation boundary', () => {
         input: 'text',
         output: 'text',
         endpoint: 'chat-completions',
-        requiredParameters: ['max_tokens', 'tools', 'tool_choice'],
+        requiredParameters: ['max_tokens'],
         minimumContextLength: 16_384,
         streaming: false,
       },

@@ -15,7 +15,7 @@ Turns advance one agent at a time in deterministic round-robin order. The applic
 
 Normal interactive development selects OpenRouter and reports missing configuration or provider failure explicitly. A scripted provider exists only as an explicitly selected deterministic test seam. It is not a fallback and is visibly labeled in the World Lab.
 
-The original milestone used a strict root-object response schema. ADR 0009 supersedes that wire detail with a capability-driven OpenRouter catalog and one forced, flat `submit_agent_decision` tool call. Runtime schemas and the world engine remain authoritative for every detailed validation and consequence; no model family receives special handling.
+The original milestone used a strict root-object response schema. ADR 0009 supersedes that wire detail with a capability-driven OpenRouter catalog and a universal text response containing one flat JSON decision. Runtime schemas and the world engine remain authoritative for every detailed validation and consequence; no model family receives special handling.
 
 Turn records contain bounded observations, actions, summaries, validation results, events, and safe provider metadata. They never contain raw prompts, raw payloads, secrets, or private chain-of-thought. The total completed-turn count is monotonic and separate from the newest 120 retained turn records. The authoritative world likewise retains only its newest 120 events, while observations receive the newest eight relevant events in chronological order.
 

@@ -51,9 +51,7 @@ describe('OpenRouter model catalog', () => {
   });
 
   it.each([
-    ['max_tokens', { supported_parameters: ['tools', 'tool_choice'] }],
-    ['tools', { supported_parameters: ['max_tokens', 'tool_choice'] }],
-    ['tool_choice', { supported_parameters: ['max_tokens', 'tools'] }],
+    ['max_tokens', { supported_parameters: ['temperature'] }],
     ['context', { context_length: OPENROUTER_MODEL_CONTEXT_MINIMUM - 1 }],
     [
       'text output',
@@ -77,6 +75,16 @@ describe('OpenRouter model catalog', () => {
     expect(
       sanitizeCompatibleModel({ ...compatible, ...change }),
     ).toBeUndefined();
+  });
+
+  it('does not require tools, structured output, or reasoning controls', () => {
+    expect(
+      sanitizeCompatibleModel({
+        ...compatible,
+        supported_parameters: ['max_tokens'],
+        reasoning: undefined,
+      }),
+    ).toBeDefined();
   });
 
   it('skips malformed entries and uses all remote defense-in-depth filters', async () => {

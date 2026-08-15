@@ -12,13 +12,8 @@ export const PROVIDER_ERROR_MAX_LENGTH = 240;
 export const OPENROUTER_MODEL_CONTEXT_MINIMUM = 16_384;
 export const OPENROUTER_MAX_OUTPUT_TOKENS = 4_096;
 export const OPENROUTER_PROVIDER_TIMEOUT_MS = 75_000;
-export const AGENT_DECISION_TOOL_NAME = 'submit_agent_decision';
-export const AGENT_DECISION_CONTRACT_VERSION = 'tool-v1';
-export const OPENROUTER_REQUIRED_PARAMETERS = [
-  'max_tokens',
-  'tools',
-  'tool_choice',
-] as const;
+export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v1';
+export const OPENROUTER_REQUIRED_PARAMETERS = ['max_tokens'] as const;
 export const DEVELOPMENT_WORLD_CONFIG = {
   latitude: 41.6528,
   longitude: -83.5379,
@@ -874,7 +869,7 @@ export const modelCatalogResponseSchema = z.object({
     endpoint: z.literal('chat-completions'),
     requiredParameters: z
       .array(z.enum(OPENROUTER_REQUIRED_PARAMETERS))
-      .length(3),
+      .length(OPENROUTER_REQUIRED_PARAMETERS.length),
     minimumContextLength: z.literal(OPENROUTER_MODEL_CONTEXT_MINIMUM),
     streaming: z.literal(false),
   }),
@@ -951,6 +946,10 @@ export const providerFailureSchema = z.object({
     'malformed-response',
     'unsupported-response',
     'output-length',
+    'missing-text-output',
+    'invalid-json',
+    // Retained so schema-v6 exports produced by the superseded tool contract
+    // remain importable. The text contract never emits these codes.
     'missing-tool-call',
     'multiple-tool-calls',
     'wrong-tool',
@@ -1162,6 +1161,12 @@ export const singleTurnResponseSchema = z.object({
   turn: agentTurnRecordSchema,
 });
 export type SingleTurnResponse = z.infer<typeof singleTurnResponseSchema>;
+
+export const cancelledTurnResponseSchema = z.object({
+  snapshot: simulationSnapshotSchema,
+  cancelled: z.literal(true),
+});
+export type CancelledTurnResponse = z.infer<typeof cancelledTurnResponseSchema>;
 
 export const resetSimulationResponseSchema = z.object({
   snapshot: simulationSnapshotSchema,
