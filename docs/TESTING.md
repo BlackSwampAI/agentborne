@@ -29,6 +29,13 @@ deadline, exact one-call manual Retry/Skip state, attempt-history export,
 idempotent mutation delivery, ambiguous-response reconciliation, mutually
 exclusive intervention controls, and model and export modal dismissal.
 
+World Lab interaction coverage also verifies newest-first public-chat DOM order
+and reading-position preservation, browser-local follow-turn selection across
+active/next and recovery transitions, non-color acting/next labels, shared
+dialog focus/dismissal/overflow structure, and complete collapsed dock headers.
+Playwright exercises the map-first layout at 1920×1080, 1440×900, 1024×768,
+and approximately 768×900 with deterministic scripted data only.
+
 Attempt-accounting coverage verifies that schema-v7 metrics count every initial,
 automatic-repair, automatic-transport-retry, and manual-retry call exactly once,
 reconcile logical outcomes independently,

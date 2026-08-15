@@ -841,6 +841,7 @@ function withPersonality(
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   mapLibreMock.renderMode = 'complete';
   mapLibreMock.rejectSource = false;
   mapLibreMock.rejectLayers = false;
@@ -1150,6 +1151,119 @@ describe('WorldLab', () => {
     ).toBeInTheDocument();
   });
 
+  it('defaults Follow turn on and selects the scheduled agent with a textual indicator', async () => {
+    const scheduled = simulationSnapshotSchema.parse({
+      ...initial,
+      nextAgentId: world.agents[2]!.id,
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(scheduled)),
+    );
+    render(<WorldLab />);
+    const roster = await screen.findByLabelText('Agent roster');
+    expect(
+      within(roster).getByRole('checkbox', { name: 'Follow turn' }),
+    ).toBeChecked();
+    expect(within(roster).getByText('Next')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: new RegExp(world.agents[2]!.name) }),
+    ).toBeInTheDocument();
+  });
+
+  it('follows an active agent and immediately returns to the scheduled agent when re-enabled', async () => {
+    const active = simulationSnapshotSchema.parse({
+      ...initial,
+      activeAgentId: world.agents[3]!.id,
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(active)),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    const roster = await screen.findByLabelText('Agent roster');
+    expect(within(roster).getByText('Acting')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: new RegExp(world.agents[3]!.name) }),
+    ).toBeInTheDocument();
+    await user.click(
+      within(roster).getByRole('button', {
+        name: new RegExp(world.agents[1]!.name),
+      }),
+    );
+    expect(
+      within(roster).getByRole('checkbox', { name: 'Follow turn' }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole('heading', { name: new RegExp(world.agents[1]!.name) }),
+    ).toBeInTheDocument();
+    expect(within(roster).getByText('Acting')).toBeInTheDocument();
+    await user.click(
+      within(roster).getByRole('checkbox', { name: 'Follow turn' }),
+    );
+    expect(
+      screen.getByRole('heading', { name: new RegExp(world.agents[3]!.name) }),
+    ).toBeInTheDocument();
+  });
+
+  it('keyboard roster selection disables following and persists the preference locally only', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    const roster = await screen.findByLabelText('Agent roster');
+    const row = within(roster).getByRole('button', {
+      name: new RegExp(world.agents[4]!.name),
+    });
+    row.focus();
+    await user.keyboard('{Enter}');
+    expect(
+      within(roster).getByRole('checkbox', { name: 'Follow turn' }),
+    ).not.toBeChecked();
+    expect(
+      window.localStorage.getItem('agentborne.world-lab.follow-turn'),
+    ).toBe('false');
+    await user.click(screen.getByRole('button', { name: 'Export' }));
+    expect(
+      screen.getByRole('dialog', { name: 'Experiment export' }),
+    ).not.toHaveTextContent('Follow turn');
+  });
+
+  it.each([
+    ['paused between turns', 'paused', null, 1],
+    ['manual Retry completion', 'paused', null, 2],
+    ['operator Skip completion', 'paused', null, 3],
+    ['cancelled request reconciliation', 'paused', null, 4],
+    ['reset snapshot', 'paused', null, 0],
+    ['provider error', 'provider-error', null, 5],
+    ['lost-response reconciliation', 'paused', null, 6],
+    ['request in progress', 'running', 7, 0],
+  ] as const)(
+    'selects the authoritative active/next agent after %s',
+    async (_label, status, activeIndex, nextIndex) => {
+      const current = simulationSnapshotSchema.parse({
+        ...initial,
+        status,
+        activeAgentId:
+          activeIndex === null ? null : world.agents[activeIndex]!.id,
+        nextAgentId: world.agents[nextIndex]!.id,
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => jsonResponse(current)),
+      );
+      render(<WorldLab />);
+      const expected = world.agents[activeIndex ?? nextIndex]!;
+      expect(
+        await screen.findByRole('heading', { name: new RegExp(expected.name) }),
+      ).toBeInTheDocument();
+      expect(
+        within(screen.getByLabelText('Agent roster')).getByText(
+          activeIndex === null ? 'Next' : 'Acting',
+        ),
+      ).toBeInTheDocument();
+    },
+  );
+
   it('renders accepted messages, directions, and hostile-looking text as plain text', async () => {
     const changed = afterMessage();
     vi.stubGlobal(
@@ -1163,6 +1277,9 @@ describe('WorldLab', () => {
     );
     const user = userEvent.setup();
     render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Select agent Ember' }),
+    );
     await user.click(
       await screen.findByRole('button', { name: 'Single turn' }),
     );
@@ -1194,6 +1311,36 @@ describe('WorldLab', () => {
     expect(document.querySelector('img[src="x"]')).toBeNull();
   });
 
+  it('renders public chat newest first in DOM order', async () => {
+    const first = afterPublicMessage();
+    const original = first.world.events.find(
+      ({ type }) => type === 'public-message-sent',
+    )!;
+    const newer = {
+      ...original,
+      id: '99cc21b9-fc78-4b04-9f92-9862bf346f99',
+      occurredAt: '2026-08-13T12:00:02.000Z',
+      message: 'Newest public message.',
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        jsonResponse(
+          simulationSnapshotSchema.parse({
+            ...first,
+            world: { ...first.world, events: [...first.world.events, newer] },
+          }),
+        ),
+      ),
+    );
+    render(<WorldLab />);
+    const items = within(
+      await screen.findByLabelText('Public world chat'),
+    ).getAllByRole('listitem');
+    expect(items[0]).toHaveTextContent('Newest public message.');
+    expect(items[1]).toHaveTextContent(HOSTILE_MESSAGE);
+  });
+
   it('clears visible communications after reset', async () => {
     const changed = afterMessage();
     vi.stubGlobal(
@@ -1205,6 +1352,9 @@ describe('WorldLab', () => {
     );
     const user = userEvent.setup();
     render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Select agent Ember' }),
+    );
     expect(
       await screen.findByLabelText('Direct-message history'),
     ).toHaveTextContent('Sent Rook');
@@ -1228,6 +1378,9 @@ describe('WorldLab', () => {
     );
     const user = userEvent.setup();
     render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Select agent Ember' }),
+    );
     await user.click(
       await screen.findByRole('button', { name: 'Single turn' }),
     );
@@ -1268,6 +1421,9 @@ describe('WorldLab', () => {
       vi.fn(() => jsonResponse(captured)),
     );
     render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Select agent Ember' }),
+    );
     expect(
       await screen.findByRole('heading', { name: 'Territory scoreboard' }),
     ).toBeInTheDocument();
@@ -1744,10 +1900,22 @@ describe('WorldLab', () => {
     render(<WorldLab />);
     const chat = await screen.findByLabelText('Public world chat');
     expect(document.querySelector('main')).toHaveClass('world-lab-shell');
-    await user.click(screen.getByRole('button', { name: 'Collapse' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Collapse Public world chat' }),
+    );
     expect(document.querySelector('main')).toHaveClass('chat-collapsed');
     expect(chat).not.toHaveTextContent(HOSTILE_MESSAGE);
-    await user.click(screen.getByRole('button', { name: 'Expand' }));
+    expect(
+      screen.getByRole('heading', { name: 'Public world chat' }),
+    ).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Event log' })).toBeVisible();
+    expect(screen.queryByLabelText('World event log')).not.toBeInTheDocument();
+    expect(document.querySelector('.bottom-dock .event-panel')).toHaveClass(
+      'dock-collapsed',
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Expand Public world chat' }),
+    );
     expect(document.querySelector('main')).not.toHaveClass('chat-collapsed');
     expect(chat).toHaveTextContent(HOSTILE_MESSAGE);
   });
@@ -1764,34 +1932,35 @@ describe('WorldLab', () => {
       ...first,
       world: { ...first.world, events: [...first.world.events, nextEvent] },
     });
+    let scrollHeight = 1_000;
     vi.stubGlobal(
       'fetch',
       vi
         .fn()
         .mockImplementationOnce(() => jsonResponse(first))
-        .mockImplementationOnce(() =>
-          jsonResponse({ snapshot: next, turn: next.turns[0] }),
-        ),
+        .mockImplementationOnce(() => {
+          scrollHeight = 1_100;
+          return jsonResponse({ snapshot: next, turn: next.turns[0] });
+        }),
     );
     const user = userEvent.setup();
     render(<WorldLab />);
     const chat = await screen.findByLabelText('Public world chat');
     const feed = within(chat).getByRole('list');
     Object.defineProperties(feed, {
-      scrollHeight: { configurable: true, value: 1_000 },
+      scrollHeight: { configurable: true, get: () => scrollHeight },
       clientHeight: { configurable: true, value: 100 },
-      scrollTop: { configurable: true, writable: true, value: 0 },
+      scrollTop: { configurable: true, writable: true, value: 200 },
     });
     fireEvent.scroll(feed);
     await act(async () => undefined);
-    feed.scrollTop = 0;
     await user.click(screen.getByRole('button', { name: 'Single turn' }));
     const jump = await screen.findByRole('button', {
-      name: '1 new message · Jump to newest',
+      name: '1 new message · Return to latest',
     });
-    expect(feed.scrollTop).toBe(0);
+    expect(feed.scrollTop).toBe(300);
     await user.click(jump);
-    expect(feed.scrollTop).toBe(1_000);
+    expect(feed.scrollTop).toBe(0);
     expect(screen.queryByText(/new message · Jump/)).not.toBeInTheDocument();
   });
 
@@ -1990,6 +2159,9 @@ describe('WorldLab', () => {
     );
     const user = userEvent.setup();
     render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Select agent Ember' }),
+    );
     const restore = await screen.findByRole('button', {
       name: 'Restore default personalities',
     });
@@ -2018,7 +2190,11 @@ describe('WorldLab', () => {
       'fetch',
       vi.fn(() => jsonResponse(changed)),
     );
+    const user = userEvent.setup();
     render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Select agent Ember' }),
+    );
     expect(
       await screen.findByText('New active personality.'),
     ).toBeInTheDocument();
@@ -2040,7 +2216,11 @@ describe('WorldLab', () => {
       'fetch',
       vi.fn(() => jsonResponse(afterInfection())),
     );
+    const user = userEvent.setup();
     render(<WorldLab />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Select agent Ember' }),
+    );
     expect(
       await screen.findByLabelText('Current experiment usage'),
     ).toHaveTextContent('1 turns');
@@ -2084,7 +2264,7 @@ describe('WorldLab', () => {
         tokenEstimateMethod: 'ceil(UTF-8 bytes / 4)',
       }),
     );
-    await user.click(screen.getByRole('button', { name: 'Preview export' }));
+    await user.click(screen.getByRole('button', { name: 'Preview' }));
     expect(await screen.findByLabelText('Export preview')).toHaveTextContent(
       '900 bytes',
     );
@@ -2096,9 +2276,7 @@ describe('WorldLab', () => {
       agentIds: [world.agents[0]!.id, world.agents[1]!.id],
     });
     await user.click(screen.getByRole('button', { name: 'Clear' }));
-    expect(
-      screen.getByRole('button', { name: 'Preview export' }),
-    ).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Select all' }));
     for (const agent of world.agents)
       expect(
@@ -2114,7 +2292,6 @@ describe('WorldLab', () => {
       screen.queryByRole('dialog', { name: 'Experiment export' }),
     ).toBeNull();
     await user.click(exportButton);
-    const dialog = screen.getByRole('dialog', { name: 'Experiment export' });
     await user.selectOptions(screen.getByLabelText('Export level'), 'standard');
     await user.click(screen.getByRole('button', { name: 'Close export' }));
     expect(
@@ -2123,12 +2300,20 @@ describe('WorldLab', () => {
     expect(exportButton).toHaveFocus();
     await user.click(exportButton);
     expect(screen.getByLabelText('Export level')).toHaveValue('standard');
-    fireEvent.mouseDown(
-      screen.getByRole('dialog', { name: 'Experiment export' }),
-    );
+    const reopenedDialog = screen.getByRole('dialog', {
+      name: 'Experiment export',
+    });
+    fireEvent.mouseDown(reopenedDialog);
     expect(
       screen.getByRole('dialog', { name: 'Experiment export' }),
     ).toBeInTheDocument();
+    expect(reopenedDialog.querySelector('.modal-body')).toBeInTheDocument();
+    expect(reopenedDialog.querySelector('.modal-footer')).toBeInTheDocument();
+    fireEvent.mouseDown(reopenedDialog.closest('.modal-backdrop')!);
+    expect(
+      screen.queryByRole('dialog', { name: 'Experiment export' }),
+    ).toBeNull();
+    await user.click(exportButton);
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(
       screen.queryByRole('dialog', { name: 'Experiment export' }),
@@ -2198,9 +2383,7 @@ describe('WorldLab', () => {
     await user.click(
       screen.getByRole('checkbox', { name: 'operator skipped' }),
     );
-    expect(
-      screen.getByRole('button', { name: 'Preview export' }),
-    ).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
   });
 
   it('copies and downloads the exact same validated generated JSON and revokes its URL', async () => {
@@ -2227,15 +2410,15 @@ describe('WorldLab', () => {
     );
     const document = minimalExportDocument(progressed);
     vi.mocked(fetch).mockImplementationOnce(() => jsonResponse({ document }));
-    await user.click(screen.getByRole('button', { name: 'Generate JSON' }));
-    await user.click(await screen.findByRole('button', { name: 'Copy JSON' }));
+    await user.click(screen.getByRole('button', { name: 'Generate' }));
+    await user.click(await screen.findByRole('button', { name: 'Copy' }));
     expect(clipboardWrite).toHaveBeenCalledWith(
       JSON.stringify(experimentExportDocumentSchema.parse(document)),
     );
     clipboardWrite.mockRejectedValueOnce(new Error('denied'));
-    await user.click(screen.getByRole('button', { name: 'Copy JSON' }));
+    await user.click(screen.getByRole('button', { name: 'Copy' }));
     expect(await screen.findByText(/Copy failed/)).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Download JSON' }));
+    await user.click(screen.getByRole('button', { name: 'Download' }));
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:experiment');
     expect(click).toHaveBeenCalledTimes(1);
