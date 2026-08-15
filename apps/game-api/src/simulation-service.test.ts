@@ -35,7 +35,8 @@ function exportRequest(level: 'minimal' | 'standard' | 'full-safe' | 'custom') {
     agents: { mode: 'all' as const },
     turns: { mode: 'entire-retained' as const },
     outcomes: ['accepted', 'rejected', 'provider-error'] as const,
-    actions: ['move', 'infect', 'capture', 'message', 'wait'] as const,
+    actions: ['move', 'infect', 'capture', 'wait'] as const,
+    communications: { channel: 'all' as const, status: 'all' as const },
     level,
   };
 }
@@ -51,13 +52,13 @@ describe('SimulationService', () => {
       model: 'capture-scenario',
       configured: true,
       async decide(observation): Promise<ProviderDecision> {
-        let requestedAction: ProviderDecision['decision']['requestedAction'];
+        let worldAction: ProviderDecision['decision']['worldAction'];
         if (observation.agentId === emberId && !targetCell) {
           targetCell = observation.currentCell.cell;
-          requestedAction = { type: 'infect' };
+          worldAction = { type: 'infect' };
         } else if (observation.agentId === emberId && !emberDeparted) {
           emberDeparted = true;
-          requestedAction = {
+          worldAction = {
             type: 'move',
             targetCell: observation.adjacentCells[0]!.cell,
           };
@@ -66,9 +67,9 @@ describe('SimulationService', () => {
             observation.currentCell.cell === targetCell &&
             observation.captureEligibility.eligible
           ) {
-            requestedAction = { type: 'capture' };
+            worldAction = { type: 'capture' };
           } else if (observation.currentCell.cell === targetCell) {
-            requestedAction = { type: 'wait' };
+            worldAction = { type: 'wait' };
           } else {
             const target = targetCell!;
             const next = observation.adjacentCells.toSorted(
@@ -77,13 +78,13 @@ describe('SimulationService', () => {
                   gridDistance(right.cell, target) ||
                 left.cell.localeCompare(right.cell),
             )[0]!;
-            requestedAction = { type: 'move', targetCell: next.cell };
+            worldAction = { type: 'move', targetCell: next.cell };
           }
         } else {
-          requestedAction = { type: 'wait' };
+          worldAction = { type: 'wait' };
         }
         return {
-          decision: { requestedAction, summary: 'Deterministic contest.' },
+          decision: { worldAction, summary: 'Deterministic contest.' },
           metadata: {
             provider: 'scripted-test',
             model: 'capture-scenario',
@@ -97,16 +98,21 @@ describe('SimulationService', () => {
     let capture: AgentTurnRecord | undefined;
     for (let index = 0; index < 31 && !capture; index += 1) {
       const turn = await simulation.executeNextTurn();
-      if (turn.outcome === 'accepted' && turn.event.type === 'hex-captured')
+      if (
+        turn.outcome === 'accepted' &&
+        turn.worldActionResult.event.type === 'hex-captured'
+      )
         capture = turn;
     }
     expect(capture).toMatchObject({
       agentId: rookId,
-      requestedAction: { type: 'capture' },
-      event: {
-        controllerAgentId: rookId,
-        previousControllerAgentId: emberId,
-        cell: targetCell,
+      worldAction: { type: 'capture' },
+      worldActionResult: {
+        event: {
+          controllerAgentId: rookId,
+          previousControllerAgentId: emberId,
+          cell: targetCell,
+        },
       },
     });
     if (!capture || capture.outcome !== 'accepted')
@@ -194,10 +200,10 @@ describe('SimulationService', () => {
       actions: ['capture'],
       level: 'minimal',
     });
-    expect(victimExport.schemaVersion).toBe(3);
+    expect(victimExport.schemaVersion).toBe(4);
     expect(victimExport.turns).toHaveLength(0);
     expect(victimExport.selection).toMatchObject({
-      matchingRecordCount: 0,
+      matchingTurnCount: 0,
       matchingControlChangeCount: 1,
     });
     expect(victimExport.controlChanges).toMatchObject([
@@ -233,13 +239,13 @@ describe('SimulationService', () => {
       model: 'defended-capture-scenario',
       configured: true,
       async decide(observation): Promise<ProviderDecision> {
-        let requestedAction: ProviderDecision['decision']['requestedAction'];
+        let worldAction: ProviderDecision['decision']['worldAction'];
         if (observation.agentId === emberId && !targetCell) {
           targetCell = observation.currentCell.cell;
-          requestedAction = { type: 'infect' };
+          worldAction = { type: 'infect' };
         } else if (observation.agentId === rookId) {
           if (observation.currentCell.cell === targetCell) {
-            requestedAction = { type: 'capture' };
+            worldAction = { type: 'capture' };
           } else {
             const next = observation.adjacentCells.toSorted(
               (left, right) =>
@@ -247,13 +253,13 @@ describe('SimulationService', () => {
                   gridDistance(right.cell, targetCell!) ||
                 left.cell.localeCompare(right.cell),
             )[0]!;
-            requestedAction = { type: 'move', targetCell: next.cell };
+            worldAction = { type: 'move', targetCell: next.cell };
           }
         } else {
-          requestedAction = { type: 'wait' };
+          worldAction = { type: 'wait' };
         }
         return {
-          decision: { requestedAction, summary: 'Test defended capture.' },
+          decision: { worldAction, summary: 'Test defended capture.' },
           metadata: {
             provider: 'scripted-test',
             model: 'defended-capture-scenario',
@@ -269,13 +275,13 @@ describe('SimulationService', () => {
       const turn = await simulation.executeNextTurn();
       if (
         turn.outcome === 'rejected' &&
-        turn.validation.reason === 'controller-present'
+        turn.worldActionResult.reason === 'controller-present'
       )
         rejected = turn;
     }
     expect(rejected).toMatchObject({
       agentId: rookId,
-      requestedAction: { type: 'capture' },
+      worldAction: { type: 'capture' },
       observation: {
         captureEligibility: {
           eligible: false,
@@ -304,11 +310,14 @@ describe('SimulationService', () => {
       outcomes: ['rejected'],
       actions: ['capture'],
     });
-    expect(exported.schemaVersion).toBe(3);
+    expect(exported.schemaVersion).toBe(4);
     expect(exported.turns).toMatchObject([
       {
         outcome: 'rejected',
-        validationReason: 'controller-present',
+        worldActionResult: {
+          accepted: false,
+          reason: 'controller-present',
+        },
         observation: {
           captureEligibility: {
             eligible: false,
@@ -323,7 +332,7 @@ describe('SimulationService', () => {
   it('resets to the exact deterministic six-agent starting world', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+        { worldAction: { type: 'infect' }, summary: 'Infect.' },
       ]),
     );
     const initial = simulation.getSnapshot();
@@ -344,7 +353,7 @@ describe('SimulationService', () => {
       async decide() {
         return {
           decision: {
-            requestedAction: { type: 'wait' as const },
+            worldAction: { type: 'wait' as const },
             summary: 'Wait.',
           },
           metadata: {
@@ -380,9 +389,9 @@ describe('SimulationService', () => {
   it('reports configurable experiment truncation and absolute retained bounds', async () => {
     const simulation = new SimulationService({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: '1' },
-        { requestedAction: { type: 'wait' }, summary: '2' },
-        { requestedAction: { type: 'wait' }, summary: '3' },
+        { worldAction: { type: 'wait' }, summary: '1' },
+        { worldAction: { type: 'wait' }, summary: '2' },
+        { worldAction: { type: 'wait' }, summary: '3' },
       ]),
       now,
       createEventId,
@@ -408,7 +417,7 @@ describe('SimulationService', () => {
   it('estimates the selected Compact or Pretty serialization and defaults to Compact', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
     );
     await simulation.executeNextTurn();
@@ -439,7 +448,7 @@ describe('SimulationService', () => {
       async decide() {
         return {
           decision: {
-            requestedAction: { type: 'wait' as const },
+            worldAction: { type: 'wait' as const },
             summary: 'Wait.',
           },
           metadata: {
@@ -471,7 +480,7 @@ describe('SimulationService', () => {
     let sequence = 0;
     const simulation = new SimulationService({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
       now,
       createEventId,
@@ -516,7 +525,7 @@ describe('SimulationService', () => {
       configured: true,
       async decide(observation) {
         call += 1;
-        const requestedAction =
+        const worldAction =
           call === 1
             ? { type: 'infect' as const }
             : call === 2
@@ -526,7 +535,7 @@ describe('SimulationService', () => {
                 }
               : { type: 'wait' as const };
         return {
-          decision: { requestedAction, summary: 'Safe summary.' },
+          decision: { worldAction, summary: 'Safe summary.' },
           metadata: {
             provider: 'scripted-test',
             model: 'filter-test',
@@ -571,7 +580,7 @@ describe('SimulationService', () => {
     });
     expect(oneAgent.selection).toMatchObject({
       selectedAgentIds: [agents[2]!.id],
-      matchingRecordCount: 1,
+      matchingTurnCount: 1,
       firstMatchingTurn: 3,
       lastMatchingTurn: 3,
     });
@@ -592,7 +601,7 @@ describe('SimulationService', () => {
       async decide() {
         return {
           decision: {
-            requestedAction: { type: 'wait' as const },
+            worldAction: { type: 'wait' as const },
             summary: 'Wait.',
           },
           metadata: {
@@ -647,7 +656,7 @@ describe('SimulationService', () => {
   it('exports accepted communications for either participant without importing unrelated or rejected messages', async () => {
     const initial = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'placeholder' },
+        { worldAction: { type: 'wait' }, summary: 'placeholder' },
       ]),
     ).getSnapshot();
     const [sender, recipient] = initial.world.agents;
@@ -658,33 +667,47 @@ describe('SimulationService', () => {
       configured: true,
       async decide(observation): Promise<ProviderDecision> {
         call += 1;
-        const requestedAction =
+        const communication =
           call === 1
             ? {
-                type: 'message' as const,
+                channel: 'direct' as const,
                 recipientId: recipient!.id,
                 message: 'Inbound selection proof.',
               }
-            : call === 3
+            : call === 2
               ? {
-                  type: 'message' as const,
-                  recipientId: observation.nearbyAgents.find(
-                    ({ id, distance }) =>
-                      distance <= 3 &&
-                      id !== sender!.id &&
-                      id !== recipient!.id,
-                  )!.id,
-                  message: 'Unrelated communication.',
+                  channel: 'public' as const,
+                  message: 'Selected-author public message.',
                 }
-              : call === 4
+              : call === 3
                 ? {
-                    type: 'message' as const,
-                    recipientId: observation.agentId,
-                    message: 'Rejected self message.',
+                    channel: 'direct' as const,
+                    recipientId: observation.nearbyAgents.find(
+                      ({ id, distance }) =>
+                        distance <= 3 &&
+                        id !== sender!.id &&
+                        id !== recipient!.id,
+                    )!.id,
+                    message: 'Unrelated communication.',
                   }
-                : { type: 'wait' as const };
+                : call === 4
+                  ? {
+                      channel: 'direct' as const,
+                      recipientId: observation.agentId,
+                      message: 'Rejected self message.',
+                    }
+                  : call === 5
+                    ? {
+                        channel: 'public' as const,
+                        message: 'Unselected-author public message.',
+                      }
+                    : undefined;
         return {
-          decision: { requestedAction, summary: 'Test export.' },
+          decision: {
+            worldAction: { type: 'wait' },
+            ...(communication ? { communication } : {}),
+            summary: 'Test export.',
+          },
           metadata: {
             provider: 'scripted-test',
             model: 'message-export-test',
@@ -695,17 +718,18 @@ describe('SimulationService', () => {
       },
     };
     const simulation = service(provider);
-    for (let index = 0; index < 4; index += 1)
+    for (let index = 0; index < 5; index += 1)
       await simulation.executeNextTurn();
 
     const inboundRequest = {
       ...exportRequest('minimal'),
       agents: { mode: 'selected', agentIds: [recipient!.id] },
       outcomes: ['accepted'],
-      actions: ['message'],
+      actions: ['wait'],
+      communications: { channel: 'direct', status: 'accepted' },
     } as const;
     const inbound = simulation.generateExperimentExport(inboundRequest);
-    expect(inbound.turns).toEqual([]);
+    expect(inbound.turns.map(({ turnNumber }) => turnNumber)).toEqual([2]);
     expect(inbound.communications).toMatchObject([
       {
         originatingTurn: 1,
@@ -715,24 +739,56 @@ describe('SimulationService', () => {
       },
     ]);
     expect(inbound.metrics?.aggregate).toMatchObject({
-      requestedMessages: 0,
-      deliveredMessages: 1,
-      sentCommunications: 0,
-      receivedCommunications: 1,
+      directMessagesRequested: 0,
+      directMessagesDelivered: 0,
+      directMessagesSent: 0,
+      directMessagesReceived: 1,
     });
     const inboundPreview = simulation.previewExperimentExport(inboundRequest);
     const inboundBytes = new TextEncoder().encode(
       serializeExperimentExport(inbound),
     ).byteLength;
     expect(inboundPreview).toMatchObject({
-      matchingRecordCount: 0,
+      matchingTurnCount: 1,
       matchingCommunicationCount: 1,
       serializedUtf8Bytes: inboundBytes,
       approximateAiInputTokens: Math.ceil(inboundBytes / 4),
     });
+    const multiAgent = simulation.generateExperimentExport({
+      ...inboundRequest,
+      agents: {
+        mode: 'selected',
+        agentIds: [sender!.id, recipient!.id],
+      },
+      communications: { channel: 'all', status: 'all' },
+    });
+    expect(multiAgent.communications).toMatchObject([
+      { channel: 'direct', message: 'Inbound selection proof.' },
+      { channel: 'public', message: 'Selected-author public message.' },
+    ]);
+    const allAgent = simulation.generateExperimentExport({
+      ...exportRequest('minimal'),
+      communications: { channel: 'all', status: 'all' },
+    });
+    expect(allAgent.communications).toHaveLength(5);
+    expect(
+      simulation.generateExperimentExport({
+        ...inboundRequest,
+        communications: { channel: 'public', status: 'all' },
+      }).communications,
+    ).toMatchObject([
+      {
+        originatingTurn: 2,
+        agentId: recipient!.id,
+        channel: 'public',
+        message: 'Selected-author public message.',
+      },
+    ]);
     for (const filteredRequest of [
-      { ...inboundRequest, actions: ['wait'] },
-      { ...inboundRequest, outcomes: ['rejected'] },
+      {
+        ...inboundRequest,
+        communications: { channel: 'all', status: 'rejected' },
+      },
       {
         ...inboundRequest,
         turns: { mode: 'range', fromTurn: 2, toTurn: 4 },
@@ -745,13 +801,15 @@ describe('SimulationService', () => {
       ...inboundRequest,
       level: 'full-safe',
       agents: { mode: 'selected', agentIds: [sender!.id] },
+      actions: ['wait'],
     });
     expect(senderFull.turns).toHaveLength(1);
-    expect(senderFull.turns[0]?.event).toMatchObject({
-      type: 'agent-messaged',
+    expect(senderFull.turns[0]?.communicationResult).toMatchObject({
+      accepted: true,
+      event: { type: 'direct-message-sent' },
     });
     expect(senderFull.communications).toHaveLength(1);
-    expect(senderFull.worldEvents).toEqual([]);
+    expect(senderFull.worldEvents).toMatchObject([{ type: 'agent-waited' }]);
     expect(senderFull.initialWorld).not.toHaveProperty('events');
     expect(senderFull.currentWorld).not.toHaveProperty('events');
 
@@ -759,26 +817,30 @@ describe('SimulationService', () => {
     const rejected = simulation.generateExperimentExport({
       ...exportRequest('full-safe'),
       agents: { mode: 'selected', agentIds: [rejectedSender.id] },
-      outcomes: ['accepted', 'rejected'],
-      actions: ['message'],
+      outcomes: ['accepted'],
+      actions: ['wait'],
+      communications: { channel: 'direct', status: 'rejected' },
     });
     expect(rejected.turns).toHaveLength(1);
     expect(rejected.turns[0]).toMatchObject({
-      outcome: 'rejected',
-      validationReason: 'self-message',
+      outcome: 'accepted',
+      communicationResult: { accepted: false, reason: 'self-message' },
     });
-    expect(rejected.communications).toEqual([]);
-    expect(rejected.worldEvents).toEqual([]);
+    expect(rejected.communications).toMatchObject([
+      { status: 'rejected', rejectionReason: 'self-message' },
+    ]);
+    expect(rejected.worldEvents).toMatchObject([{ type: 'agent-waited' }]);
     expect(rejected.metrics?.aggregate).toMatchObject({
-      requestedMessages: 1,
-      deliveredMessages: 0,
+      directMessagesRequested: 1,
+      directMessagesDelivered: 0,
+      directMessagesRejected: 1,
     });
   });
 
   it('produces predictable Minimal, Standard, Full safe and Custom omissions without mutation', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
     );
     await simulation.executeNextTurn();
@@ -806,7 +868,8 @@ describe('SimulationService', () => {
         personalityTextHistory: false,
         nearbyAgents: false,
         recentEvents: false,
-        recentCommunications: false,
+        recentPublicMessages: false,
+        recentDirectMessages: false,
         recentControlChanges: false,
         validationDetails: false,
         resultingEvents: false,
@@ -818,7 +881,7 @@ describe('SimulationService', () => {
         controlChanges: false,
       },
     });
-    expect(minimal.schemaVersion).toBe(3);
+    expect(minimal.schemaVersion).toBe(4);
     expect(
       experimentExportDocumentSchema.safeParse({
         ...minimal,
@@ -858,7 +921,7 @@ describe('SimulationService', () => {
       async decide(observation): Promise<ProviderDecision> {
         seen.push(observation);
         return {
-          decision: { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+          decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
           metadata: {
             provider: 'scripted-test',
             model: 'recording-test',
@@ -882,7 +945,7 @@ describe('SimulationService', () => {
       configured: true,
       async decide(): Promise<ProviderDecision> {
         return {
-          decision: { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+          decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
           metadata: {
             provider: 'scripted-test',
             model: 'long-running-test',
@@ -919,8 +982,8 @@ describe('SimulationService', () => {
   it('builds each observation from the latest authoritative world state', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
-        { requestedAction: { type: 'wait' }, summary: 'Observe.' },
+        { worldAction: { type: 'infect' }, summary: 'Infect.' },
+        { worldAction: { type: 'wait' }, summary: 'Observe.' },
       ]),
     );
     await simulation.executeNextTurn();
@@ -929,10 +992,177 @@ describe('SimulationService', () => {
     expect(second.observation.recentEvents[0]?.type).toBe('hex-infected');
   });
 
-  it('delivers messages as exclusive turns and exposes inbound and outbound context', async () => {
+  it('applies an infection and public message from the same provider decision', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        {
+          worldAction: { type: 'infect' },
+          communication: {
+            channel: 'public',
+            message: '  The center is claimed.  ',
+          },
+          summary: 'Claim and announce.',
+        },
+        { worldAction: { type: 'wait' }, summary: 'Observe.' },
+      ]),
+    );
+    const first = await simulation.executeNextTurn();
+    expect(first).toMatchObject({
+      outcome: 'accepted',
+      worldActionResult: { event: { type: 'hex-infected' } },
+      communicationResult: {
+        accepted: true,
+        event: {
+          type: 'public-message-sent',
+          message: 'The center is claimed.',
+        },
+      },
+    });
+    expect(
+      simulation.getSnapshot().world.events.map(({ type }) => type),
+    ).toEqual(['hex-infected', 'public-message-sent']);
+    const second = await simulation.executeNextTurn();
+    expect(second.observation.recentPublicMessages).toMatchObject([
+      { senderId: first.agentId, message: 'The center is claimed.' },
+    ]);
+  });
+
+  it('preserves accepted communication when the world action is rejected', async () => {
     const initial = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'placeholder' },
+        { worldAction: { type: 'wait' }, summary: 'placeholder' },
+      ]),
+    ).getSnapshot();
+    const [sender, recipient] = initial.world.agents;
+    for (const communication of [
+      { channel: 'public' as const, message: 'Still speaking.' },
+      {
+        channel: 'direct' as const,
+        recipientId: recipient!.id,
+        message: 'Nearby despite the bad move.',
+      },
+    ]) {
+      const simulation = service(
+        new ScriptedAgentProvider([
+          {
+            worldAction: {
+              type: 'move',
+              targetCell: h3CellSchema.parse('8928308280fffff'),
+            },
+            communication,
+            summary: 'Try both.',
+          },
+        ]),
+      );
+      const turn = await simulation.executeNextTurn();
+      expect(turn).toMatchObject({
+        agentId: sender!.id,
+        outcome: 'rejected',
+        worldActionResult: { accepted: false },
+        communicationResult: { accepted: true },
+      });
+      expect(simulation.getSnapshot().world.events).toHaveLength(1);
+    }
+  });
+
+  it('rejects an oversized communication without cancelling a valid world action', async () => {
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'invalid-communication-test',
+      configured: true,
+      async decide(): Promise<ProviderDecision> {
+        return {
+          decision: {
+            worldAction: { type: 'infect' },
+            communication: {
+              channel: 'public',
+              message: 'x'.repeat(281),
+            },
+            summary: 'Apply the valid component.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'invalid-communication-test',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    const turn = await simulation.executeNextTurn();
+    expect(turn).toMatchObject({
+      outcome: 'accepted',
+      worldActionResult: { event: { type: 'hex-infected' } },
+      communicationResult: {
+        accepted: false,
+        reason: 'invalid-communication',
+        attempt: { channel: 'public' },
+      },
+    });
+    if (
+      turn.outcome === 'provider-error' ||
+      !turn.communicationResult.requested ||
+      turn.communicationResult.accepted
+    )
+      throw new Error('Expected rejected communication fixture.');
+    expect(turn.communicationResult.attempt.message).toHaveLength(280);
+    expect(simulation.getSnapshot().experiment.metrics.aggregate).toMatchObject(
+      {
+        publicMessagesRequested: 1,
+        publicMessagesRejected: 1,
+        successfullyInfectedCells: 1,
+      },
+    );
+  });
+
+  it('uses pre-action positions for direct-message range', async () => {
+    const initial = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'placeholder' },
+      ]),
+    ).getSnapshot();
+    const sender = initial.world.agents[0]!;
+    const recipient = initial.world.agents.find(
+      (candidate) =>
+        gridDistance(sender.currentCell, candidate.currentCell) === 4,
+    )!;
+    const targetCell = initial.world.hexes.find(
+      ({ cell }) =>
+        gridDistance(sender.currentCell, cell) === 1 &&
+        gridDistance(cell, recipient.currentCell) === 3,
+    )!.cell;
+    const simulation = service(
+      new ScriptedAgentProvider([
+        {
+          worldAction: { type: 'move', targetCell },
+          communication: {
+            channel: 'direct',
+            recipientId: recipient.id,
+            message: 'This must use the old distance.',
+          },
+          summary: 'Move closer and try to message.',
+        },
+      ]),
+    );
+    const turn = await simulation.executeNextTurn();
+    expect(turn).toMatchObject({
+      outcome: 'accepted',
+      communicationResult: {
+        accepted: false,
+        reason: 'out-of-range',
+        attempt: { distance: 4 },
+      },
+    });
+    expect(simulation.getSnapshot().world.agents[0]?.currentCell).toBe(
+      targetCell,
+    );
+  });
+
+  it('delivers direct messages alongside world actions and exposes inbound and outbound context', async () => {
+    const initial = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'placeholder' },
       ]),
     ).getSnapshot();
     const sender = initial.world.agents[0]!;
@@ -940,19 +1170,20 @@ describe('SimulationService', () => {
     const simulation = service(
       new ScriptedAgentProvider([
         {
-          requestedAction: {
-            type: 'message',
+          worldAction: { type: 'wait' },
+          communication: {
+            channel: 'direct',
             recipientId: recipient.id,
             message: '  Hold near the center.  ',
           },
           summary: 'Coordinate.',
         },
-        { requestedAction: { type: 'wait' }, summary: 'Observe.' },
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
-        { requestedAction: { type: 'wait' }, summary: 'Observe sender.' },
+        { worldAction: { type: 'wait' }, summary: 'Observe.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Observe sender.' },
       ]),
     );
     const before = simulation.getSnapshot().world;
@@ -960,17 +1191,19 @@ describe('SimulationService', () => {
     expect(sent).toMatchObject({
       agentId: sender.id,
       outcome: 'accepted',
-      event: {
-        type: 'agent-messaged',
-        recipientId: recipient.id,
-        message: 'Hold near the center.',
+      communicationResult: {
+        event: {
+          type: 'direct-message-sent',
+          recipientId: recipient.id,
+          message: 'Hold near the center.',
+        },
       },
     });
     expect(simulation.getSnapshot().world.agents).toEqual(before.agents);
     expect(simulation.getSnapshot().world.hexes).toEqual(before.hexes);
 
     const recipientTurn = await simulation.executeNextTurn();
-    expect(recipientTurn.observation.recentCommunications).toMatchObject([
+    expect(recipientTurn.observation.recentDirectMessages).toMatchObject([
       {
         senderId: sender.id,
         recipientId: recipient.id,
@@ -978,11 +1211,13 @@ describe('SimulationService', () => {
         message: 'Hold near the center.',
       },
     ]);
-    for (let index = 0; index < 5; index += 1)
+    const unrelatedTurn = await simulation.executeNextTurn();
+    expect(unrelatedTurn.observation.recentDirectMessages).toEqual([]);
+    for (let index = 0; index < 4; index += 1)
       await simulation.executeNextTurn();
     const senderTurn = simulation.getSnapshot().turns.at(-1)!;
     expect(senderTurn.agentId).toBe(sender.id);
-    expect(senderTurn.observation.recentCommunications[0]).toMatchObject({
+    expect(senderTurn.observation.recentDirectMessages[0]).toMatchObject({
       direction: 'outbound',
       recipientId: recipient.id,
     });
@@ -991,7 +1226,7 @@ describe('SimulationService', () => {
   it('rejects self and unknown recipients without a delivered event', async () => {
     const ids = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'placeholder' },
+        { worldAction: { type: 'wait' }, summary: 'placeholder' },
       ]),
     )
       .getSnapshot()
@@ -1006,8 +1241,9 @@ describe('SimulationService', () => {
       const simulation = service(
         new ScriptedAgentProvider([
           {
-            requestedAction: {
-              type: 'message',
+            worldAction: { type: 'wait' },
+            communication: {
+              channel: 'direct',
               recipientId,
               message: 'Hello.',
             },
@@ -1016,10 +1252,10 @@ describe('SimulationService', () => {
         ]),
       );
       expect(await simulation.executeNextTurn()).toMatchObject({
-        outcome: 'rejected',
-        validation: { accepted: false, reason },
+        outcome: 'accepted',
+        communicationResult: { accepted: false, reason },
       });
-      expect(simulation.getSnapshot().world.events).toEqual([]);
+      expect(simulation.getSnapshot().world.events).toHaveLength(1);
     }
   });
 
@@ -1037,13 +1273,14 @@ describe('SimulationService', () => {
         );
         return {
           decision: {
-            requestedAction: target
+            worldAction: { type: 'wait' },
+            communication: target
               ? {
-                  type: 'message',
+                  channel: 'direct',
                   recipientId: target.id,
                   message: `Turn ${seen.length}`,
                 }
-              : { type: 'wait' },
+              : undefined,
             summary: 'Message.',
           },
           metadata: {
@@ -1066,58 +1303,122 @@ describe('SimulationService', () => {
     for (let index = 0; index < 48; index += 1)
       await simulation.executeNextTurn();
     const bounded = seen.findLast(
-      ({ recentCommunications }) => recentCommunications.length === 6,
+      ({ recentDirectMessages }) => recentDirectMessages.length === 6,
     );
-    expect(bounded?.recentCommunications).toHaveLength(6);
+    expect(bounded?.recentDirectMessages).toHaveLength(6);
     expect(
-      bounded?.recentCommunications.map(({ occurredAt }) => occurredAt),
+      bounded?.recentDirectMessages.map(({ occurredAt }) => occurredAt),
     ).toEqual(
-      bounded?.recentCommunications
+      bounded?.recentDirectMessages
         .map(({ occurredAt }) => occurredAt)
         .toSorted(),
+    );
+  });
+
+  it('keeps public world chat chronological, globally visible, and capped at twelve', async () => {
+    const seen: AgentObservation[] = [];
+    let clock = 0;
+    let eventSequence = 0;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'public-history-test',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        seen.push(observation);
+        return {
+          decision: {
+            worldAction: { type: 'wait' },
+            communication: {
+              channel: 'public',
+              message: `Public ${seen.length}`,
+            },
+            summary: 'Publish.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'public-history-test',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = new SimulationService({
+      provider,
+      now: () =>
+        new Date(
+          Date.parse('2026-08-13T12:00:00.000Z') + clock++,
+        ).toISOString(),
+      createEventId: () =>
+        `67aa21b9-fc78-4b04-9f92-${String(++eventSequence).padStart(12, '0')}`,
+    });
+    for (let index = 0; index < 14; index += 1)
+      await simulation.executeNextTurn();
+    const bounded = seen.at(-1)!.recentPublicMessages;
+    expect(bounded).toHaveLength(12);
+    expect(bounded.map(({ message }) => message)).toEqual(
+      Array.from({ length: 12 }, (_, index) => `Public ${index + 2}`),
+    );
+    expect(new Set(bounded.map(({ senderId }) => senderId))).not.toEqual(
+      new Set([seen.at(-1)!.agentId]),
     );
   });
 
   it('reset clears accepted communication history and metrics', async () => {
     const initial = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'placeholder' },
+        { worldAction: { type: 'wait' }, summary: 'placeholder' },
       ]),
     ).getSnapshot();
     const simulation = service(
       new ScriptedAgentProvider([
         {
-          requestedAction: {
-            type: 'message',
-            recipientId: initial.world.agents[1]!.id,
-            message: 'Before reset.',
+          worldAction: { type: 'wait' },
+          communication: {
+            channel: 'public',
+            message: 'Public before reset.',
           },
-          summary: 'Message.',
+          summary: 'Publish.',
+        },
+        {
+          worldAction: { type: 'wait' },
+          communication: {
+            channel: 'direct',
+            recipientId: initial.world.agents[0]!.id,
+            message: 'Direct before reset.',
+          },
+          summary: 'Send directly.',
         },
       ]),
     );
     await simulation.executeNextTurn();
-    expect(simulation.getSnapshot().world.events).toHaveLength(1);
+    await simulation.executeNextTurn();
+    expect(simulation.getSnapshot().world.events).toHaveLength(4);
     expect(simulation.getSnapshot().experiment.metrics.aggregate).toMatchObject(
       {
-        requestedMessages: 1,
-        deliveredMessages: 1,
+        publicMessagesRequested: 1,
+        publicMessagesAccepted: 1,
+        directMessagesRequested: 1,
+        directMessagesDelivered: 1,
       },
     );
     const reset = simulation.reset();
     expect(reset.world.events).toEqual([]);
     expect(reset.experiment.metrics.aggregate).toMatchObject({
-      requestedMessages: 0,
-      deliveredMessages: 0,
-      sentCommunications: 0,
-      receivedCommunications: 0,
+      publicMessagesSent: 0,
+      publicMessagesRequested: 0,
+      publicMessagesAccepted: 0,
+      directMessagesRequested: 0,
+      directMessagesDelivered: 0,
+      directMessagesSent: 0,
+      directMessagesReceived: 0,
     });
   });
 
   it('updates an existing agent and uses the trimmed personality on its next turn', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Use the edit.' },
+        { worldAction: { type: 'wait' }, summary: 'Use the edit.' },
       ]),
     );
     const agent = simulation.getSnapshot().world.agents[0]!;
@@ -1137,7 +1438,7 @@ describe('SimulationService', () => {
   it('rejects unknown agents and invalid personalities without mutation, then recovers', () => {
     const simulation = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
     );
     const before = simulation.getSnapshot();
@@ -1170,7 +1471,7 @@ describe('SimulationService', () => {
   it('edits personality without changing world progress or historical observations', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+        { worldAction: { type: 'infect' }, summary: 'Infect.' },
       ]),
     );
     await simulation.executeNextTurn();
@@ -1198,7 +1499,7 @@ describe('SimulationService', () => {
   it('reset preserves active personality edits while restoring deterministic progress', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+        { worldAction: { type: 'infect' }, summary: 'Infect.' },
       ]),
     );
     const initial = simulation.getSnapshot();
@@ -1225,7 +1526,7 @@ describe('SimulationService', () => {
   it('restores all six defaults without resetting current world progress', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+        { worldAction: { type: 'infect' }, summary: 'Infect.' },
       ]),
     );
     for (const agent of simulation.getSnapshot().world.agents) {
@@ -1256,7 +1557,7 @@ describe('SimulationService', () => {
   it('records accepted and rejected actions without mutating on rejection', async () => {
     const initial = service(
       new ScriptedAgentProvider([
-        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+        { worldAction: { type: 'infect' }, summary: 'Infect.' },
       ]),
     );
     expect((await initial.executeNextTurn()).outcome).toBe('accepted');
@@ -1264,13 +1565,13 @@ describe('SimulationService', () => {
     const rejected = service(
       new ScriptedAgentProvider([
         {
-          requestedAction: {
+          worldAction: {
             type: 'move',
             targetCell: h3CellSchema.parse('8928308280fffff'),
           },
           summary: 'Attempt a distant move.',
         },
-        { requestedAction: { type: 'wait' }, summary: 'Continue.' },
+        { worldAction: { type: 'wait' }, summary: 'Continue.' },
       ]),
     );
     const before = rejected.getSnapshot().world;
@@ -1303,7 +1604,7 @@ describe('SimulationService', () => {
           });
         return {
           decision: {
-            requestedAction: { type: 'wait' },
+            worldAction: { type: 'wait' },
             summary: 'Recovered.',
           },
           metadata: {
@@ -1341,7 +1642,7 @@ describe('SimulationService', () => {
         if (calls === 1) {
           return {
             decision: {
-              requestedAction: { type: 'wait' },
+              worldAction: { type: 'wait' },
               summary: 'Invalid metadata follows.',
             },
             metadata: {
@@ -1352,7 +1653,7 @@ describe('SimulationService', () => {
           } as ProviderDecision;
         }
         return {
-          decision: { requestedAction: { type: 'wait' }, summary: 'Valid.' },
+          decision: { worldAction: { type: 'wait' }, summary: 'Valid.' },
           metadata: {
             provider: 'scripted-test',
             model: 'invalid-metadata-test',
@@ -1395,7 +1696,7 @@ describe('SimulationService', () => {
       async decide(observation): Promise<ProviderDecision> {
         return {
           decision: {
-            requestedAction: {
+            worldAction: {
               type: 'move',
               targetCell: observation.adjacentCells[0]!.cell,
             },
@@ -1428,7 +1729,7 @@ describe('SimulationService', () => {
           'The moving history fixture must produce accepted turns.',
         );
       }
-      producedEvents.push(lastRecord.event);
+      producedEvents.push(lastRecord.worldActionResult.event);
     }
 
     const snapshot = simulation.getSnapshot();
@@ -1484,7 +1785,7 @@ describe('SimulationService', () => {
       simulation.generateExperimentExport(exportRequest('minimal')),
     ).toThrow(SimulationConflictError);
     release({
-      decision: { requestedAction: { type: 'wait' }, summary: 'Done.' },
+      decision: { worldAction: { type: 'wait' }, summary: 'Done.' },
       metadata: {
         provider: 'scripted-test',
         model: 'deferred-test',

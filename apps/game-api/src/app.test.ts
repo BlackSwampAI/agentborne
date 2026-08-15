@@ -23,7 +23,7 @@ describe('game API simulation boundary', () => {
   it('reports health and serves a schema-valid snapshot', async () => {
     const app = createApp({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
     });
     const health = await app.request('/health');
@@ -44,7 +44,7 @@ describe('game API simulation boundary', () => {
   it('returns accepted and rejected single-turn records with valid response shapes', async () => {
     const acceptedApp = createApp({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+        { worldAction: { type: 'infect' }, summary: 'Infect.' },
       ]),
     });
     const accepted = singleTurnResponseSchema.parse(
@@ -56,9 +56,11 @@ describe('game API simulation boundary', () => {
     if (accepted.turn.outcome !== 'accepted')
       throw new Error('Expected accepted infection fixture.');
     expect(accepted.turn).toMatchObject({
-      event: {
-        type: 'hex-infected',
-        controllerAgentId: accepted.turn.agentId,
+      worldActionResult: {
+        event: {
+          type: 'hex-infected',
+          controllerAgentId: accepted.turn.agentId,
+        },
       },
     });
     expect(
@@ -73,7 +75,7 @@ describe('game API simulation boundary', () => {
     const rejectedApp = createApp({
       provider: new ScriptedAgentProvider([
         {
-          requestedAction: {
+          worldAction: {
             type: 'move',
             targetCell: h3CellSchema.parse('8928308280fffff'),
           },
@@ -89,10 +91,10 @@ describe('game API simulation boundary', () => {
     expect(rejected.turn.outcome).toBe('rejected');
   });
 
-  it('returns typed accepted and rejected message responses', async () => {
+  it('returns independently typed world-action and communication responses', async () => {
     const bootstrap = createApp({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'placeholder' },
+        { worldAction: { type: 'wait' }, summary: 'placeholder' },
       ]),
     });
     const snapshot = simulationSnapshotSchema.parse(
@@ -102,8 +104,9 @@ describe('game API simulation boundary', () => {
     const acceptedApp = createApp({
       provider: new ScriptedAgentProvider([
         {
-          requestedAction: {
-            type: 'message',
+          worldAction: { type: 'wait' },
+          communication: {
+            channel: 'direct',
             recipientId: recipient!.id,
             message: 'Nearby API message.',
           },
@@ -118,19 +121,23 @@ describe('game API simulation boundary', () => {
     );
     expect(accepted.turn).toMatchObject({
       outcome: 'accepted',
-      event: {
-        type: 'agent-messaged',
-        agentId: sender!.id,
-        recipientId: recipient!.id,
-        message: 'Nearby API message.',
+      communicationResult: {
+        accepted: true,
+        event: {
+          type: 'direct-message-sent',
+          agentId: sender!.id,
+          recipientId: recipient!.id,
+          message: 'Nearby API message.',
+        },
       },
     });
 
     const rejectedApp = createApp({
       provider: new ScriptedAgentProvider([
         {
-          requestedAction: {
-            type: 'message',
+          worldAction: { type: 'wait' },
+          communication: {
+            channel: 'direct',
             recipientId: sender!.id,
             message: 'Self message.',
           },
@@ -144,10 +151,10 @@ describe('game API simulation boundary', () => {
       ).json(),
     );
     expect(rejected.turn).toMatchObject({
-      outcome: 'rejected',
-      validation: { reason: 'self-message' },
+      outcome: 'accepted',
+      communicationResult: { accepted: false, reason: 'self-message' },
     });
-    expect(rejected.snapshot.world.events).toEqual([]);
+    expect(rejected.snapshot.world.events).toHaveLength(1);
   });
 
   it('returns provider failures and missing configuration safely', async () => {
@@ -201,7 +208,7 @@ describe('game API simulation boundary', () => {
       async decide(): Promise<ProviderDecision> {
         calls += 1;
         return {
-          decision: { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+          decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
           metadata: {
             provider: 'scripted-test',
             model: calls === 1 ? '' : 'invalid-metadata-test',
@@ -253,7 +260,7 @@ describe('game API simulation boundary', () => {
   it('resets world progress while preserving personality configuration', async () => {
     const app = createApp({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+        { worldAction: { type: 'infect' }, summary: 'Infect.' },
       ]),
     });
     const initial = simulationSnapshotSchema.parse(
@@ -282,7 +289,7 @@ describe('game API simulation boundary', () => {
   it('updates one agent personality through a runtime-validated safe response', async () => {
     const app = createApp({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
     });
     const initial = simulationSnapshotSchema.parse(
@@ -315,7 +322,7 @@ describe('game API simulation boundary', () => {
   ])('rejects invalid personality request bodies safely', async (body) => {
     const app = createApp({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
     });
     const response = await app.request(
@@ -338,7 +345,7 @@ describe('game API simulation boundary', () => {
   it('returns typed invalid and unknown agent errors without internal details', async () => {
     const app = createApp({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
     });
     for (const [agentId, status, code] of [
@@ -365,7 +372,7 @@ describe('game API simulation boundary', () => {
   it('restores all default personalities without resetting progress', async () => {
     const app = createApp({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'infect' }, summary: 'Infect.' },
+        { worldAction: { type: 'infect' }, summary: 'Infect.' },
       ]),
     });
     const initial = simulationSnapshotSchema.parse(
@@ -461,7 +468,7 @@ describe('game API simulation boundary', () => {
       error: { code: 'export_conflict' },
     });
     release({
-      decision: { requestedAction: { type: 'wait' }, summary: 'Done.' },
+      decision: { worldAction: { type: 'wait' }, summary: 'Done.' },
       metadata: {
         provider: 'scripted-test',
         model: 'deferred-test',
@@ -474,7 +481,7 @@ describe('game API simulation boundary', () => {
   it('uses a predictable error envelope', async () => {
     const app = createApp({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
     });
     const response = await app.request('/missing');
@@ -490,7 +497,7 @@ describe('game API simulation boundary', () => {
   it('previews and generates schema-valid retained exports through narrow endpoints', async () => {
     const app = createApp({
       provider: new ScriptedAgentProvider([
-        { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
       ]),
     });
     await app.request('/api/simulation/turn', { method: 'POST' });
@@ -498,7 +505,7 @@ describe('game API simulation boundary', () => {
       agents: { mode: 'all' },
       turns: { mode: 'entire-retained' },
       outcomes: ['accepted', 'rejected', 'provider-error'],
-      actions: ['move', 'infect', 'message', 'wait'],
+      actions: ['move', 'infect', 'capture', 'wait'],
       level: 'minimal',
     };
     const previewResponse = await app.request(
@@ -514,7 +521,7 @@ describe('game API simulation boundary', () => {
       await previewResponse.json(),
     );
     expect(preview).toMatchObject({
-      matchingRecordCount: 1,
+      matchingTurnCount: 1,
       knownCostCredits: 0,
       turnsWithUnknownCost: 0,
     });
@@ -569,7 +576,7 @@ describe('game API simulation boundary', () => {
     async (body, status, code) => {
       const app = createApp({
         provider: new ScriptedAgentProvider([
-          { requestedAction: { type: 'wait' }, summary: 'Wait.' },
+          { worldAction: { type: 'wait' }, summary: 'Wait.' },
         ]),
       });
       const response = await app.request('/api/simulation/experiment/export', {

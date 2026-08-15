@@ -405,6 +405,19 @@ export function WorldLab() {
             )}
           </section>
 
+          <PublicWorldChat
+            agents={snapshot.world.agents}
+            events={snapshot.world.events.filter(
+              (
+                event,
+              ): event is Extract<
+                SimulationSnapshot['world']['events'][number],
+                { type: 'public-message-sent' }
+              > => event.type === 'public-message-sent',
+            )}
+            turns={snapshot.turns}
+          />
+
           {selectedAgent && (
             <AgentInspector
               key={`${selectedAgent.id}:${selectedAgent.personality}`}
@@ -415,17 +428,15 @@ export function WorldLab() {
                 )!.state
               }
               latestTurn={latestTurn}
-              turns={snapshot.turns.filter(
-                ({ agentId }) => agentId === selectedAgent.id,
-              )}
-              communications={snapshot.world.events.filter(
+              turns={snapshot.turns}
+              directMessages={snapshot.world.events.filter(
                 (
                   event,
                 ): event is Extract<
                   SimulationSnapshot['world']['events'][number],
-                  { type: 'agent-messaged' }
+                  { type: 'direct-message-sent' }
                 > =>
-                  event.type === 'agent-messaged' &&
+                  event.type === 'direct-message-sent' &&
                   (event.agentId === selectedAgent.id ||
                     event.recipientId === selectedAgent.id),
               )}
@@ -525,6 +536,56 @@ export function WorldLab() {
   );
 }
 
+function PublicWorldChat({
+  agents,
+  events,
+  turns,
+}: {
+  agents: SimulationSnapshot['world']['agents'];
+  events: Array<
+    Extract<
+      SimulationSnapshot['world']['events'][number],
+      { type: 'public-message-sent' }
+    >
+  >;
+  turns: AgentTurnRecord[];
+}) {
+  return (
+    <section className="panel world-chat-panel" aria-label="Public world chat">
+      <p className="panel-kicker">Visible to every agent</p>
+      <h2>Public world chat</h2>
+      {events.length === 0 ? (
+        <p className="muted">No public messages yet.</p>
+      ) : (
+        <ol className="world-chat-feed">
+          {events.slice(-12).map((event) => {
+            const sender = agents.find(({ id }) => id === event.agentId);
+            const turnNumber = turns.find(
+              (turn) =>
+                turn.outcome !== 'provider-error' &&
+                turn.communicationResult.requested &&
+                turn.communicationResult.accepted &&
+                turn.communicationResult.event.id === event.id,
+            )?.turnNumber;
+            return (
+              <li key={event.id}>
+                <div>
+                  <strong>{sender?.name ?? event.agentId}</strong>
+                  <small>
+                    Turn {turnNumber ?? '—'} ·{' '}
+                    {formatTimestamp(event.occurredAt)}
+                  </small>
+                </div>
+                <p>{event.message}</p>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
+  );
+}
+
 function TerritoryScoreboard({
   entries,
 }: {
@@ -559,7 +620,7 @@ function AgentInspector({
   cellState,
   latestTurn,
   turns,
-  communications,
+  directMessages,
   agents,
   mutationDisabled,
   mutationPending,
@@ -573,10 +634,10 @@ function AgentInspector({
   cellState: 'open' | 'infected';
   latestTurn?: AgentTurnRecord;
   turns: AgentTurnRecord[];
-  communications: Array<
+  directMessages: Array<
     Extract<
       SimulationSnapshot['world']['events'][number],
-      { type: 'agent-messaged' }
+      { type: 'direct-message-sent' }
     >
   >;
   agents: SimulationSnapshot['world']['agents'];
@@ -643,8 +704,9 @@ function AgentInspector({
       <div className="agent-usage" aria-label="Selected agent usage">
         <strong>Experiment usage</strong>
         <span>{metrics?.totalTurns ?? 0} turns</span>
-        <span>{metrics?.sentCommunications ?? 0} sent</span>
-        <span>{metrics?.receivedCommunications ?? 0} received</span>
+        <span>{metrics?.publicMessagesSent ?? 0} public sent</span>
+        <span>{metrics?.directMessagesSent ?? 0} direct sent</span>
+        <span>{metrics?.directMessagesReceived ?? 0} direct received</span>
         <span>{controlledCellCount} controlled cells</span>
         <span>{formatCost(metrics?.knownCostCredits ?? 0)} known cost</span>
         {(metrics?.turnsWithUnknownCost ?? 0) > 0 && (
@@ -676,15 +738,15 @@ function AgentInspector({
       <button type="button" onClick={() => onExportAgent(agent.id)}>
         Export this agent
       </button>
-      <h3>Recent communications</h3>
-      {communications.length === 0 ? (
-        <p className="muted">No communications for this agent yet.</p>
+      <h3>Direct-message history</h3>
+      {directMessages.length === 0 ? (
+        <p className="muted">No direct messages for this agent yet.</p>
       ) : (
         <ol
           className="communication-history"
-          aria-label="Recent communications"
+          aria-label="Direct-message history"
         >
-          {communications.map((communication) => {
+          {directMessages.slice(-12).map((communication) => {
             const sender = agents.find(
               ({ id }) => id === communication.agentId,
             );
@@ -692,17 +754,32 @@ function AgentInspector({
               ({ id }) => id === communication.recipientId,
             );
             const direction =
-              communication.agentId === agent.id ? 'Outbound' : 'Inbound';
+              communication.agentId === agent.id ? 'Sent' : 'Received';
+            const other =
+              communication.agentId === agent.id ? recipient : sender;
+            const turnNumber = turns.find(
+              (turn) =>
+                turn.outcome !== 'provider-error' &&
+                turn.communicationResult.requested &&
+                turn.communicationResult.accepted &&
+                turn.communicationResult.event.id === communication.id,
+            )?.turnNumber;
             return (
               <li key={communication.id}>
                 <div>
                   <strong>{direction}</strong>{' '}
                   <span>
-                    {sender?.name ?? communication.agentId} →{' '}
-                    {recipient?.name ?? communication.recipientId}
+                    {other?.name ??
+                      (direction === 'Sent'
+                        ? communication.recipientId
+                        : communication.agentId)}
                   </span>
                 </div>
                 <p>{communication.message}</p>
+                <small>
+                  Turn {turnNumber ?? '—'} ·{' '}
+                  {formatTimestamp(communication.occurredAt)}
+                </small>
               </li>
             );
           })}
@@ -816,18 +893,34 @@ function AgentInspector({
           {latestTurn.outcome !== 'provider-error' ? (
             <>
               <p>
-                <strong>Requested:</strong>{' '}
-                {formatAction(latestTurn.requestedAction)}
+                <strong>World action:</strong>{' '}
+                {formatAction(latestTurn.worldAction)}
+                {' · '}
+                {latestTurn.worldActionResult.accepted
+                  ? 'accepted'
+                  : 'rejected'}
               </p>
               <p>
                 <strong>Summary:</strong> {latestTurn.summary}
               </p>
-              {latestTurn.outcome === 'rejected' && (
+              {!latestTurn.worldActionResult.accepted && (
                 <p>
-                  <strong>Rejection:</strong> {latestTurn.validation.reason} ·{' '}
-                  {latestTurn.validation.details}
+                  <strong>World-action rejection:</strong>{' '}
+                  {latestTurn.worldActionResult.reason} ·{' '}
+                  {latestTurn.worldActionResult.details}
                 </p>
               )}
+              <div
+                className="component-result"
+                aria-label="Communication result"
+              >
+                <strong>Communication:</strong>{' '}
+                {!latestTurn.communicationResult.requested
+                  ? 'none requested'
+                  : latestTurn.communicationResult.accepted
+                    ? `${latestTurn.communicationResult.event.channel} accepted`
+                    : `${latestTurn.communicationResult.attempt.channel} rejected · ${latestTurn.communicationResult.reason}`}
+              </div>
               <p className="provider-meta">
                 {latestTurn.provider.provider} · {latestTurn.provider.model} ·{' '}
                 {latestTurn.provider.latencyMs}ms
@@ -887,11 +980,24 @@ function AgentInspector({
               Recent public events: {latestTurn.observation.recentEvents.length}
             </p>
             <p>
-              Recent communications:{' '}
-              {latestTurn.observation.recentCommunications.length}
+              Recent public messages:{' '}
+              {latestTurn.observation.recentPublicMessages.length}
             </p>
             <ol className="observation-communications">
-              {latestTurn.observation.recentCommunications.map(
+              {latestTurn.observation.recentPublicMessages.map(
+                (communication) => (
+                  <li key={communication.eventId}>
+                    {communication.senderName}: {communication.message}
+                  </li>
+                ),
+              )}
+            </ol>
+            <p>
+              Recent direct messages:{' '}
+              {latestTurn.observation.recentDirectMessages.length}
+            </p>
+            <ol className="observation-communications">
+              {latestTurn.observation.recentDirectMessages.map(
                 (communication) => (
                   <li key={communication.eventId}>
                     {communication.direction}: {communication.senderName} →{' '}
@@ -908,6 +1014,7 @@ function AgentInspector({
       <h3>Recent records</h3>
       <ol className="compact-history">
         {turns
+          .filter(({ agentId }) => agentId === agent.id)
           .slice(-5)
           .toReversed()
           .map((turn) => (
@@ -926,7 +1033,8 @@ function ExperimentUsageMeter({ snapshot }: { snapshot: SimulationSnapshot }) {
     <div className="usage-meter" aria-label="Current experiment usage">
       <strong>Current experiment</strong>
       <span>{snapshot.experiment.totalCompletedTurns} turns</span>
-      <span>{metrics.deliveredMessages} messages delivered</span>
+      <span>{metrics.publicMessagesAccepted} public messages</span>
+      <span>{metrics.directMessagesDelivered} direct messages</span>
       <span>{formatCost(metrics.knownCostCredits)} known cost</span>
       <span>
         {metrics.tokens.totalTokens ??
@@ -946,7 +1054,8 @@ const defaultCustomOptions: CustomExportOptions = {
   personalityTextHistory: true,
   nearbyAgents: true,
   recentEvents: true,
-  recentCommunications: true,
+  recentPublicMessages: true,
+  recentDirectMessages: true,
   recentControlChanges: true,
   validationDetails: true,
   resultingEvents: true,
@@ -987,8 +1096,14 @@ function ExperimentExportPanel({
     Array<'accepted' | 'rejected' | 'provider-error'>
   >(['accepted', 'rejected', 'provider-error']);
   const [actions, setActions] = useState<
-    Array<'move' | 'infect' | 'capture' | 'message' | 'wait'>
-  >(['move', 'infect', 'capture', 'message', 'wait']);
+    Array<'move' | 'infect' | 'capture' | 'wait'>
+  >(['move', 'infect', 'capture', 'wait']);
+  const [communicationChannel, setCommunicationChannel] = useState<
+    'all' | 'public' | 'direct'
+  >('all');
+  const [communicationStatus, setCommunicationStatus] = useState<
+    'all' | 'accepted' | 'rejected'
+  >('all');
   const [custom, setCustom] = useState(defaultCustomOptions);
   const [preview, setPreview] = useState<ExperimentExportPreview | null>(null);
   const [document, setDocument] = useState<ExperimentExportDocument | null>(
@@ -1018,6 +1133,10 @@ function ExperimentExportPanel({
           : { mode: 'range' as const, fromTurn, toTurn },
     outcomes,
     actions,
+    communications: {
+      channel: communicationChannel,
+      status: communicationStatus,
+    },
     level,
     serialization,
     ...(level === 'custom' ? { custom } : {}),
@@ -1252,10 +1371,42 @@ function ExperimentExportPanel({
       />
       <FilterChecks
         label="Actions"
-        options={['move', 'infect', 'capture', 'message', 'wait']}
+        options={['move', 'infect', 'capture', 'wait']}
         selected={actions}
         onToggle={(value) => setActions(toggle(actions, value))}
       />
+      <div className="range-row">
+        <label>
+          Communication channel
+          <select
+            value={communicationChannel}
+            onChange={(event) =>
+              setCommunicationChannel(
+                event.target.value as typeof communicationChannel,
+              )
+            }
+          >
+            <option value="all">All</option>
+            <option value="public">Public</option>
+            <option value="direct">Direct</option>
+          </select>
+        </label>
+        <label>
+          Communication result
+          <select
+            value={communicationStatus}
+            onChange={(event) =>
+              setCommunicationStatus(
+                event.target.value as typeof communicationStatus,
+              )
+            }
+          >
+            <option value="all">All</option>
+            <option value="accepted">Accepted</option>
+            <option value="rejected">Rejected</option>
+          </select>
+        </label>
+      </div>
       {level === 'custom' && (
         <fieldset>
           <legend>Advanced Custom switches</legend>
@@ -1267,7 +1418,8 @@ function ExperimentExportPanel({
                   disabled={
                     (key === 'nearbyAgents' ||
                       key === 'recentEvents' ||
-                      key === 'recentCommunications' ||
+                      key === 'recentPublicMessages' ||
+                      key === 'recentDirectMessages' ||
                       key === 'recentControlChanges') &&
                     !custom.turnObservations
                   }
@@ -1281,7 +1433,8 @@ function ExperimentExportPanel({
                       ) {
                         next.nearbyAgents = false;
                         next.recentEvents = false;
-                        next.recentCommunications = false;
+                        next.recentPublicMessages = false;
+                        next.recentDirectMessages = false;
                         next.recentControlChanges = false;
                       }
                       return next;
@@ -1340,11 +1493,11 @@ function ExperimentExportPanel({
         <dl className="preview-grid" aria-label="Export preview">
           <div>
             <dt>Matching</dt>
-            <dd>{preview.matchingRecordCount} records</dd>
+            <dd>{preview.matchingTurnCount} turns</dd>
           </div>
           <div>
             <dt>Communications</dt>
-            <dd>{preview.matchingCommunicationCount} accepted</dd>
+            <dd>{preview.matchingCommunicationCount} matched</dd>
           </div>
           <div>
             <dt>Control changes</dt>
@@ -1407,7 +1560,8 @@ function customOptionLabel(key: keyof CustomExportOptions): string {
     personalityTextHistory: 'Personality text and history',
     nearbyAgents: 'Nearby agents',
     recentEvents: 'Recent events',
-    recentCommunications: 'Recent communications in observations',
+    recentPublicMessages: 'Recent public messages in observations',
+    recentDirectMessages: 'Recent direct messages in observations',
     recentControlChanges: 'Recent control changes in observations',
     validationDetails: 'Validation details',
     resultingEvents: 'Resulting events',
@@ -1467,11 +1621,9 @@ function formatAction(
   action: Extract<
     AgentTurnRecord,
     { outcome: 'accepted' | 'rejected' }
-  >['requestedAction'],
+  >['worldAction'],
 ) {
   if (action.type === 'move') return `move → ${action.targetCell}`;
-  if (action.type === 'message')
-    return `message → ${action.recipientId}: ${action.message}`;
   return action.type;
 }
 
@@ -1481,25 +1633,32 @@ function formatTurn(
 ) {
   if (turn.outcome === 'provider-error')
     return `Provider failure · ${turn.failure.message}`;
-  if (turn.outcome === 'rejected')
-    return `Rejected ${formatAction(turn.requestedAction)} · ${turn.validation.reason}`;
-  if (turn.event.type === 'agent-moved')
-    return `Movement · ${turn.event.toCell}`;
-  if (turn.event.type === 'hex-infected')
-    return `Infection · ${turn.event.cell}`;
-  if (turn.event.type === 'agent-messaged') {
-    const event = turn.event;
-    const sender = agents.find(({ id }) => id === event.agentId);
-    const recipient = agents.find(({ id }) => id === event.recipientId);
-    return `Message · ${sender?.name ?? event.agentId} → ${recipient?.name ?? event.recipientId}: ${event.message}`;
-  }
-  if (turn.event.type === 'hex-captured') {
-    const event = turn.event;
+  const communication = !turn.communicationResult.requested
+    ? ''
+    : turn.communicationResult.accepted
+      ? ` + ${turn.communicationResult.event.channel} message accepted`
+      : ` + ${turn.communicationResult.attempt.channel} message rejected (${turn.communicationResult.reason})`;
+  if (!turn.worldActionResult.accepted)
+    return `Rejected ${formatAction(turn.worldAction)} · ${turn.worldActionResult.reason}${communication}`;
+  const event = turn.worldActionResult.event;
+  if (event.type === 'agent-moved')
+    return `Movement · ${event.toCell}${communication}`;
+  if (event.type === 'hex-infected')
+    return `Infection · ${event.cell}${communication}`;
+  if (event.type === 'hex-captured') {
     const capturer = agents.find(({ id }) => id === event.controllerAgentId);
     const previous = agents.find(
       ({ id }) => id === event.previousControllerAgentId,
     );
-    return `${capturer?.name ?? event.controllerAgentId} captured ${event.cell} from ${previous?.name ?? event.previousControllerAgentId}.`;
+    return `${capturer?.name ?? event.controllerAgentId} captured ${event.cell} from ${previous?.name ?? event.previousControllerAgentId}.${communication}`;
   }
-  return 'Waited';
+  return `Waited${communication}`;
+}
+
+function formatTimestamp(timestamp: string): string {
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }

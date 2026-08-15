@@ -39,6 +39,8 @@ First focused slice: messaging is one exclusive turn action to a single existing
 
 Second focused slice: every infected hex has one individual controller. Infect claims an open current hex and capture deterministically transfers an infected current hex from another agent only after that controller leaves it; controller presence defends against immediate capture and control ping-pong. Observations expose explicit capture eligibility, an authoritative six-agent territory scoreboard, and at most six event-derived relevant gains/losses. Mingle alone receives a social coalition-builder default so messaging remains deliberately exercised without becoming automatic. Telemetry and schema-v3 exports are victim-aware. Combat calculations, formal alliances, resources, territory bonuses, and post-infection autonomous conflict playback remain deferred.
 
+Third focused slice: communication is decoupled from the world action while remaining inside the same provider decision and single inference. Each turn requires move, infect, capture, or wait and may also request one public world-chat message or one proximity-bound direct message. The two results are validated and recorded independently; direct eligibility uses the pre-action snapshot. Observations expose bounded public and private context, World Lab separates both results, and safe exports advance to schema v4 with public/direct and accepted/rejected communication filters. Independent social ticks, automatic replies, relationships, groups, moderation, persistence, and player chat remain deferred.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.

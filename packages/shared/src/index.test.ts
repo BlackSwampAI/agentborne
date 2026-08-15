@@ -7,7 +7,7 @@ import {
   agentDecisionSchema,
   agentObservationSchema,
   agentTurnRecordSchema,
-  acceptedMessageEventSchema,
+  directMessageEventSchema,
   captureEligibilitySchema,
   experimentExportWorldStateSchema,
   hexCapturedWorldEventSchema,
@@ -51,7 +51,8 @@ const observation = {
   adjacentCells: [{ cell: adjacent, state: 'open', controllerAgentId: null }],
   nearbyAgents: [],
   recentEvents: [],
-  recentCommunications: [],
+  recentPublicMessages: [],
+  recentDirectMessages: [],
   territoryScoreboard: scoreboard,
   recentControlChanges: [],
 };
@@ -119,17 +120,24 @@ const snapshot = {
         requestedMoves: 0,
         requestedInfections: 0,
         requestedCaptures: 0,
-        requestedMessages: 0,
         requestedWaits: 0,
         acceptedMovements: 0,
         successfullyInfectedCells: 0,
         successfulCaptures: 0,
+        acceptedWaits: 0,
+        rejectedWorldActions: 0,
         territoryGainedThroughInfection: 0,
         territoryGainedThroughCapture: 0,
         territoryLostThroughCapture: 0,
-        deliveredMessages: 0,
-        sentCommunications: 0,
-        receivedCommunications: 0,
+        publicMessagesRequested: 0,
+        publicMessagesAccepted: 0,
+        publicMessagesRejected: 0,
+        directMessagesRequested: 0,
+        directMessagesDelivered: 0,
+        directMessagesRejected: 0,
+        publicMessagesSent: 0,
+        directMessagesSent: 0,
+        directMessagesReceived: 0,
         uniqueVisitedCells: 0,
         tokens: {},
         knownCostCredits: 0,
@@ -166,23 +174,27 @@ describe('agent observation and decision schemas', () => {
 
   it.each([
     {
-      requestedAction: { type: 'move', targetCell: adjacent },
+      worldAction: { type: 'move', targetCell: adjacent },
       summary: 'Move.',
     },
-    { requestedAction: { type: 'infect' }, summary: 'Infect.' },
-    { requestedAction: { type: 'capture' }, summary: 'Capture.' },
+    { worldAction: { type: 'infect' }, summary: 'Infect.' },
+    { worldAction: { type: 'capture' }, summary: 'Capture.' },
     {
-      requestedAction: {
-        type: 'message',
+      worldAction: { type: 'wait' },
+      communication: {
+        channel: 'direct',
         recipientId: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
         message: 'Coordinate here.',
       },
       summary: 'Message.',
     },
-    { requestedAction: { type: 'wait' }, summary: 'Wait.' },
-  ])('accepts every supported exclusive turn decision', (decision) => {
-    expect(agentDecisionSchema.safeParse(decision).success).toBe(true);
-  });
+    { worldAction: { type: 'wait' }, summary: 'Wait.' },
+  ])(
+    'accepts every supported world action and optional communication',
+    (decision) => {
+      expect(agentDecisionSchema.safeParse(decision).success).toBe(true);
+    },
+  );
 
   it('validates explicit hex control invariants and capture events', () => {
     expect(
@@ -261,11 +273,11 @@ describe('agent observation and decision schemas', () => {
 
   it.each([
     {
-      requestedAction: { type: 'teleport', targetCell: adjacent },
+      worldAction: { type: 'teleport', targetCell: adjacent },
       summary: 'No.',
     },
     {
-      requestedAction: { type: 'wait' },
+      worldAction: { type: 'wait' },
       summary: 'x'.repeat(MODEL_SUMMARY_MAX_LENGTH + 1),
     },
   ])('rejects forbidden actions and oversized model text', (decision) => {
@@ -275,37 +287,42 @@ describe('agent observation and decision schemas', () => {
   it('trims message content and enforces recipient and 280-character boundaries', () => {
     const recipientId = '2507bb46-7ae4-45ca-8dda-644c4f85ca14';
     const parsed = agentDecisionSchema.parse({
-      requestedAction: {
-        type: 'message',
+      worldAction: { type: 'wait' },
+      communication: {
+        channel: 'direct',
         recipientId,
         message: `  ${'x'.repeat(MESSAGE_MAX_LENGTH)}  `,
       },
       summary: 'Send.',
     });
-    expect(parsed.requestedAction).toMatchObject({
-      type: 'message',
+    expect(parsed.communication).toMatchObject({
+      channel: 'direct',
       message: 'x'.repeat(MESSAGE_MAX_LENGTH),
     });
-    for (const requestedAction of [
-      { type: 'message', recipientId, message: '   ' },
+    for (const communication of [
+      { channel: 'direct', recipientId, message: '   ' },
       {
-        type: 'message',
+        channel: 'direct',
         recipientId,
         message: 'x'.repeat(MESSAGE_MAX_LENGTH + 1),
       },
-      { type: 'message', recipientId: 'not-an-agent', message: 'Hello.' },
+      { channel: 'direct', recipientId: 'not-an-agent', message: 'Hello.' },
     ])
       expect(
-        agentDecisionSchema.safeParse({ requestedAction, summary: 'Send.' })
-          .success,
+        agentDecisionSchema.safeParse({
+          worldAction: { type: 'wait' },
+          communication,
+          summary: 'Send.',
+        }).success,
       ).toBe(false);
   });
 
   it('validates typed messages and caps directional conversation context at six', () => {
     const recipientId = '2507bb46-7ae4-45ca-8dda-644c4f85ca14';
-    const messageEvent = acceptedMessageEventSchema.parse({
+    const messageEvent = directMessageEventSchema.parse({
       id: '67aa21b9-fc78-4b04-9f92-9862bf346f96',
-      type: 'agent-messaged',
+      type: 'direct-message-sent',
+      channel: 'direct',
       agentId,
       recipientId,
       occurredAt: '2026-08-13T12:00:01.000Z',
@@ -326,13 +343,44 @@ describe('agent observation and decision schemas', () => {
     expect(
       agentObservationSchema.safeParse({
         ...observation,
-        recentCommunications: Array(6).fill(communication),
+        recentPublicMessages: [],
+        recentDirectMessages: Array(6).fill(communication),
       }).success,
     ).toBe(true);
     expect(
       agentObservationSchema.safeParse({
         ...observation,
-        recentCommunications: Array(7).fill(communication),
+        recentPublicMessages: [],
+        recentDirectMessages: Array(7).fill(communication),
+      }).success,
+    ).toBe(false);
+  });
+
+  it('caps public context at twelve and accepts one-character public text', () => {
+    const publicMessage = {
+      eventId: '67aa21b9-fc78-4b04-9f92-9862bf346f96',
+      senderId: agentId,
+      senderName: 'Ember',
+      message: 'x',
+      occurredAt: '2026-08-13T12:00:01.000Z',
+    };
+    expect(
+      agentDecisionSchema.safeParse({
+        worldAction: { type: 'wait' },
+        communication: { channel: 'public', message: ' x ' },
+        summary: 'Publish.',
+      }).success,
+    ).toBe(true);
+    expect(
+      agentObservationSchema.safeParse({
+        ...observation,
+        recentPublicMessages: Array(12).fill(publicMessage),
+      }).success,
+    ).toBe(true);
+    expect(
+      agentObservationSchema.safeParse({
+        ...observation,
+        recentPublicMessages: Array(13).fill(publicMessage),
       }).success,
     ).toBe(false);
   });
@@ -389,18 +437,23 @@ describe('turn and snapshot schemas', () => {
     {
       ...baseTurn,
       outcome: 'accepted',
-      requestedAction: { type: 'infect' },
+      worldAction: { type: 'infect' },
       summary: 'Infect.',
-      validation: { accepted: true },
-      event,
+      worldActionResult: { accepted: true, event },
+      communicationResult: { requested: false },
       provider,
     },
     {
       ...baseTurn,
       outcome: 'rejected',
-      requestedAction: { type: 'move', targetCell: adjacent },
+      worldAction: { type: 'move', targetCell: adjacent },
       summary: 'Move.',
-      validation: { accepted: false, reason: 'not-adjacent', details: 'No.' },
+      worldActionResult: {
+        accepted: false,
+        reason: 'not-adjacent',
+        details: 'No.',
+      },
+      communicationResult: { requested: false },
       provider,
     },
     {
@@ -416,10 +469,10 @@ describe('turn and snapshot schemas', () => {
     const validTurn = {
       ...baseTurn,
       outcome: 'accepted',
-      requestedAction: { type: 'infect' },
+      worldAction: { type: 'infect' },
       summary: 'Infect.',
-      validation: { accepted: true },
-      event,
+      worldActionResult: { accepted: true, event },
+      communicationResult: { requested: false },
       provider,
     };
     expect(simulationSnapshotSchema.safeParse(snapshot).success).toBe(true);
@@ -478,7 +531,8 @@ describe('experiment telemetry and export contracts', () => {
       agents: { mode: 'selected', agentIds: [agentId] },
       turns: { mode: 'entire-retained' },
       outcomes: ['accepted'],
-      actions: ['capture', 'message', 'wait'],
+      actions: ['capture', 'wait'],
+      communications: { channel: 'all', status: 'all' },
     };
     for (const level of ['minimal', 'standard', 'full-safe'])
       expect(
@@ -504,7 +558,8 @@ describe('experiment telemetry and export contracts', () => {
           personalityTextHistory: false,
           nearbyAgents: false,
           recentEvents: false,
-          recentCommunications: false,
+          recentPublicMessages: false,
+          recentDirectMessages: false,
           recentControlChanges: false,
           validationDetails: false,
           resultingEvents: false,

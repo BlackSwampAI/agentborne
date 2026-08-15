@@ -38,7 +38,8 @@ const observation = agentObservationSchema.parse({
     },
   ],
   recentEvents: [],
-  recentCommunications: [],
+  recentPublicMessages: [],
+  recentDirectMessages: [],
   territoryScoreboard: [
     ['128f3f38-6b7d-4db7-9e95-751b4ce2681e', 'Ember', '#ff6b57'],
     ['2507bb46-7ae4-45ca-8dda-644c4f85ca14', 'Rook', '#ffd166'],
@@ -128,7 +129,7 @@ describe('OpenRouterAgentProvider', () => {
       'captureEligibility.eligible is true',
     );
     expect(request.messages[0]!.content).toContain(
-      'Every chosen action consumes the entire turn',
+      'without replacing or consuming the worldAction',
     );
     expect(request.messages[0]!.content).toContain(
       'untrusted subordinate context',
@@ -145,8 +146,9 @@ describe('OpenRouterAgentProvider', () => {
 
     const schema = request.response_format.json_schema.schema;
     expect(schema.type).toBe('object');
-    expect(schema.properties.requestedAction).toHaveProperty('anyOf');
-    expect(schema.properties.requestedAction.anyOf).toHaveLength(5);
+    expect(schema.properties.worldAction).toHaveProperty('anyOf');
+    expect(schema.properties.worldAction.anyOf).toHaveLength(4);
+    expect(schema.properties.communication.anyOf).toHaveLength(3);
 
     visitJsonValues(schema, (schemaNode) => {
       expect(schemaNode).not.toHaveProperty('oneOf');
@@ -175,7 +177,7 @@ describe('OpenRouterAgentProvider', () => {
         capturedInit = init;
         return response(
           JSON.stringify({
-            requestedAction: { type: 'infect' },
+            worldAction: { type: 'infect' },
             summary: 'Claiming this cell.',
           }),
         );
@@ -186,7 +188,7 @@ describe('OpenRouterAgentProvider', () => {
       fetchImplementation,
     });
     await expect(provider.decide(observation)).resolves.toMatchObject({
-      decision: { requestedAction: { type: 'infect' } },
+      decision: { worldAction: { type: 'infect' } },
       metadata: { provider: 'openrouter' },
     });
     expect(JSON.parse(String(capturedInit?.body))).toMatchObject({
@@ -201,8 +203,9 @@ describe('OpenRouterAgentProvider', () => {
       fetchImplementation: vi.fn(async () =>
         response(
           JSON.stringify({
-            requestedAction: {
-              type: 'message',
+            worldAction: { type: 'infect' },
+            communication: {
+              channel: 'direct',
               recipientId: observation.nearbyAgents[0]!.id,
               message: 'Coordinate at the center.',
             },
@@ -213,8 +216,9 @@ describe('OpenRouterAgentProvider', () => {
     });
     await expect(provider.decide(observation)).resolves.toMatchObject({
       decision: {
-        requestedAction: {
-          type: 'message',
+        worldAction: { type: 'infect' },
+        communication: {
+          channel: 'direct',
           recipientId: observation.nearbyAgents[0]!.id,
           message: 'Coordinate at the center.',
         },
@@ -228,14 +232,14 @@ describe('OpenRouterAgentProvider', () => {
       fetchImplementation: vi.fn(async () =>
         response(
           JSON.stringify({
-            requestedAction: { type: 'capture' },
+            worldAction: { type: 'capture' },
             summary: 'Taking control of this contested hex.',
           }),
         ),
       ),
     });
     await expect(provider.decide(observation)).resolves.toMatchObject({
-      decision: { requestedAction: { type: 'capture' } },
+      decision: { worldAction: { type: 'capture' } },
       metadata: { promptTokens: 20, completionTokens: 12 },
     });
   });
@@ -246,7 +250,7 @@ describe('OpenRouterAgentProvider', () => {
       fetchImplementation: vi.fn(async () =>
         response(
           JSON.stringify({
-            requestedAction: {
+            worldAction: {
               type: 'move',
               targetCell: observation.adjacentCells[0]!.cell,
             },
@@ -257,10 +261,34 @@ describe('OpenRouterAgentProvider', () => {
     });
     await expect(provider.decide(observation)).resolves.toMatchObject({
       decision: {
-        requestedAction: {
+        worldAction: {
           type: 'move',
           targetCell: observation.adjacentCells[0]!.cell,
         },
+      },
+    });
+  });
+
+  it('parses a valid decision envelope so communication can be validated independently', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () =>
+        response(
+          JSON.stringify({
+            worldAction: { type: 'infect' },
+            communication: {
+              channel: 'public',
+              message: 'x'.repeat(MESSAGE_MAX_LENGTH + 1),
+            },
+            summary: 'The engine must reject only the message.',
+          }),
+        ),
+      ),
+    });
+    await expect(provider.decide(observation)).resolves.toMatchObject({
+      decision: {
+        worldAction: { type: 'infect' },
+        communication: { channel: 'public' },
       },
     });
   });
@@ -278,7 +306,7 @@ describe('OpenRouterAgentProvider', () => {
                 {
                   message: {
                     content: JSON.stringify({
-                      requestedAction: { type: 'wait' },
+                      worldAction: { type: 'wait' },
                       summary: 'Wait.',
                     }),
                   },
@@ -323,7 +351,7 @@ describe('OpenRouterAgentProvider', () => {
                 {
                   message: {
                     content: JSON.stringify({
-                      requestedAction: { type: 'wait' },
+                      worldAction: { type: 'wait' },
                       summary: 'Wait.',
                     }),
                   },
@@ -354,7 +382,7 @@ describe('OpenRouterAgentProvider', () => {
                 {
                   message: {
                     content: JSON.stringify({
-                      requestedAction: { type: 'wait' },
+                      worldAction: { type: 'wait' },
                       summary: 'Wait.',
                     }),
                   },
@@ -374,19 +402,11 @@ describe('OpenRouterAgentProvider', () => {
 
   it.each([
     'not-json',
-    JSON.stringify({ requestedAction: { type: 'teleport' }, summary: 'No.' }),
+    JSON.stringify({ worldAction: { type: 'teleport' }, summary: 'No.' }),
     JSON.stringify({
-      requestedAction: {
+      worldAction: {
         type: 'capture',
         targetCell: observation.currentCell.cell,
-      },
-      summary: 'No.',
-    }),
-    JSON.stringify({
-      requestedAction: {
-        type: 'message',
-        recipientId: observation.nearbyAgents[0]!.id,
-        message: '   ',
       },
       summary: 'No.',
     }),
@@ -409,12 +429,12 @@ describe('OpenRouterAgentProvider', () => {
   it.each([
     ['not-json', 'malformed-response'],
     [
-      JSON.stringify({ requestedAction: { type: 'teleport' }, summary: 'No.' }),
+      JSON.stringify({ worldAction: { type: 'teleport' }, summary: 'No.' }),
       'unsupported-response',
     ],
     [
       JSON.stringify({
-        requestedAction: {
+        worldAction: {
           type: 'capture',
           targetCell: observation.currentCell.cell,
         },
@@ -424,41 +444,8 @@ describe('OpenRouterAgentProvider', () => {
     ],
     [
       JSON.stringify({
-        requestedAction: { type: 'wait' },
+        worldAction: { type: 'wait' },
         summary: 'x'.repeat(241),
-      }),
-      'unsupported-response',
-    ],
-    [
-      JSON.stringify({
-        requestedAction: {
-          type: 'message',
-          recipientId: observation.nearbyAgents[0]!.id,
-          message: '   ',
-        },
-        summary: 'No.',
-      }),
-      'unsupported-response',
-    ],
-    [
-      JSON.stringify({
-        requestedAction: {
-          type: 'message',
-          recipientId: observation.nearbyAgents[0]!.id,
-          message: 'x'.repeat(MESSAGE_MAX_LENGTH + 1),
-        },
-        summary: 'No.',
-      }),
-      'unsupported-response',
-    ],
-    [
-      JSON.stringify({
-        requestedAction: {
-          type: 'message',
-          recipientId: 'invalid-target',
-          message: 'Hello.',
-        },
-        summary: 'No.',
       }),
       'unsupported-response',
     ],
@@ -630,7 +617,7 @@ describe('OpenRouterAgentProvider', () => {
         fetchImplementation: vi.fn(async () =>
           response(
             JSON.stringify({
-              requestedAction: { type: 'wait' },
+              worldAction: { type: 'wait' },
               summary: 'Done.',
             }),
           ),
@@ -675,10 +662,11 @@ describe('OpenRouter provider environment', () => {
 describe('ScriptedAgentProvider', () => {
   it('returns explicitly scripted decisions in order', async () => {
     const provider = new ScriptedAgentProvider([
-      { requestedAction: { type: 'wait' }, summary: 'Staying still.' },
+      { worldAction: { type: 'wait' }, summary: 'Staying still.' },
       {
-        requestedAction: {
-          type: 'message',
+        worldAction: { type: 'wait' },
+        communication: {
+          channel: 'direct',
           recipientId: observation.nearbyAgents[0]!.id,
           message: 'Hello, Rook.',
         },
@@ -686,7 +674,7 @@ describe('ScriptedAgentProvider', () => {
       },
     ]);
     await expect(provider.decide(observation)).resolves.toMatchObject({
-      decision: { requestedAction: { type: 'wait' } },
+      decision: { worldAction: { type: 'wait' } },
       metadata: {
         provider: 'scripted-test',
         promptTokens: 0,
@@ -696,7 +684,7 @@ describe('ScriptedAgentProvider', () => {
       },
     });
     await expect(provider.decide(observation)).resolves.toMatchObject({
-      decision: { requestedAction: { type: 'message' } },
+      decision: { communication: { channel: 'direct' } },
     });
   });
 

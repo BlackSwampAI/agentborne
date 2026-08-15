@@ -1,16 +1,20 @@
 import { gridDisk, gridDistance, latLngToCell } from 'h3-js';
 import {
   agentIdSchema,
+  communicationIntentSchema,
   h3CellSchema,
+  MESSAGE_MAX_LENGTH,
   MESSAGE_RANGE,
-  requestedActionSchema,
+  worldActionSchema,
   type ActionResult,
   type Agent,
   type AgentId,
   type CaptureEligibility,
+  type CommunicationResult,
   type H3Cell,
-  type RequestedAction,
+  type NonCommunicationWorldEvent,
   type WorldEvent,
+  type WorldActionResult,
   type WorldSnapshot,
 } from '@agentborne/shared';
 
@@ -31,7 +35,12 @@ export interface EngineContext {
 
 export interface AppliedAction {
   state: WorldState;
-  result: ActionResult;
+  result: WorldActionResult;
+}
+
+export interface AppliedCommunication {
+  state: WorldState;
+  result: CommunicationResult;
 }
 
 const defaultContext: EngineContext = {
@@ -72,14 +81,14 @@ export function getCaptureEligibility(
   return { eligible: true };
 }
 
-export function applyRequestedAction(
+export function applyWorldAction(
   state: WorldState,
   agentIdInput: string,
   actionInput: unknown,
   context: Partial<EngineContext> = {},
 ): AppliedAction {
   const agentIdResult = agentIdSchema.safeParse(agentIdInput);
-  const actionResult = requestedActionSchema.safeParse(actionInput);
+  const actionResult = worldActionSchema.safeParse(actionInput);
 
   if (!agentIdResult.success || !state.agents.has(agentIdResult.data)) {
     return rejected(state, 'unknown-agent', 'The acting agent does not exist.');
@@ -120,7 +129,7 @@ export function applyRequestedAction(
         'Agents may move only to an adjacent H3 cell.',
       );
     }
-    const event: WorldEvent = {
+    const event: NonCommunicationWorldEvent = {
       ...eventBase,
       type: 'agent-moved',
       fromCell: agent.currentCell,
@@ -146,7 +155,7 @@ export function applyRequestedAction(
         'The current cell is outside this world.',
       );
     }
-    const event: WorldEvent = {
+    const event: NonCommunicationWorldEvent = {
       ...eventBase,
       type: 'hex-infected',
       cell: agent.currentCell,
@@ -177,7 +186,7 @@ export function applyRequestedAction(
     const currentHex = state.hexes.get(agent.currentCell);
     if (!currentHex || currentHex.state !== 'infected')
       throw new Error('Eligible capture must target an infected current cell.');
-    const event: WorldEvent = {
+    const event: NonCommunicationWorldEvent = {
       ...eventBase,
       type: 'hex-captured',
       cell: agent.currentCell,
@@ -192,53 +201,185 @@ export function applyRequestedAction(
     return accept(state, { ...state, hexes }, event);
   }
 
-  if (action.type === 'message') {
-    const recipient = state.agents.get(action.recipientId);
-    if (!recipient) {
-      return rejected(
-        state,
-        'unknown-recipient',
-        'The recipient does not exist.',
-      );
-    }
-    if (recipient.id === agentId) {
-      return rejected(state, 'self-message', 'An agent cannot message itself.');
-    }
-    let distance: number;
-    try {
-      distance = gridDistance(agent.currentCell, recipient.currentCell);
-    } catch {
-      return rejected(
-        state,
-        'out-of-range',
-        'The recipient is outside communication range.',
-      );
-    }
-    if (distance > MESSAGE_RANGE) {
-      return rejected(
-        state,
-        'out-of-range',
-        'The recipient is outside communication range.',
-      );
-    }
-    const event: WorldEvent = {
-      ...eventBase,
-      type: 'agent-messaged',
-      recipientId: action.recipientId,
-      message: action.message,
-      distance,
+  const event: NonCommunicationWorldEvent = {
+    ...eventBase,
+    type: 'agent-waited',
+  };
+  return accept(state, state, event);
+}
+
+export function applyCommunication(
+  state: WorldState,
+  eligibilityState: WorldState,
+  agentIdInput: string,
+  communicationInput: unknown,
+  context: Partial<EngineContext> = {},
+): AppliedCommunication {
+  if (communicationInput === undefined)
+    return { state, result: { requested: false } };
+
+  const agentIdResult = agentIdSchema.safeParse(agentIdInput);
+  const communicationResult =
+    communicationIntentSchema.safeParse(communicationInput);
+  if (
+    !agentIdResult.success ||
+    !eligibilityState.agents.has(agentIdResult.data)
+  )
+    throw new Error('The communicating agent does not exist.');
+  const agentId = agentIdResult.data;
+  if (!communicationResult.success)
+    return {
+      state,
+      result: {
+        requested: true,
+        accepted: false,
+        attempt: invalidCommunicationAttempt(
+          context,
+          eligibilityState,
+          agentId,
+          communicationInput,
+        ),
+        reason: 'invalid-communication',
+        details: 'The communication failed schema validation.',
+      },
     };
-    return accept(state, state, event);
+
+  const resolvedContext = { ...defaultContext, ...context };
+  const communication = communicationResult.data;
+  const base = {
+    id: resolvedContext.createEventId() as WorldEvent['id'],
+    agentId,
+    occurredAt: resolvedContext.now(),
+    channel: communication.channel,
+    message: communication.message,
+  } as const;
+
+  if (communication.channel === 'public') {
+    const event = {
+      ...base,
+      type: 'public-message-sent' as const,
+      channel: 'public' as const,
+    };
+    return {
+      state: { ...state, events: [...state.events, event] },
+      result: { requested: true, accepted: true, event },
+    };
   }
 
-  const event: WorldEvent = { ...eventBase, type: 'agent-waited' };
-  return accept(state, state, event);
+  const actingAgent = eligibilityState.agents.get(agentId)!;
+  const recipient = eligibilityState.agents.get(communication.recipientId);
+  const distance = recipient
+    ? safeGridDistance(actingAgent.currentCell, recipient.currentCell)
+    : null;
+  const attempt = {
+    ...base,
+    channel: 'direct' as const,
+    recipientId: communication.recipientId,
+    distance,
+  };
+  if (!recipient)
+    return communicationRejected(
+      state,
+      attempt,
+      'unknown-recipient',
+      'The recipient does not exist.',
+    );
+  if (recipient.id === agentId)
+    return communicationRejected(
+      state,
+      attempt,
+      'self-message',
+      'An agent cannot message itself.',
+    );
+  if (distance === null || distance > MESSAGE_RANGE)
+    return communicationRejected(
+      state,
+      attempt,
+      'out-of-range',
+      'The recipient is outside communication range.',
+    );
+  const event = {
+    ...attempt,
+    type: 'direct-message-sent' as const,
+    distance,
+  };
+  return {
+    state: { ...state, events: [...state.events, event] },
+    result: { requested: true, accepted: true, event },
+  };
+}
+
+function safeGridDistance(from: H3Cell, to: H3Cell): number | null {
+  try {
+    return gridDistance(from, to);
+  } catch {
+    return null;
+  }
+}
+
+function communicationRejected(
+  state: WorldState,
+  attempt: Extract<
+    CommunicationResult,
+    { requested: true; accepted: false }
+  >['attempt'],
+  reason: Extract<
+    CommunicationResult,
+    { requested: true; accepted: false }
+  >['reason'],
+  details: string,
+): AppliedCommunication {
+  return {
+    state,
+    result: { requested: true, accepted: false, attempt, reason, details },
+  };
+}
+
+function invalidCommunicationAttempt(
+  context: Partial<EngineContext>,
+  eligibilityState: WorldState,
+  agentId: AgentId,
+  communicationInput: unknown,
+): Extract<
+  CommunicationResult,
+  { requested: true; accepted: false }
+>['attempt'] {
+  const resolvedContext = { ...defaultContext, ...context };
+  const input =
+    typeof communicationInput === 'object' && communicationInput !== null
+      ? (communicationInput as Record<string, unknown>)
+      : undefined;
+  const message =
+    typeof input?.message === 'string'
+      ? input.message.trim().slice(0, MESSAGE_MAX_LENGTH) ||
+        '[invalid communication]'
+      : '[invalid communication]';
+  const base = {
+    id: resolvedContext.createEventId() as WorldEvent['id'],
+    agentId,
+    occurredAt: resolvedContext.now(),
+    message,
+  };
+  const recipientId = agentIdSchema.safeParse(input?.recipientId);
+  if (input?.channel === 'direct' && recipientId.success) {
+    const sender = eligibilityState.agents.get(agentId)!;
+    const recipient = eligibilityState.agents.get(recipientId.data);
+    return {
+      ...base,
+      channel: 'direct',
+      recipientId: recipientId.data,
+      distance: recipient
+        ? safeGridDistance(sender.currentCell, recipient.currentCell)
+        : null,
+    };
+  }
+  return { ...base, channel: 'public' };
 }
 
 function accept(
   state: WorldState,
   updated: WorldState,
-  event: WorldEvent,
+  event: NonCommunicationWorldEvent,
 ): AppliedAction {
   return {
     state: { ...updated, events: [...state.events, event] },
@@ -336,5 +477,3 @@ export function toWorldState(snapshot: WorldSnapshot): WorldState {
     events: snapshot.events,
   };
 }
-
-export type { RequestedAction };
