@@ -12,6 +12,9 @@ import {
 } from 'react';
 import {
   PERSONALITY_MAX_LENGTH,
+  PERSONALITY_PROFILES,
+  STRATEGY_PROFILES,
+  assignBehavior,
   cancelSimulationResponseSchema,
   cancelledTurnResponseSchema,
   experimentExportPreviewSchema,
@@ -28,6 +31,7 @@ import {
   updateAgentPersonalityRequestSchema,
   updateAgentPersonalityResponseSchema,
   updateExperimentModelsResponseSchema,
+  updateExperimentBehaviorResponseSchema,
   verifyModelResponseSchema,
   type AgentId,
   type AgentTurnRecord,
@@ -41,6 +45,7 @@ import {
   type ModelVerification,
   type ReasoningProfile,
   type ExperimentModelConfiguration,
+  type BehaviorConfiguration,
   type SimulationSnapshot,
 } from '@agentborne/shared';
 import {
@@ -240,6 +245,30 @@ export function WorldLab() {
       return true;
     } catch {
       setUiError('The model assignment could not be saved.');
+      return false;
+    }
+  };
+
+  const updateBehavior = async (
+    configuration: Omit<BehaviorConfiguration, 'registryVersion' | 'locked'>,
+  ): Promise<boolean> => {
+    setUiError(null);
+    try {
+      const response = await fetch(`${apiBase}/experiment/behavior`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(configuration),
+      });
+      if (!response.ok) throw new Error('behavior update rejected');
+      applySnapshot(
+        updateExperimentBehaviorResponseSchema.parse(await response.json())
+          .snapshot,
+      );
+      return true;
+    } catch {
+      setUiError(
+        'Behavior assignments could not be saved. They may be locked after turn one.',
+      );
       return false;
     }
   };
@@ -817,6 +846,7 @@ export function WorldLab() {
             verifyingModelId={verifyingModelId}
             onRefresh={refreshCatalog}
             onUpdate={updateModels}
+            onUpdateBehavior={updateBehavior}
             onVerify={verifyModel}
             onImport={importExperiment}
           />
@@ -1163,6 +1193,7 @@ function ModelConsole({
   onRefresh,
   onUpdate,
   onVerify,
+  onUpdateBehavior,
   onImport,
 }: {
   catalog: ModelCatalogResponse | null;
@@ -1175,6 +1206,9 @@ function ModelConsole({
   onUpdate: (
     configuration: Omit<ExperimentModelConfiguration, 'locked'>,
   ) => Promise<boolean>;
+  onUpdateBehavior: (
+    configuration: Omit<BehaviorConfiguration, 'registryVersion' | 'locked'>,
+  ) => Promise<boolean>;
   onVerify: (
     modelId: string,
     reasoningProfile: ReasoningProfile,
@@ -1183,6 +1217,7 @@ function ModelConsole({
   onImport: (file: File) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<'overview' | 'models' | 'behavior'>('models');
   const toggleRef = useRef<HTMLButtonElement>(null);
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<'name' | 'price' | 'context' | 'newest'>(
@@ -1231,16 +1266,28 @@ function ModelConsole({
   return (
     <div className="model-console">
       <button
+        className="agent-setup-trigger"
         ref={toggleRef}
         type="button"
         onClick={() => (open ? close() : setOpen(true))}
       >
         Model: {selected?.name ?? configuration.globalModelId ?? 'not selected'}
+        <span>
+          Agent setup ·{' '}
+          {snapshot.resolvedModels.filter(({ available }) => available).length}
+          /8 ready ·{' '}
+          {selected?.name ??
+            configuration.globalModelId ??
+            'model needed'} ·{' '}
+          {snapshot.behaviorConfiguration.assignmentMode === 'balanced-random'
+            ? 'balanced behavior'
+            : snapshot.behaviorConfiguration.assignmentMode}
+        </span>
       </button>
       <DialogShell
         open={open}
-        title="Compatible OpenRouter models"
-        description={`${catalog?.models.length ?? 0} catalog compatible · ${catalog?.filteredOutCount ?? 0} filtered out`}
+        title="Agent Controller"
+        description={`Models and reproducible behavior assignments · ${catalog?.models.length ?? 0} catalog compatible · ${catalog?.filteredOutCount ?? 0} filtered out`}
         label="Model selection"
         closeLabel="Close model selection"
         className="model-dialog"
@@ -1256,286 +1303,523 @@ function ModelConsole({
           </button>
         }
       >
-        {catalog?.stale && (
-          <p className="catalog-state warning">
-            Showing the last successful catalog. {catalog.error?.message}
-          </p>
-        )}
-        {loading && !catalog && (
-          <p className="catalog-state">Loading compatible models…</p>
-        )}
-        {!catalog?.stale && catalog?.error && (
-          <p className="catalog-state error">{catalog.error.message}</p>
-        )}
-        {!loading && catalog && catalog.models.length === 0 && (
-          <p className="catalog-state">
-            No compatible models are currently available.
-          </p>
-        )}
-        <div className="model-filters">
-          <label>
-            Search
-            <input
-              type="search"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Name, slug, or author"
-            />
-          </label>
-          <label>
-            Sort
-            <select
-              value={sort}
-              onChange={(event) => setSort(event.target.value as typeof sort)}
-            >
-              <option value="name">Name</option>
-              <option value="price">Lowest input price</option>
-              <option value="context">Largest context</option>
-              <option value="newest">Newest</option>
-            </select>
-          </label>
-        </div>
-        <section
-          className="model-global-section"
-          aria-labelledby="global-model-heading"
+        <div
+          role="tablist"
+          aria-label="Agent Controller sections"
+          className="controller-tabs"
         >
-          <h3 id="global-model-heading">Global assignment</h3>
-          <div className="model-global-grid">
-            <label className="model-select-label">
-              Global model
-              <select
-                disabled={locked}
-                value={configuration.globalModelId ?? ''}
-                onChange={(event) =>
-                  save({
-                    globalModelId: event.target.value || null,
-                    globalReasoningProfile: 'provider-default',
-                    overrides: configuration.overrides,
-                  })
-                }
-              >
-                <option value="">Select a model…</option>
-                {configuration.globalModelId && !selected && (
-                  <option value={configuration.globalModelId}>
-                    {configuration.globalModelId} — unavailable
-                  </option>
-                )}
-                {models.map((model) => (
-                  <option value={model.id} key={model.id}>
-                    {model.name} · {formatPerMillion(model.inputPricePerToken)}{' '}
-                    in / {formatPerMillion(model.outputPricePerToken)} out
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="model-select-label">
-              Global reasoning
-              <select
-                disabled={locked || !selected}
-                value={configuration.globalReasoningProfile}
-                onChange={(event) =>
-                  save({
-                    globalModelId: configuration.globalModelId,
-                    globalReasoningProfile: event.target
-                      .value as ReasoningProfile,
-                    overrides: configuration.overrides,
-                  })
-                }
-              >
-                {!globalReasoningProfiles.includes(
-                  configuration.globalReasoningProfile,
-                ) && (
-                  <option value={configuration.globalReasoningProfile}>
-                    {formatReasoningProfile(
-                      configuration.globalReasoningProfile,
-                    )}{' '}
-                    — unavailable
-                  </option>
-                )}
-                {globalReasoningProfiles.map((profile) => (
-                  <option value={profile} key={profile}>
-                    {formatReasoningProfile(profile)}
-                  </option>
-                ))}
-              </select>
-            </label>
+          {(['overview', 'models', 'behavior'] as const).map((value) => (
             <button
-              disabled={locked || !configuration.globalModelId}
+              key={value}
+              role="tab"
+              aria-selected={tab === value}
+              aria-controls={`controller-${value}`}
+              id={`controller-tab-${value}`}
+              onClick={() => setTab(value)}
               type="button"
-              onClick={() =>
-                save({
-                  globalModelId: configuration.globalModelId,
-                  globalReasoningProfile: configuration.globalReasoningProfile,
-                  overrides: [],
-                })
-              }
             >
-              Apply global model to all agents
+              {value[0]!.toUpperCase() + value.slice(1)}
             </button>
-          </div>
-        </section>
-        <div className="model-verification">
-          <span>
-            Catalog compatible:{' '}
-            {selected ? 'yes — required metadata advertised' : 'not selected'}
-          </span>
-          <span>
-            Runtime verified:{' '}
-            {verification?.status === 'verified'
-              ? 'yes'
-              : verification?.status === 'failed'
-                ? 'failed'
-                : 'not tested'}
-          </span>
-          {verification?.failure && (
-            <p className="catalog-state error" role="status">
-              {verification.failure.message}
-            </p>
-          )}
-          <button
-            disabled={
-              locked ||
-              !configuration.globalModelId ||
-              verifyingModelId === configuration.globalModelId
-            }
-            type="button"
-            onClick={() =>
-              configuration.globalModelId &&
-              void onVerify(
-                configuration.globalModelId,
-                configuration.globalReasoningProfile,
-                verification?.status === 'failed',
-              )
-            }
-          >
-            {verifyingModelId === configuration.globalModelId
-              ? 'Testing model…'
-              : verification?.status === 'failed'
-                ? 'Retry model test'
-                : 'Test selected model'}
-          </button>
-          <small>
-            Sends one genuine, non-mutating OpenRouter request using the
-            production decision contract and may incur a small charge.
-          </small>
+          ))}
         </div>
-        {selected && <ModelFacts model={selected} />}
-        <div className="agent-model-overrides">
-          <strong>Agent overrides</strong>
-          {snapshot.world.agents.map((agent) => {
-            const override = configuration.overrides.find(
-              ({ agentId }) => agentId === agent.id,
-            );
-            const overrideModel = catalog?.models.find(
-              ({ id }) => id === override?.modelId,
-            );
-            const reasoningProfiles = reasoningProfilesForModel(overrideModel);
-            return (
-              <div className="agent-model-override" key={agent.id}>
-                <label>
-                  {agent.name}
+        {tab === 'overview' && (
+          <section
+            role="tabpanel"
+            id="controller-overview"
+            aria-labelledby="controller-tab-overview"
+            className="controller-overview"
+          >
+            {snapshot.world.agents.map((agent) => {
+              const resolved = snapshot.resolvedModels.find(
+                ({ agentId }) => agentId === agent.id,
+              )!;
+              const behavior = snapshot.behaviorConfiguration.assignments.find(
+                ({ agentId }) => agentId === agent.id,
+              )!;
+              return (
+                <button
+                  type="button"
+                  key={agent.id}
+                  onClick={() => setTab('models')}
+                >
+                  <span
+                    className="agent-swatch"
+                    style={{ background: agent.color }}
+                  />
+                  <strong>{agent.name}</strong>
+                  <span>
+                    {resolved.modelId ?? 'Model required'} ·{' '}
+                    {formatReasoningProfile(resolved.reasoningProfile)}
+                  </span>
+                  <span>
+                    {behavior.personalityId} · {behavior.strategyId}
+                  </span>
+                  <span>
+                    {resolved.available ? 'Ready' : 'Needs configuration'}
+                  </span>
+                </button>
+              );
+            })}
+          </section>
+        )}
+        {tab === 'behavior' && (
+          <BehaviorPanel snapshot={snapshot} onUpdate={onUpdateBehavior} />
+        )}
+        {tab === 'models' && (
+          <section
+            role="tabpanel"
+            id="controller-models"
+            aria-labelledby="controller-tab-models"
+          >
+            {catalog?.stale && (
+              <p className="catalog-state warning">
+                Showing the last successful catalog. {catalog.error?.message}
+              </p>
+            )}
+            {loading && !catalog && (
+              <p className="catalog-state">Loading compatible models…</p>
+            )}
+            {!catalog?.stale && catalog?.error && (
+              <p className="catalog-state error">{catalog.error.message}</p>
+            )}
+            {!loading && catalog && catalog.models.length === 0 && (
+              <p className="catalog-state">
+                No compatible models are currently available.
+              </p>
+            )}
+            <div className="model-filters">
+              <label>
+                Search
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Name, slug, or author"
+                />
+              </label>
+              <label>
+                Sort
+                <select
+                  value={sort}
+                  onChange={(event) =>
+                    setSort(event.target.value as typeof sort)
+                  }
+                >
+                  <option value="name">Name</option>
+                  <option value="price">Lowest input price</option>
+                  <option value="context">Largest context</option>
+                  <option value="newest">Newest</option>
+                </select>
+              </label>
+            </div>
+            <section
+              className="model-global-section"
+              aria-labelledby="global-model-heading"
+            >
+              <h3 id="global-model-heading">Global assignment</h3>
+              <div className="model-global-grid">
+                <label className="model-select-label">
+                  Global model
                   <select
                     disabled={locked}
-                    value={override?.modelId ?? ''}
-                    onChange={(event) => {
-                      const withoutAgent = configuration.overrides.filter(
-                        ({ agentId }) => agentId !== agent.id,
-                      );
+                    value={configuration.globalModelId ?? ''}
+                    onChange={(event) =>
                       save({
-                        globalModelId: configuration.globalModelId,
-                        globalReasoningProfile:
-                          configuration.globalReasoningProfile,
-                        overrides: event.target.value
-                          ? [
-                              ...withoutAgent,
-                              {
-                                agentId: agent.id,
-                                modelId: event.target.value,
-                                reasoningProfile: 'provider-default',
-                              },
-                            ]
-                          : withoutAgent,
-                      });
-                    }}
+                        globalModelId: event.target.value || null,
+                        globalReasoningProfile: 'provider-default',
+                        overrides: configuration.overrides,
+                      })
+                    }
                   >
-                    <option value="">Inherit global</option>
-                    {override &&
-                      !catalog?.models.some(
-                        ({ id }) => id === override.modelId,
-                      ) && (
-                        <option value={override.modelId}>
-                          {override.modelId} — unavailable
-                        </option>
-                      )}
-                    {(catalog?.models ?? []).map((model) => (
+                    <option value="">Select a model…</option>
+                    {configuration.globalModelId && !selected && (
+                      <option value={configuration.globalModelId}>
+                        {configuration.globalModelId} — unavailable
+                      </option>
+                    )}
+                    {models.map((model) => (
                       <option value={model.id} key={model.id}>
-                        {model.name}
+                        {model.name} ·{' '}
+                        {formatPerMillion(model.inputPricePerToken)} in /{' '}
+                        {formatPerMillion(model.outputPricePerToken)} out
                       </option>
                     ))}
                   </select>
                 </label>
-                <label>
-                  {agent.name} reasoning
+                <label className="model-select-label">
+                  Global reasoning
                   <select
-                    disabled={locked || !overrideModel}
-                    value={override?.reasoningProfile ?? 'provider-default'}
-                    onChange={(event) => {
-                      if (!override) return;
+                    disabled={locked || !selected}
+                    value={configuration.globalReasoningProfile}
+                    onChange={(event) =>
                       save({
                         globalModelId: configuration.globalModelId,
-                        globalReasoningProfile:
-                          configuration.globalReasoningProfile,
-                        overrides: configuration.overrides.map((candidate) =>
-                          candidate.agentId === agent.id
-                            ? {
-                                ...candidate,
-                                reasoningProfile: event.target
-                                  .value as ReasoningProfile,
-                              }
-                            : candidate,
-                        ),
-                      });
-                    }}
+                        globalReasoningProfile: event.target
+                          .value as ReasoningProfile,
+                        overrides: configuration.overrides,
+                      })
+                    }
                   >
-                    {override &&
-                      !reasoningProfiles.includes(
-                        override.reasoningProfile,
-                      ) && (
-                        <option value={override.reasoningProfile}>
-                          {formatReasoningProfile(override.reasoningProfile)} —
-                          unavailable
-                        </option>
-                      )}
-                    {reasoningProfiles.map((profile) => (
+                    {!globalReasoningProfiles.includes(
+                      configuration.globalReasoningProfile,
+                    ) && (
+                      <option value={configuration.globalReasoningProfile}>
+                        {formatReasoningProfile(
+                          configuration.globalReasoningProfile,
+                        )}{' '}
+                        — unavailable
+                      </option>
+                    )}
+                    {globalReasoningProfiles.map((profile) => (
                       <option value={profile} key={profile}>
                         {formatReasoningProfile(profile)}
                       </option>
                     ))}
                   </select>
                 </label>
+                <button
+                  disabled={locked || !configuration.globalModelId}
+                  type="button"
+                  onClick={() =>
+                    save({
+                      globalModelId: configuration.globalModelId,
+                      globalReasoningProfile:
+                        configuration.globalReasoningProfile,
+                      overrides: [],
+                    })
+                  }
+                >
+                  Apply global model to all agents
+                </button>
               </div>
-            );
-          })}
-        </div>
-        <p className="catalog-state">
-          Model changes are available between provider requests and are recorded
-          at the next turn boundary.
-        </p>
-        <label className="model-import-label">
-          Import saved experiment model assignments
-          <input
-            disabled={disabled}
-            type="file"
-            accept="application/json,.json"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) void onImport(file);
-              event.currentTarget.value = '';
-            }}
-          />
-        </label>
+            </section>
+            <div className="model-verification">
+              <span>
+                Catalog compatible:{' '}
+                {selected
+                  ? 'yes — required metadata advertised'
+                  : 'not selected'}
+              </span>
+              <span>
+                Runtime verified:{' '}
+                {verification?.status === 'verified'
+                  ? 'yes'
+                  : verification?.status === 'failed'
+                    ? 'failed'
+                    : 'not tested'}
+              </span>
+              {verification?.failure && (
+                <p className="catalog-state error" role="status">
+                  {verification.failure.message}
+                </p>
+              )}
+              <button
+                disabled={
+                  locked ||
+                  !configuration.globalModelId ||
+                  verifyingModelId === configuration.globalModelId
+                }
+                type="button"
+                onClick={() =>
+                  configuration.globalModelId &&
+                  void onVerify(
+                    configuration.globalModelId,
+                    configuration.globalReasoningProfile,
+                    verification?.status === 'failed',
+                  )
+                }
+              >
+                {verifyingModelId === configuration.globalModelId
+                  ? 'Testing model…'
+                  : verification?.status === 'failed'
+                    ? 'Retry model test'
+                    : 'Test selected model'}
+              </button>
+              <small>
+                Sends one genuine, non-mutating OpenRouter request using the
+                production decision contract and may incur a small charge.
+              </small>
+            </div>
+            {selected && <ModelFacts model={selected} />}
+            <div className="agent-model-overrides">
+              <strong>Agent overrides</strong>
+              {snapshot.world.agents.map((agent) => {
+                const override = configuration.overrides.find(
+                  ({ agentId }) => agentId === agent.id,
+                );
+                const overrideModel = catalog?.models.find(
+                  ({ id }) => id === override?.modelId,
+                );
+                const reasoningProfiles =
+                  reasoningProfilesForModel(overrideModel);
+                return (
+                  <div className="agent-model-override" key={agent.id}>
+                    <label>
+                      {agent.name}
+                      <select
+                        disabled={locked}
+                        value={override?.modelId ?? ''}
+                        onChange={(event) => {
+                          const withoutAgent = configuration.overrides.filter(
+                            ({ agentId }) => agentId !== agent.id,
+                          );
+                          save({
+                            globalModelId: configuration.globalModelId,
+                            globalReasoningProfile:
+                              configuration.globalReasoningProfile,
+                            overrides: event.target.value
+                              ? [
+                                  ...withoutAgent,
+                                  {
+                                    agentId: agent.id,
+                                    modelId: event.target.value,
+                                    reasoningProfile: 'provider-default',
+                                  },
+                                ]
+                              : withoutAgent,
+                          });
+                        }}
+                      >
+                        <option value="">Inherit global</option>
+                        {override &&
+                          !catalog?.models.some(
+                            ({ id }) => id === override.modelId,
+                          ) && (
+                            <option value={override.modelId}>
+                              {override.modelId} — unavailable
+                            </option>
+                          )}
+                        {(catalog?.models ?? []).map((model) => (
+                          <option value={model.id} key={model.id}>
+                            {model.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      {agent.name} reasoning
+                      <select
+                        disabled={locked || !overrideModel}
+                        value={override?.reasoningProfile ?? 'provider-default'}
+                        onChange={(event) => {
+                          if (!override) return;
+                          save({
+                            globalModelId: configuration.globalModelId,
+                            globalReasoningProfile:
+                              configuration.globalReasoningProfile,
+                            overrides: configuration.overrides.map(
+                              (candidate) =>
+                                candidate.agentId === agent.id
+                                  ? {
+                                      ...candidate,
+                                      reasoningProfile: event.target
+                                        .value as ReasoningProfile,
+                                    }
+                                  : candidate,
+                            ),
+                          });
+                        }}
+                      >
+                        {override &&
+                          !reasoningProfiles.includes(
+                            override.reasoningProfile,
+                          ) && (
+                            <option value={override.reasoningProfile}>
+                              {formatReasoningProfile(
+                                override.reasoningProfile,
+                              )}{' '}
+                              — unavailable
+                            </option>
+                          )}
+                        {reasoningProfiles.map((profile) => (
+                          <option value={profile} key={profile}>
+                            {formatReasoningProfile(profile)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="catalog-state">
+              Model changes are available between provider requests and are
+              recorded at the next turn boundary.
+            </p>
+            <label className="model-import-label">
+              Import saved experiment model assignments
+              <input
+                disabled={disabled}
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void onImport(file);
+                  event.currentTarget.value = '';
+                }}
+              />
+            </label>
+          </section>
+        )}
       </DialogShell>
     </div>
+  );
+}
+
+function BehaviorPanel({
+  snapshot,
+  onUpdate,
+}: {
+  snapshot: SimulationSnapshot;
+  onUpdate: (
+    configuration: Omit<BehaviorConfiguration, 'registryVersion' | 'locked'>,
+  ) => Promise<boolean>;
+}) {
+  const configuration = snapshot.behaviorConfiguration;
+  const locked =
+    configuration.locked || snapshot.experiment.totalCompletedTurns > 0;
+  const update = (
+    next: Omit<BehaviorConfiguration, 'registryVersion' | 'locked'>,
+  ) => void onUpdate(next);
+  return (
+    <section
+      role="tabpanel"
+      id="controller-behavior"
+      aria-labelledby="controller-tab-behavior"
+      className="behavior-panel"
+    >
+      <div className="behavior-toolbar">
+        <label>
+          Assignment mode
+          <select
+            disabled={locked}
+            value={configuration.assignmentMode}
+            onChange={(event) => {
+              const assignmentMode = event.target
+                .value as BehaviorConfiguration['assignmentMode'];
+              update({
+                assignmentMode,
+                seed: configuration.seed,
+                assignments:
+                  assignmentMode === 'manual'
+                    ? configuration.assignments
+                    : assignBehavior(
+                        snapshot.world.agents.map(({ id }) => id),
+                        configuration.seed,
+                        assignmentMode,
+                      ),
+              });
+            }}
+          >
+            <option value="balanced-random">Balanced random</option>
+            <option value="fully-random">Fully random</option>
+            <option value="manual">Manual</option>
+          </select>
+        </label>
+        <label>
+          Experiment behavior seed
+          <input readOnly value={configuration.seed} />
+        </label>
+        <button
+          type="button"
+          disabled={locked || configuration.assignmentMode === 'manual'}
+          onClick={() => {
+            const seed = crypto.randomUUID();
+            update({
+              assignmentMode: configuration.assignmentMode,
+              seed,
+              assignments: assignBehavior(
+                snapshot.world.agents.map(({ id }) => id),
+                seed,
+                configuration.assignmentMode as
+                  'balanced-random' | 'fully-random',
+              ),
+            });
+          }}
+        >
+          Randomize assignments
+        </button>
+      </div>
+      {locked && (
+        <p role="status">
+          Behavior is locked after turn one so retained experiments remain
+          reproducible. Reset starts a new experiment and unlocks setup.
+        </p>
+      )}
+      <div className="behavior-assignments">
+        {snapshot.world.agents.map((agent) => {
+          const assignment = configuration.assignments.find(
+            ({ agentId }) => agentId === agent.id,
+          )!;
+          const change = (
+            field: 'personalityId' | 'strategyId',
+            value: string,
+          ) =>
+            update({
+              assignmentMode: 'manual',
+              seed: configuration.seed,
+              assignments: configuration.assignments.map((candidate) =>
+                candidate.agentId === agent.id
+                  ? { ...candidate, [field]: value, manual: true }
+                  : candidate,
+              ),
+            });
+          return (
+            <div key={agent.id}>
+              <strong>{agent.name}</strong>
+              <label>
+                Personality
+                <select
+                  disabled={locked || configuration.assignmentMode !== 'manual'}
+                  value={assignment.personalityId}
+                  onChange={(event) =>
+                    change('personalityId', event.target.value)
+                  }
+                >
+                  {PERSONALITY_PROFILES.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Strategy
+                <select
+                  disabled={locked || configuration.assignmentMode !== 'manual'}
+                  value={assignment.strategyId}
+                  onChange={(event) => change('strategyId', event.target.value)}
+                >
+                  {STRATEGY_PROFILES.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          );
+        })}
+      </div>
+      <div className="profile-reference">
+        <div>
+          <h3>Personalities</h3>
+          {PERSONALITY_PROFILES.map((profile) => (
+            <p key={profile.id}>
+              <strong>{profile.label}</strong> — {profile.description}
+            </p>
+          ))}
+        </div>
+        <div>
+          <h3>Strategies</h3>
+          {STRATEGY_PROFILES.map((profile) => (
+            <p key={profile.id}>
+              <strong>{profile.label}</strong> — {profile.description}
+            </p>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1621,6 +1905,9 @@ function AgentRoster({
         const resolved = snapshot.resolvedModels.find(
           ({ agentId }) => agentId === agent.id,
         )!;
+        const behavior = snapshot.behaviorConfiguration.assignments.find(
+          ({ agentId }) => agentId === agent.id,
+        )!;
         return (
           <button
             type="button"
@@ -1651,6 +1938,12 @@ function AgentRoster({
                 {resolved.source === 'override' ? 'Override' : 'Global'} ·{' '}
                 {resolved.modelId ?? 'model required'} ·{' '}
                 {formatReasoningProfile(resolved.reasoningProfile)}
+              </small>
+              <small
+                title={`${behavior.personalityId} personality · ${behavior.strategyId} strategy`}
+                aria-label={`${behavior.personalityId} personality and ${behavior.strategyId} strategy`}
+              >
+                {behavior.personalityId} · {behavior.strategyId}
               </small>
             </span>
           </button>

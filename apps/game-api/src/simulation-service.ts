@@ -6,6 +6,8 @@ import {
 } from '@agentborne/agent-runtime';
 import {
   agentIdSchema,
+  assignBehavior,
+  behaviorConfigurationSchema,
   agentObservationSchema,
   agentTurnRecordSchema,
   communicationIntentSchema,
@@ -16,6 +18,7 @@ import {
   experimentModelConfigurationSchema,
   modelSupportsReasoningProfile,
   updateExperimentModelsRequestSchema,
+  updateExperimentBehaviorRequestSchema,
   h3CellSchema,
   RECENT_DIRECT_MESSAGE_LIMIT,
   RECENT_PUBLIC_MESSAGE_LIMIT,
@@ -34,6 +37,7 @@ import {
   type ExperimentExportPreview,
   type ExperimentId,
   type ExperimentModelConfiguration,
+  type BehaviorConfiguration,
   type CompatibleModel,
   type ModelId,
   type ModelAttempt,
@@ -100,7 +104,8 @@ export type SimulationValidationCode =
   | 'unknown_agent'
   | 'invalid_personality'
   | 'invalid_model_configuration'
-  | 'models_unavailable';
+  | 'models_unavailable'
+  | 'invalid_behavior_configuration';
 
 export class SimulationValidationError extends Error {
   constructor(
@@ -149,6 +154,7 @@ export class SimulationService {
   #configurationEvents: ExperimentConfigurationEvent[] = [];
   #experimentMetrics: ExperimentMetricAccumulator;
   #modelConfiguration: ExperimentModelConfiguration;
+  #behaviorConfiguration: BehaviorConfiguration;
   #availableModelIds = new Set<ModelId>();
   #availableModels = new Map<ModelId, CompatibleModel>();
 
@@ -198,6 +204,17 @@ export class SimulationService {
       locked: false,
     });
     if (scriptedModel) this.#availableModelIds.add(scriptedModel);
+    this.#behaviorConfiguration = behaviorConfigurationSchema.parse({
+      registryVersion: 1,
+      assignmentMode: 'balanced-random',
+      seed: this.#experimentId,
+      assignments: assignBehavior(
+        [...this.#state.agents.keys()],
+        this.#experimentId,
+        'balanced-random',
+      ),
+      locked: false,
+    });
   }
 
   getSnapshot(): SimulationSnapshot {
@@ -224,6 +241,7 @@ export class SimulationService {
       providerMode: this.#provider.mode,
       providerConfigured: this.#provider.configured,
       modelConfiguration: this.#modelConfiguration,
+      behaviorConfiguration: this.#behaviorConfiguration,
       resolvedModels: agents.map(({ id }) => this.#resolvedModel(id)),
       turns: this.#turns,
       experiment: {
@@ -289,6 +307,17 @@ export class SimulationService {
       ...this.#modelConfiguration,
       locked: false,
     };
+    this.#behaviorConfiguration = behaviorConfigurationSchema.parse({
+      registryVersion: 1,
+      assignmentMode: 'balanced-random',
+      seed: this.#experimentId,
+      assignments: assignBehavior(
+        [...this.#state.agents.keys()],
+        this.#experimentId,
+        'balanced-random',
+      ),
+      locked: false,
+    });
     this.#status = this.#provider.configured ? 'paused' : 'configuration-error';
     return this.getSnapshot();
   }
@@ -356,6 +385,46 @@ export class SimulationService {
     return this.getSnapshot();
   }
 
+  updateBehaviorConfiguration(input: unknown): SimulationSnapshot {
+    if (this.#busy || this.#verificationBusy || this.#completedTurnCount > 0)
+      throw new SimulationConflictError(
+        'Behavior is locked after the experiment begins. Reset to create new assignments.',
+      );
+    const parsed = updateExperimentBehaviorRequestSchema.safeParse(input);
+    if (!parsed.success)
+      throw new SimulationValidationError(
+        'invalid_behavior_configuration',
+        'The behavior configuration is invalid.',
+      );
+    const agentIds = [...this.#state.agents.keys()];
+    const assignments =
+      parsed.data.assignmentMode === 'manual'
+        ? parsed.data.assignments.map((assignment) => ({
+            ...assignment,
+            manual: true,
+          }))
+        : assignBehavior(
+            agentIds,
+            parsed.data.seed,
+            parsed.data.assignmentMode,
+          );
+    if (
+      assignments.length !== agentIds.length ||
+      assignments.some(({ agentId }) => !this.#state.agents.has(agentId))
+    )
+      throw new SimulationValidationError(
+        'invalid_behavior_configuration',
+        'Behavior assignments must cover the current roster exactly.',
+      );
+    this.#behaviorConfiguration = behaviorConfigurationSchema.parse({
+      registryVersion: 1,
+      ...parsed.data,
+      assignments,
+      locked: false,
+    });
+    return this.getSnapshot();
+  }
+
   importModelConfiguration(document: unknown): {
     snapshot: SimulationSnapshot;
     legacy: boolean;
@@ -376,10 +445,10 @@ export class SimulationService {
       );
     const root = document as Record<string, unknown>;
     const version = root.schemaVersion;
-    if (version !== 5 && version !== 6 && version !== 7)
+    if (version !== 5 && version !== 6 && version !== 7 && version !== 8)
       throw new SimulationValidationError(
         'invalid_model_configuration',
-        'Only schema-version 5, 6, or 7 experiment exports can be imported.',
+        'Only schema-version 5, 6, 7, or 8 experiment exports can be imported.',
       );
     if (version === 5) {
       const legacyConfiguration: ExperimentModelConfiguration = {
@@ -428,6 +497,26 @@ export class SimulationService {
       overrides: structuredClone(configuration.data.overrides),
       locked: false,
     };
+    if (version === 8 && experiment?.behaviorConfiguration !== undefined) {
+      const importedBehavior = behaviorConfigurationSchema.safeParse(
+        experiment.behaviorConfiguration,
+      );
+      const knownBehaviorAgents = new Set(this.#state.agents.keys());
+      if (
+        !importedBehavior.success ||
+        importedBehavior.data.assignments.some(
+          ({ agentId }) => !knownBehaviorAgents.has(agentId),
+        )
+      )
+        throw new SimulationValidationError(
+          'invalid_behavior_configuration',
+          'The imported behavior assignment contains an unknown or unsupported profile.',
+        );
+      this.#behaviorConfiguration = {
+        ...structuredClone(importedBehavior.data),
+        locked: this.#completedTurnCount > 0,
+      };
+    }
     this.#recordModelConfigurationChanges(
       this.#modelConfiguration,
       importedConfiguration,
@@ -626,6 +715,7 @@ export class SimulationService {
       startedAt: pending.startedAt,
       completedAt: this.#now(),
       observation: pending.observation,
+      behavior: this.#behaviorFor(pending.agentId),
       outcome: 'operator-skipped',
       failure: pending.failure,
       provider: pending.attempts.at(-1)?.provider,
@@ -789,6 +879,7 @@ export class SimulationService {
             startedAt,
             completedAt: this.#now(),
             observation,
+            behavior: this.#behaviorFor(agent.id),
             outcome: 'provider-error',
             failure: providerError.failure,
             provider: attemptProvider,
@@ -862,6 +953,7 @@ export class SimulationService {
         startedAt,
         completedAt: this.#now(),
         observation,
+        behavior: this.#behaviorFor(agent.id),
         worldAction: providerResult.decision.worldAction,
         communication,
         diplomacy,
@@ -948,6 +1040,7 @@ export class SimulationService {
         startedAt,
         completedAt: this.#now(),
         observation,
+        behavior: this.#behaviorFor(agent.id),
         outcome: 'provider-error',
         failure,
         provider: attempt.provider,
@@ -976,6 +1069,10 @@ export class SimulationService {
     const cursor = (this.#cursor + 1) % agentCount;
 
     this.#state = state;
+    this.#behaviorConfiguration = {
+      ...this.#behaviorConfiguration,
+      locked: true,
+    };
     this.#turns = turns;
     this.#experimentTurns = [
       ...this.#experimentTurns,
@@ -1069,7 +1166,16 @@ export class SimulationService {
       initialWorld: this.#initialExperimentWorld,
       currentWorld: this.#worldSnapshot(),
       modelConfiguration: this.#modelConfiguration,
+      behaviorConfiguration: this.#behaviorConfiguration,
     };
+  }
+
+  #behaviorFor(agentId: AgentId) {
+    const assignment = this.#behaviorConfiguration.assignments.find(
+      (candidate) => candidate.agentId === agentId,
+    );
+    if (!assignment) throw new Error('The agent has no behavior assignment.');
+    return assignment;
   }
 
   #resolvedModel(agentId: AgentId) {
@@ -1247,6 +1353,7 @@ export class SimulationService {
       agentId: agent.id,
       agentName: agent.name,
       personality: agent.personality,
+      behavior: this.#behaviorFor(agent.id),
       currentCell: stateFor(agent.currentCell),
       captureEligibility,
       actionAvailability: {
@@ -1263,6 +1370,7 @@ export class SimulationService {
           : { available: false, reason: captureEligibility.blockedReason },
         wait: { available: true },
       },
+      diplomacyAvailability: this.#diplomacyAvailability(agent.id),
       adjacentCells,
       nearbyAgents,
       recentEvents,
@@ -1291,6 +1399,59 @@ export class SimulationService {
         })),
       recentControlChanges,
     });
+  }
+
+  #diplomacyAvailability(agentId: AgentId) {
+    const proposals = [
+      ...(this.#state.pendingAllianceProposals?.values() ?? []),
+    ];
+    const actingAlliance = getAgentAlliance(this.#state, agentId);
+    const hasOutgoing = proposals.some(
+      ({ proposerAgentId }) => proposerAgentId === agentId,
+    );
+    const eligibleRecipientAgentIds = hasOutgoing
+      ? []
+      : [...this.#state.agents.keys()].filter(
+          (candidateId) =>
+            candidateId !== agentId &&
+            !getAgentAlliance(this.#state, candidateId) &&
+            !proposals.some(
+              ({ recipientAgentId }) => recipientAgentId === candidateId,
+            ),
+        );
+    const acceptableProposalIds = actingAlliance
+      ? []
+      : proposals
+          .filter(({ recipientAgentId }) => recipientAgentId === agentId)
+          .map(({ id }) => id);
+    return {
+      neutral: { available: true as const },
+      propose: eligibleRecipientAgentIds.length
+        ? { available: true as const, eligibleRecipientAgentIds }
+        : {
+            available: false as const,
+            eligibleRecipientAgentIds: [],
+            reason: hasOutgoing
+              ? 'A pending outgoing formal proposal already exists.'
+              : 'No unaffiliated eligible recipient is available.',
+          },
+      accept: acceptableProposalIds.length
+        ? { available: true as const, acceptableProposalIds }
+        : {
+            available: false as const,
+            acceptableProposalIds: [],
+            reason: actingAlliance
+              ? 'Allied agents cannot accept another proposal.'
+              : 'No acceptable inbound formal alliance proposal exists.',
+          },
+      leave: actingAlliance
+        ? { available: true as const, allianceId: actingAlliance.id }
+        : {
+            available: false as const,
+            allianceId: null,
+            reason: 'The agent is not currently in an alliance.',
+          },
+    };
   }
 
   #territoryScoreboard() {

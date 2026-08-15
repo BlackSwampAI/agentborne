@@ -3,6 +3,8 @@ import {
   experimentExportPreviewSchema,
   experimentExportRequestSchema,
   experimentMetricsSchema,
+  PERSONALITY_PROFILES,
+  STRATEGY_PROFILES,
   type Agent,
   type AgentId,
   type AgentObservation,
@@ -22,6 +24,7 @@ import {
   type ExperimentConfigurationEvent,
   type ProviderMetadata,
   type WorldSnapshot,
+  type BehaviorConfiguration,
 } from '@agentborne/shared';
 
 export interface ExperimentSource {
@@ -37,6 +40,7 @@ export interface ExperimentSource {
   initialWorld: WorldSnapshot;
   currentWorld: WorldSnapshot;
   modelConfiguration: ExperimentModelConfiguration;
+  behaviorConfiguration: BehaviorConfiguration;
 }
 
 export class ExperimentExportValidationError extends Error {
@@ -593,13 +597,14 @@ export function createExperimentExport(
           },
     );
   const document: ExperimentExportDocument = {
-    schemaVersion: 7,
+    schemaVersion: 8,
     generatedAt,
     experiment: {
       id: source.id,
       startedAt: source.startedAt,
       providerMode: source.providerMode,
       modelConfiguration: structuredClone(source.modelConfiguration),
+      behaviorConfiguration: structuredClone(source.behaviorConfiguration),
       ...(request.level === 'full-safe'
         ? { initialAgents: structuredClone([...source.initialAgents]) }
         : {}),
@@ -1071,6 +1076,7 @@ function exportTurn(
     startedAt: turn.startedAt,
     completedAt: turn.completedAt,
     agentId: turn.agentId,
+    behavior: structuredClone(turn.behavior ?? turn.observation.behavior),
     outcome: turn.outcome,
     modelAttempts: turn.modelAttempts.map((attempt) => ({
       ...structuredClone(attempt),
@@ -1182,6 +1188,7 @@ export function calculateExperimentMetrics(
     relevantCommunications: readonly ExportedCommunication[],
     relevantControlChanges: readonly ExportedControlChange[],
     agentId?: AgentId,
+    scopedAgentIds: readonly AgentId[] = agentIds,
   ) => {
     const attempts = records.flatMap(usageAttempts);
     const latencies = attempts.flatMap(({ provider }) =>
@@ -1311,7 +1318,7 @@ export function calculateExperimentMetrics(
             ({ controllerAgentId }) => controllerAgentId === agentId,
           ).length
         : relevantControlChanges.filter(({ controllerAgentId }) =>
-            agentIds.includes(controllerAgentId),
+            scopedAgentIds.includes(controllerAgentId),
           ).length,
       territoryLostThroughCapture: agentId
         ? relevantControlChanges.filter(
@@ -1319,10 +1326,18 @@ export function calculateExperimentMetrics(
               previousControllerAgentId === agentId,
           ).length
         : relevantControlChanges.filter(({ previousControllerAgentId }) =>
-            agentIds.includes(previousControllerAgentId),
+            scopedAgentIds.includes(previousControllerAgentId),
           ).length,
-      ...communicationMetrics(relevantCommunications, agentIds, agentId),
-      ...diplomacyMetrics(records, allianceEvents, agentId),
+      ...communicationMetrics(relevantCommunications, scopedAgentIds, agentId),
+      ...diplomacyMetrics(
+        records,
+        agentId
+          ? allianceEvents
+          : allianceEvents.filter((event) =>
+              scopedAgentIds.includes(event.agentId),
+            ),
+        agentId,
+      ),
       uniqueVisitedCells: visited.size,
       ...(latencies.length > 0
         ? {
@@ -1345,6 +1360,30 @@ export function calculateExperimentMetrics(
       ).length,
     };
   };
+  const assignmentFor = (turn: AgentTurnRecord) =>
+    turn.behavior ?? turn.observation.behavior;
+  const metricsForBehavior = (matches: (turn: AgentTurnRecord) => boolean) => {
+    const records = turns.filter(matches);
+    const scopedAgentIds = [...new Set(records.map(({ agentId }) => agentId))];
+    return metricFor(
+      records,
+      communications,
+      controlChanges,
+      undefined,
+      scopedAgentIds,
+    );
+  };
+  const combinations = [
+    ...new Map(
+      turns.map((turn) => {
+        const assignment = assignmentFor(turn);
+        return [
+          `${assignment.personalityId}:${assignment.strategyId}`,
+          assignment,
+        ];
+      }),
+    ).values(),
+  ];
   return experimentMetricsSchema.parse({
     aggregate: metricFor(turns, communications, controlChanges),
     byAgent: agentIds.map((agentId) => ({
@@ -1356,6 +1395,31 @@ export function calculateExperimentMetrics(
         agentId,
       ),
     })),
+    byPersonality: PERSONALITY_PROFILES.map(({ id: personalityId }) => ({
+      personalityId,
+      metrics: metricsForBehavior(
+        (turn) => assignmentFor(turn).personalityId === personalityId,
+      ),
+    })),
+    byStrategy: STRATEGY_PROFILES.map(({ id: strategyId }) => ({
+      strategyId,
+      metrics: metricsForBehavior(
+        (turn) => assignmentFor(turn).strategyId === strategyId,
+      ),
+    })),
+    byBehaviorCombination: combinations.map(
+      ({ personalityId, strategyId }) => ({
+        personalityId,
+        strategyId,
+        metrics: metricsForBehavior((turn) => {
+          const assignment = assignmentFor(turn);
+          return (
+            assignment.personalityId === personalityId &&
+            assignment.strategyId === strategyId
+          );
+        }),
+      }),
+    ),
   });
 }
 

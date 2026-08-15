@@ -552,7 +552,7 @@ describe('SimulationService', () => {
       actions: ['capture'],
       level: 'minimal',
     });
-    expect(victimExport.schemaVersion).toBe(7);
+    expect(victimExport.schemaVersion).toBe(8);
     expect(victimExport.turns).toHaveLength(0);
     expect(victimExport.selection).toMatchObject({
       matchingTurnCount: 0,
@@ -662,7 +662,31 @@ describe('SimulationService', () => {
       outcomes: ['rejected'],
       actions: ['capture'],
     });
-    expect(exported.schemaVersion).toBe(7);
+    expect(exported.schemaVersion).toBe(8);
+    const behavior = exported.turns[0]!.behavior!;
+    expect(
+      exported.metrics!.byPersonality.find(
+        ({ personalityId }) => personalityId === behavior.personalityId,
+      )?.metrics.totalTurns,
+    ).toBe(1);
+    expect(
+      exported.metrics!.byStrategy.find(
+        ({ strategyId }) => strategyId === behavior.strategyId,
+      )?.metrics.rejected,
+    ).toBe(1);
+    expect(
+      exported.metrics!.byBehaviorCombination.find(
+        (entry) =>
+          entry.personalityId === behavior.personalityId &&
+          entry.strategyId === behavior.strategyId,
+      )?.metrics.modelCalls,
+    ).toBe(exported.metrics!.aggregate.modelCalls);
+    expect(
+      exported.metrics!.byPersonality.reduce(
+        (sum, entry) => sum + entry.metrics.totalTurns,
+        0,
+      ),
+    ).toBe(exported.metrics!.aggregate.totalTurns);
     expect(exported.turns).toMatchObject([
       {
         outcome: 'rejected',
@@ -1235,7 +1259,7 @@ describe('SimulationService', () => {
         controlChanges: false,
       },
     });
-    expect(minimal.schemaVersion).toBe(7);
+    expect(minimal.schemaVersion).toBe(8);
     expect(
       experimentExportDocumentSchema.safeParse({
         ...minimal,

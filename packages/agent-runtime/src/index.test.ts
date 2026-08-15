@@ -235,6 +235,38 @@ describe('OpenRouterAgentProvider', () => {
     expect(request.messages[1]!.content).not.toContain('raw invalid');
   });
 
+  it('retains a specific diplomacy detail code with the broad category', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () =>
+        textResponse(
+          JSON.stringify({
+            worldActionType: 'wait',
+            targetCell: '',
+            communicationType: 'none',
+            communicationRecipientId: '',
+            communicationMessage: '',
+            diplomacyType: 'accept-alliance',
+            diplomacyRecipientId: observation.nearbyAgents[0]!.id,
+            diplomacyProposalId: '',
+            summary: 'Accept the invitation.',
+          }),
+        ),
+      ),
+    });
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).rejects.toMatchObject({
+      failure: {
+        validationCodes: [
+          'invalid-action-fields',
+          'unexpected-alliance-recipient',
+          'contradictory-diplomacy-fields',
+        ],
+      },
+    });
+  });
+
   it('preserves an explicit model override', () => {
     expect(
       buildOpenRouterRequest(observation, 'custom/provider-model').model,

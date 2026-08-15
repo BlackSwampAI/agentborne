@@ -34,6 +34,8 @@ World Lab personality edits are also untrusted, bounded text. The Game API trims
 
 Personality mutation errors use typed, generic response bodies. They do not expose raw prompts, provider responses, credentials, diagnostics, stack traces, or internal service details. There is still no authentication or persistence; these endpoints remain limited to the loopback development surface.
 
+Behavior profile IDs are allowlisted at every boundary and resolve only to application-owned registry fragments. Imports cannot supply profile prompt text. The prompt explicitly separates untrusted chat invitations from engine-authoritative formal proposal IDs, and exact legal diplomacy IDs are derived from current state. Seed values select registry entries only and are never interpreted as prompt text.
+
 ## Experiment telemetry and exports
 
 Pending failures retain only sanitized diagnostics, model/reasoning selections,
@@ -44,7 +46,7 @@ auditability.
 
 The Game API captures only schema-validated safe observations, requested world actions, optional communication and diplomacy intents, separate result records, visible concise summaries, bounded message text, typed alliance events, sanitized rejected attempts, bounded provider failures, and normalized usage metadata. Malformed identifiers use nullable or absent sanitized representations; raw provider output is never retained. It never records or exports API keys, authorization data, fixed or hidden prompts, raw provider request/response bodies, private chain-of-thought, hidden analysis, secrets, or unbounded diagnostics. Historical records are cloned and immutable.
 
-Export requests, agent IDs, levels, ranges, outcome/world-action filters, communication channel/status filters, and Custom dependencies are runtime-validated. Filtering and metrics remain server-owned. Schema version 7 preserves model assignments and attempt-aware usage without credentials; schema-v6 imports remain supported. Selected-agent exports use sender/recipient-aware communication filtering and direct multi-agent relevance for proposals and membership changes; unrelated direct messages and rejected diplomacy are excluded. Reset clears communications, alliances, proposals, alliance events, and their metrics while preserving active personality values and unlocking preserved assignments for the new experiment.
+Export requests, agent IDs, levels, ranges, outcome/world-action filters, communication channel/status filters, and Custom dependencies are runtime-validated. Filtering and metrics remain server-owned. Schema version 8 adds allowlisted behavior metadata without changing schema-v7 model and attempt-accounting meanings; schema-v5 through v7 imports remain supported. Selected-agent exports use sender/recipient-aware communication filtering and direct multi-agent relevance for proposals and membership changes; unrelated direct messages and rejected diplomacy are excluded. Reset clears communications, alliances, proposals, alliance events, and their metrics while preserving active personality values and unlocking preserved assignments for the new experiment.
 
 Actual cost is accepted only from OpenRouter's safe `usage.cost`. Missing cost is unknown, never zero; scripted-test providers explicitly report zero. There is still no authentication, budget enforcement, persistence, provider-management endpoint, upload, or sharing link. The loopback-only boundary remains mandatory.
 
