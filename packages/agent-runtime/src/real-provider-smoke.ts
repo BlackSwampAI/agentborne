@@ -37,8 +37,12 @@ const adjacentCells = gridDisk(currentCell, 1)
 
 const provider = new OpenRouterAgentProvider({
   apiKey: process.env.OPENROUTER_API_KEY,
-  model: process.env.AGENTBORNE_MODEL,
 });
+const selectedModel = process.argv[2]?.trim();
+if (!selectedModel)
+  throw new Error(
+    'Pass an explicit compatible model slug to smoke:openrouter.',
+  );
 const observation = agentObservationSchema.parse({
   agentId: agentIdSchema.parse('128f3f38-6b7d-4db7-9e95-751b4ce2681e'),
   agentName: 'Ember',
@@ -70,7 +74,7 @@ const observation = agentObservationSchema.parse({
 });
 
 try {
-  const result = await provider.decide(observation);
+  const result = await provider.decide(observation, selectedModel);
   console.log(
     JSON.stringify(
       {

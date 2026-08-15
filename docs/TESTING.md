@@ -23,10 +23,21 @@ pnpm test:e2e
 
 ## Coverage
 
+Deterministic service and component coverage includes manual Retry/Skip state,
+attempt-history export, mutually exclusive intervention controls, and model and
+export modal dismissal. Retry never implies an automatic or hidden billable
+request.
+
+Attempt-accounting coverage verifies that schema-v7 metrics count every initial
+and manual-retry call exactly once, reconcile logical outcomes independently,
+fall back once to top-level provider metadata for legacy records, and preserve
+schema-v6 model-configuration import compatibility.
+
 - Centralized development-contract tests prove radius 6 produces exactly 127 unique open/uncontrolled cells, eight unique deterministic starts, stable IDs/default personalities, and an eight-entry scoreboard with up to seven other-agent observations.
 - Alliance engine tests cover free-agent formation, recruitment, recipient-only acceptance, proposal conflicts and one-round expiry, stale invalidation, one-alliance membership, unilateral departure/dissolution, unchanged individual control, deterministic color reuse, and allied-capture rejection.
-- Simulation tests cover independent world/communication/diplomacy outcomes, provider-error expiry, bounded authoritative alliance observations, reset/default semantics, multi-agent telemetry relevance, alliance territory sums, and exactly 25 turns per agent after 200 completed turns.
-- Runtime mocks cover no optional components, communication, each diplomacy variant, all components together, malformed diplomacy with valid siblings, malformed roots, metadata preservation, and the unchanged one-request boundary without OpenRouter calls.
+- Simulation tests cover independent world/communication/diplomacy outcomes, provider-error world preservation, bounded authoritative alliance observations, reset/default semantics, multi-agent telemetry relevance, alliance territory sums, and exactly 25 turns per agent after 200 completed turns.
+- Runtime mocks cover the explicit per-turn model and reasoning profile, universal text-only request, flat JSON extraction/repair, exact default/off/effort payloads, absent provider-specific controls, malformed or missing output, cancellation, output exhaustion, metadata preservation, and the unchanged one-request boundary without OpenRouter calls.
+- Catalog fixtures cover required-capability inclusion/exclusion, text modalities, context floor, pricing parsing, malformed entries, timeout/failure, cache TTL, stale fallback, manual refresh, and credential non-disclosure without network access.
 - Schema-v5 export tests cover eight-agent selection, state-only alliance/proposal snapshots, diplomacy/event metrics and preview counts, selected-agent proposal/membership relevance, unrelated direct/rejected exclusion, cost handling, retention, and all four safe tiers.
 - React and Playwright fixtures cover 127 MapLibre cells, eight markers, base/effective colors, alliance panels and events, separate component results, safe text rendering, reset, and exact browser-owned pause at turn 200 without a genuine-provider run.
 
@@ -36,9 +47,9 @@ pnpm test:e2e
 - Shared schema tests cover trimmed personality updates, empty/oversized/malformed values, update/restore response contracts, and typed mutation errors.
 - Shared schema tests cover optional provider usage and tiny costs, experiment identities/manifests/retention/configuration events, all export levels and filters, Custom dependencies, invalid empty/range/agent selections, previews, generated documents, and level-specific omissions.
 - World-engine tests cover all existing movement/infection/capture behavior plus public delivery, direct distances zero/one/three, distance-four/self/unknown rejection, message trimming, independent application, pre-action proximity, event ordering, and deterministic construction with unchanged personalities.
-- Agent-runtime tests recursively inspect the strict model-agnostic OpenRouter schema, fixed trust and pre-action proximity instructions, one-call decision parsing, optional communication, explicit model overrides, malformed whole decisions, body-inclusive timeouts, bounded diagnostics, secret non-leakage, and updated scripted/mock output.
+- Agent-runtime tests inspect the model-agnostic OpenRouter text request, fixed trust instructions, flat sentinel normalization, fenced/prose-wrapped/trailing-comma JSON recovery, exact metadata-selected reasoning payloads, explicit model overrides, body-inclusive 75-second timeouts, cancellation, bounded diagnostics, secret non-leakage, and provider-name-independent mocked output.
 - Agent-runtime tests normalize successful/missing reasoning/cache/token/cost usage, retain known usage through malformed or unsupported decisions, and prove scripted zero cost.
-- Simulation-service tests cover valid action plus public/direct messages, rejected action plus accepted public/direct messages, valid action plus rejected direct messages, pre-action distance, public visibility, direct privacy, chronological 12/6 windows, one call per turn, deterministic ordering, provider-failure no-effects behavior, reset clearing both channels/metrics, existing world behavior, retention, recovery, and concurrency.
+- Simulation-service tests cover valid action plus public/direct messages, rejected action plus accepted public/direct messages, pre-action distance, one call per turn, provider-failure auto-stop semantics, cancellation without world mutation or turn consumption, global/per-agent model and reasoning resolution, exported profile change events, older-export defaults, retention, recovery, and concurrency.
 - Export/telemetry tests cover independent world, communication, and diplomacy totals, multi-agent alliance relevance, malformed identifier sanitization, all/one/multi-agent selection, unrelated-direct and unrelated-rejection exclusion, separate preview counts, schema-v5 validation, state-only snapshots, byte estimates, costs, ordering, and immutability.
 - Personality service tests cover single-agent updates, unknown/invalid rejection without mutation, next-observation use, preservation of progress and history, reset preservation, eight-profile default restoration, active-turn conflicts, and recovery.
 - API integration tests validate snapshot, turn, reset, missing configuration, provider failure, internal-failure propagation and recovery, rejection, and typed conflict responses.
@@ -53,4 +64,6 @@ pnpm test:e2e
 
 ## Real-provider smoke
 
-The separately opted-in `pnpm smoke:openrouter` command makes one bounded OpenRouter call and validates the decision. It is not part of the default owner validation sequence and must be run only when the owner deliberately opts into a charged provider smoke. Node 24's built-in environment parser reads only `OPENROUTER_API_KEY` and `AGENTBORNE_MODEL` from the repository-root `.env` for this command, and file values override stale exported values for the smoke process. A missing file still yields the sanitized missing-configuration failure. The call incurs third-party cost and is intentionally absent from `pnpm test`, `pnpm validate`, Playwright, and CI. On failure, the CLI may print only the bounded safe diagnostic fields retained by the adapter.
+The separately opted-in `pnpm smoke:openrouter -- <compatible-model-slug>` command makes one bounded OpenRouter call and validates the decision. It reads only `OPENROUTER_API_KEY` from `.env`; the model is an explicit argument. It is intentionally absent from default validation, Playwright, and CI and must not be run without deliberate authorization because it incurs third-party cost.
+
+World Lab also offers an explicit “Test selected model” probe. It uses the production text/flat-JSON contract and selected reasoning profile, does not advance or mutate the world, may incur a small charge, and is cached by model plus profile plus contract version. It is never invoked by deterministic validation or CI.

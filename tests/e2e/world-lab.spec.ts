@@ -50,6 +50,53 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(page.getByRole('heading', { name: 'World Lab' })).toBeVisible();
   const worldMap = page.getByTestId('world-map');
   await expect(worldMap).toBeVisible();
+  for (const viewport of [
+    { width: 1920, height: 1080 },
+    { width: 1920, height: 900 },
+    { width: 1440, height: 900 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(page.getByLabel('Public world chat')).toBeVisible();
+    const layout = await page.evaluate(() => ({
+      viewportHeight: window.innerHeight,
+      htmlOverflow: getComputedStyle(document.documentElement).overflow,
+      bodyOverflow: getComputedStyle(document.body).overflow,
+      shellTop: document
+        .querySelector('.world-lab-shell')!
+        .getBoundingClientRect().top,
+      shellBottom: document
+        .querySelector('.world-lab-shell')!
+        .getBoundingClientRect().bottom,
+      shellHeight: document
+        .querySelector('.world-lab-shell')!
+        .getBoundingClientRect().height,
+      dockBottom: document
+        .querySelector('.bottom-dock')!
+        .getBoundingClientRect().bottom,
+      dockHeight: document
+        .querySelector('.bottom-dock')!
+        .getBoundingClientRect().height,
+      mapHeight: document
+        .querySelector('[data-testid="world-map"]')!
+        .getBoundingClientRect().height,
+    }));
+    expect(layout.htmlOverflow).toBe('hidden');
+    expect(layout.bodyOverflow).toBe('hidden');
+    expect(layout.shellTop).toBe(0);
+    expect(layout.shellHeight).toBe(layout.viewportHeight);
+    expect(layout.shellBottom).toBeLessThanOrEqual(layout.viewportHeight);
+    expect(layout.dockBottom).toBeLessThanOrEqual(layout.viewportHeight);
+    expect(layout.dockHeight).toBeGreaterThanOrEqual(160);
+    expect(layout.dockHeight).toBeLessThanOrEqual(211);
+    expect(layout.mapHeight).toBeGreaterThan(layout.dockHeight);
+    await page.mouse.wheel(0, 1_000);
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  }
+  const desktopMapBox = await worldMap.boundingBox();
+  const desktopDockBox = await page.locator('.bottom-dock').boundingBox();
+  expect(desktopMapBox?.width ?? 0).toBeGreaterThan(450);
+  expect(desktopMapBox?.height ?? 0).toBeGreaterThan(300);
+  expect(desktopDockBox?.height ?? Infinity).toBeLessThanOrEqual(211);
   await expect(worldMap).toHaveAttribute('data-overlay-status', 'ready');
   await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '127');
   await expect(worldMap).toHaveAttribute(
@@ -188,7 +235,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   const exported = experimentExportDocumentSchema.parse(
     JSON.parse(await readFile(downloadedPath!, 'utf8')),
   );
-  expect(exported.schemaVersion).toBe(5);
+  expect(exported.schemaVersion).toBe(7);
   expect(exported.filters.level).toBe('minimal');
   expect(exported.selection.selectedAgentIds).toEqual([EMBER_ID]);
   expect(exported.turns).toEqual([]);
@@ -210,6 +257,14 @@ test('runs the complete deterministic World Lab browser flow', async ({
       .map(({ turnNumber }) => turnNumber)
       .toSorted((a, b) => a - b),
   );
+
+  await page.getByRole('button', { name: 'Close export' }).click();
+  await expect(
+    page.getByRole('dialog', { name: 'Experiment export' }),
+  ).toBeHidden();
+  await expect(
+    page.getByRole('button', { name: 'Select agent Ember' }),
+  ).toHaveClass(/selected/);
 
   page.once('dialog', (dialog) => dialog.accept());
   await page.getByRole('button', { name: 'Reset world' }).click();
@@ -267,5 +322,12 @@ test('runs the complete deterministic World Lab browser flow', async ({
     '1',
   );
   await expect(markers).toHaveCount(8);
+  await page.setViewportSize({ width: 760, height: 820 });
+  await expect(worldMap).toBeVisible();
+  const narrowMapBox = await worldMap.boundingBox();
+  expect(narrowMapBox?.width ?? 0).toBeGreaterThan(700);
+  expect(narrowMapBox?.height ?? 0).toBeGreaterThan(350);
+  await expect(page.getByLabel('Agent roster')).toBeVisible();
+  await expect(page.getByLabel('Public world chat')).toBeVisible();
   expect(openRouterRequests).toEqual([]);
 });

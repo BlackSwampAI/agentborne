@@ -23,6 +23,12 @@ The Game API also owns one process-local experiment record. Each completed safe 
 - `POST /api/simulation/personalities/restore-defaults` — restore all eight milestone personality directives without resetting progress
 - `POST /api/simulation/experiment/export/preview` — validate filters and report subset size, retention, cost, and approximate sharing tokens
 - `POST /api/simulation/experiment/export` — construct one schema-versioned safe JSON document
+- `GET /api/simulation/models` — return the cached, sanitized compatible model catalog
+- `POST /api/simulation/models/refresh` — explicitly refresh that catalog
+- `POST /api/simulation/models/verify` — make one explicit, non-mutating compatibility probe
+- `POST /api/simulation/experiment/models` — replace the unlocked global/per-agent assignment
+- `POST /api/simulation/turn/cancel` — abort the active provider request without mutating the world or consuming a turn
+- `POST /api/simulation/experiment/import` — restore model assignments from a validated export
 
 The legacy `GET /api/development-world` and `GET /health` endpoints remain for low-level diagnostics.
 
@@ -30,11 +36,21 @@ The Game API is authoritative for session personality configuration. World reset
 
 ## Turn flow
 
-The development world is a deterministic H3 resolution-nine radius-six disk (127 cells) around Toledo with eight fixed profiles and unique perimeter starts. One agent acts per turn in stable array order, so 200 completed turns give every agent exactly 25 turns. The service makes exactly one structured provider request returning one required `worldAction`, zero or one `communication`, and zero or one `diplomacy` intent (`propose-alliance`, `accept-alliance`, or `leave-alliance`). There are no social ticks, background inference calls, or automatic replies.
+Recoverable provider, parsing, schema, and exceptional post-provider validation
+failures are held as a server-owned pending logical turn. Ordinary
+engine-authoritative action rejection remains a completed `rejected` outcome.
+Manual Retry reuses the same agent
+observation and world boundary while resolving the model and reasoning profile
+again from current operator configuration. Operator Skip commits an explicit
+`operator-skipped` record without invoking a world action, communication, or
+diplomacy, then advances the cursor once. Neither path schedules an automatic
+retry.
+
+The development world is a deterministic H3 resolution-nine radius-six disk (127 cells) around Toledo with eight fixed profiles and unique perimeter starts. One agent acts per turn in stable array order, so 200 completed turns give every agent exactly 25 turns. The service makes exactly one text completion request and asks for one flat JSON object containing a required world action, zero or one communication, and zero or one diplomacy intent (`propose-alliance`, `accept-alliance`, or `leave-alliance`). Required sentinel-bearing fields normalize into the internal unions before existing Zod and engine validation. There are no social ticks, background inference calls, or automatic replies.
 
 Names, colors, stable IDs, and starting cells remain fixed. Personality text is mutable session configuration, but each observation copies the active value at turn start. Completed observations and turn records remain immutable, so a newly edited active personality can intentionally differ from the latest historical observation until that agent acts again.
 
-The engine alone accepts or rejects all components and creates events. The service preserves the pre-decision state, then applies world action, communication, diplomacy, and automatic proposal expiry in that deterministic order. Direct-message eligibility uses the preserved pre-action state. Each rejected component leaves the others intact; malformed diplomacy is sanitized without retaining raw output. A wholly malformed root response follows the provider-failure path and applies none of its requested components. Provider-error turns still count and can deterministically expire proposals.
+The engine alone accepts or rejects all components and creates events. The service preserves the pre-decision state, then applies world action, communication, diplomacy, and automatic proposal expiry in that deterministic order. Direct-message eligibility uses the preserved pre-action state. Each rejected component leaves the others intact. Missing text, unusable JSON, contradictory fields, timeouts, and truncated output follow the provider-failure path, stop all playback, and preserve the world without expiring proposals. Operator cancellation is separate: it aborts the active request, applies no world or proposal changes, creates no turn record, does not advance the cursor or completed-turn count, and returns to paused state. The active request and browser request settle before between-turn model editing is re-enabled.
 
 ## Formal alliance state
 
@@ -50,19 +66,23 @@ Snapshots keep the newest 120 turn records and 120 world events. Observations ex
 
 The active experiment has a runtime-validated UUID, start time, initial eight-agent configuration, immutable personality-change events, initial world, and up to 5,000 complete safe turns. The existing browser snapshot and world-event list remain capped at 120. Absolute numbering, first/last retained turns, dropped count, and completeness disclose truncation. Reset creates a new experiment and clears telemetry/cost while preserving active personalities; no previous experiments survive reset or process restart.
 
-Metrics and filtering are deterministic Game API responsibilities. Historical metrics describe the filtered retained subset; current individual and alliance territory remain separate. Schema version 5 preserves action, communication, usage, cost, and retention metrics and adds diplomacy requested/accepted/rejected categories, proposal expiry/invalidation, formations, joins, departures, dissolutions, allied capture attempts, and per-agent multi-party relevance. A turn still belongs to its actor; communications retain sender/recipient semantics; alliance events are selected for every directly affected agent. Preview separately reports matching turns, communications, control changes, and diplomacy/alliance events. Initial/current worlds are state-only and include active alliances and proposals without event history.
+Metrics and filtering are deterministic Game API responsibilities. Schema version 7 adds attempt-aware Retry/Skip accounting to the model and reasoning-profile assignments introduced in schema version 6. A turn's top-level provider metadata records the final attempt, while `modelAttempts` is canonical for call, token, and cost totals. Imports preserve recorded slugs and profiles; schema-v6 documents remain supported and missing profiles migrate to Provider default, while legacy schema-v5 documents have no assignment and remain blocked until the operator selects one.
 
 The agent runtime follows [OpenRouter's usage-accounting contract](https://openrouter.ai/docs/cookbook/administration/usage-accounting) and normalizes optional non-streaming usage fields: prompt, completion, total, reasoning, cached-read, cache-write tokens, and actual `usage.cost` as `costCredits`. It never derives price from a table. Safe usage already returned with a billable response is retained on later decision JSON/schema failure; network and HTTP failures without usage remain unknown. Scripted providers explicitly report zero tokens and zero cost.
 
 ## Packages
 
-`packages/shared` owns centralized development limits and all public schemas, including typed alliances/proposals/diplomacy/results/events, alliance-aware observations and metrics, and schema-v5 exports. Types are inferred from Zod.
+`packages/shared` owns centralized development limits and all public schemas, including the model capability contract, typed catalog data, assignments, alliances/proposals/diplomacy/results/events, metrics, and schema-v7 exports. Types are inferred from Zod.
 
 `packages/world-engine` remains deterministic and has no model, HTTP, UI, storage, or credential dependency. It validates world action, communication, and diplomacy independently and is the sole alliance mutation authority. Direct proximity is derived from a separately supplied pre-action state.
 
-`packages/agent-runtime` contains the OpenRouter adapter. The configured model and existing default remain untouched and model IDs are never special-cased. One strict root-object JSON Schema request contains a four-way `worldAction` union plus nullable public/direct communication and three-way diplomacy unions. The bounded request still uses `max_tokens: 1024` with excluded low-effort reasoning. Zod and the world engine remain authoritative. Scripted and browser-test providers emit the same shape.
+`packages/agent-runtime` contains the OpenRouter adapter and server-only catalog client. The universal contract requires text input/output, chat completions, `max_tokens`, non-streaming operation, and at least 16,384 context tokens. The centralized floor covers the bounded complete observation and fixed prompt while reserving a 4,096-token completion ceiling for the JSON decision. Catalog requests use matching server filters, then locally validate every entry. Inference requests deliberately omit tools, `tool_choice`, `response_format`, and `provider.require_parameters`. Provider-default reasoning omits `reasoning`; Off sends `{ enabled: false, exclude: true }`; an advertised effort sends `{ enabled: true, effort, exclude: true }`. No model-family logic, allowlist, compatibility flag, or model default exists.
 
-The provider abort timeout covers the complete response lifecycle, including body reading, JSON decoding, response extraction, and schema validation, and is cleared after every outcome. Non-success responses retain only bounded, sanitized in-process diagnostics for the opt-in CLI smoke; those details do not enter simulation records or API responses. Scripted providers are explicit deterministic seams selected only by tests or `AGENTBORNE_PROVIDER=scripted`; there is no automatic fallback.
+The catalog has an eight-second timeout and five-minute in-memory TTL. A successful response replaces the cache. A timeout, transport/HTTP failure, or malformed response retains the last successful catalog and marks it stale with a safe error; without a prior success it returns an empty error state. Manual refresh bypasses TTL while coalescing concurrent refreshes.
+
+Every agent resolves an explicit global assignment or per-agent override before execution, including its reasoning profile. The acting agent's resolved slug and profile are passed to its request. Assignments may change while playback is paused and no provider/reset mutation is active. Each change is exported with timestamp, scope, prior/new slug, prior/new reasoning profile, and effective next-turn boundary. No unavailable model/profile or missing model is substituted.
+
+The centralized 75-second provider abort timeout covers the complete response lifecycle, including body reading, response decoding, bounded JSON extraction/repair, normalization, and schema validation, and is cleared after every outcome. The same AbortController supports an explicit non-turn-consuming operator cancellation. Safe records expose only bounded status/code/message/request ID/model/finish-reason/latency/usage fields. Scripted providers are explicit deterministic seams selected only by tests or `AGENTBORNE_PROVIDER=scripted`; there is no automatic fallback. Manual probes use the exact text/flat-JSON contract and selected reasoning profile, never mutate or advance the world, may incur a small charge, and are cached only for the current server session by model ID, reasoning profile, and contract version.
 
 The rationale and deferrals are recorded in [ADR 0002](adr/0002-first-visible-llm-invasion.md).
 Personality ownership and reset semantics are recorded in [ADR 0003](adr/0003-session-personality-configuration.md).
@@ -71,3 +91,4 @@ Nearby-message authority, observation bounds, and export selection semantics are
 Contested control, capture, territory authority, and schema-v3 selection semantics are recorded in [ADR 0006](adr/0006-contested-hex-control.md).
 Decoupled communication and schema-v4 selection semantics are recorded in [ADR 0007](adr/0007-decoupled-world-communication.md).
 Formal alliances, the expanded experiment, and schema-v5 semantics are recorded in [ADR 0008](adr/0008-formal-alliances-experiment.md).
+Capability-driven model discovery and experiment assignments are recorded in [ADR 0009](adr/0009-capability-driven-model-catalog.md).

@@ -2,23 +2,23 @@
 
 ## Secrets and deployment
 
-`OPENROUTER_API_KEY` is read only by the Game API process. It must never use a `NEXT_PUBLIC_` name, enter a shared schema, reach an API response, or appear in logs. The repository-root `.env` is ignored; `.env.example` contains only a placeholder. Provider errors are reduced to bounded codes and generic messages before recording.
+`OPENROUTER_API_KEY` is the only required OpenRouter environment value and is read only by the Game API process. It never enters catalog DTOs, assignments, exports, fixtures, browser responses, errors, or logs. The repository-root `.env` is ignored; `.env.example` contains only a placeholder.
 
 The development API has no authentication, rate limiting, or spending guard. It binds to loopback and its CORS allowlist is limited to the documented local World Lab origins. Do not deploy its cost-incurring turn endpoint to unauthenticated public traffic.
 
 ## Model-provider isolation
 
-OpenRouter receives one immutable structured observation and returns one decision containing a required world action plus at most one optional communication and one optional diplomacy intent. It never receives a mutable world object, storage handle, browser credential, or authority to claim success. The returned JSON is parsed before the deterministic world engine validates all components independently.
+OpenRouter receives one immutable structured observation and is instructed to return exactly one plain JSON object as text, containing a required world action plus at most one optional communication and one optional diplomacy intent. Its flat required fields use explicit empty-string and `none` sentinels. The runtime performs bounded extraction and conservative repair for wrappers such as code fences, surrounding prose, and trailing commas, then rejects missing text, unusable JSON, unknown fields, contradictory sentinels, or output truncation before the deterministic world engine validates all normalized components independently.
 
-The request uses model-agnostic strict JSON Schema structured output and provider routing with `require_parameters: true`. The configured OpenRouter model is reported only through bounded provider metadata; model IDs are not hardcoded into validation or special-cased. Timeouts, network failures, HTTP failures, malformed JSON, and schema failures produce sanitized provider-failure records and apply neither component. The adapter never silently substitutes scripted behavior.
+The request uses the selected model, messages, `max_tokens`, `stream: false`, and at most one normalized reasoning object selected from sanitized model metadata. Provider default omits the object. Off is offered only for non-mandatory reasoning and sends `{ enabled: false, exclude: true }`; an advertised effort sends `{ enabled: true, effort, exclude: true }`. It deliberately sends no tools, `tool_choice`, `response_format`, `provider.require_parameters`, standalone `reasoning_effort`, or model-specific parameter. Model IDs are never inspected or special-cased. Transport/provider failures, unavailable-model/profile failures, text/JSON contract failures, and later simulation-rule rejection remain distinct safe outcomes. The adapter never silently substitutes a model or scripted behavior.
 
 Explicit scripted mode bypasses repository `.env` loading entirely. This keeps deterministic browser validation offline and prevents test-provider processes from unnecessarily reading genuine-provider credentials; genuine mode retains the existing environment conventions.
 
-Non-success OpenRouter bodies are read only up to a fixed bound. The adapter extracts a sanitized status, provider code/message, request ID, and selected model for local CLI diagnosis, redacts credentials and observation strings, and discards the raw body. These diagnostics remain in-process and are excluded from turn records, snapshots, browser responses, and normal logs.
+Non-success OpenRouter bodies are read only up to a fixed bound. The adapter extracts a sanitized status, provider code/message, request ID, selected/resolved model, finish reasons, and latency, redacts credentials and observation strings, and discards the raw body. Those bounded fields may appear in the operator-facing failure record; raw bodies, prompts, responses, headers, and credentials never do.
 
 ## Prompt and reasoning data
 
-The model is explicitly instructed to return only one structured decision and one concise visible summary, with no hidden reasoning or chain-of-thought. The request selects low reasoning effort and sets `exclude: true`, so reasoning is not returned. The application stores no raw prompts, raw provider payloads, or private reasoning. Inspector, public chat, direct history, and event-log content are rendered as React text.
+The model is explicitly instructed to return only one flat JSON decision with one concise visible summary and no hidden reasoning or chain-of-thought. Optional reasoning configuration always sets `exclude: true`; Provider default sends no reasoning instruction. Only numeric reasoning-token billing metadata is retained if OpenRouter reports it. The application stores no raw prompts, raw provider payloads, reasoning text, or private reasoning.
 
 Agent-authored messages, personalities, summaries, scoreboards, alliance events, proposals, and natural-language alliance claims are bounded untrusted data. They appear only inside the immutable user observation, never the fixed system instruction. Direct eligibility is derived from the pre-action snapshot. Recipient/range, infection, controller-presence, alliance membership, proposal eligibility, system ID/color allocation, and capture validation remain authoritative in the world engine. Models cannot choose alliance IDs, colors, membership lists, or metadata. Only accepted typed diplomacy changes alliance state, and rejected components cannot partially mutate or corrupt one another. World Lab renders model text through React text nodes and never raw HTML.
 
@@ -28,9 +28,15 @@ Personality mutation errors use typed, generic response bodies. They do not expo
 
 ## Experiment telemetry and exports
 
+Pending failures retain only sanitized diagnostics, model/reasoning selections,
+timestamps, and the safe simulation observation required for an operator retry.
+Raw provider responses, reasoning text, credentials, and authorization headers
+are not retained. Manual attempts and explicit operator skips are exported for
+auditability.
+
 The Game API captures only schema-validated safe observations, requested world actions, optional communication and diplomacy intents, separate result records, visible concise summaries, bounded message text, typed alliance events, sanitized rejected attempts, bounded provider failures, and normalized usage metadata. Malformed identifiers use nullable or absent sanitized representations; raw provider output is never retained. It never records or exports API keys, authorization data, fixed or hidden prompts, raw provider request/response bodies, private chain-of-thought, hidden analysis, secrets, or unbounded diagnostics. Historical records are cloned and immutable.
 
-Export requests, agent IDs, levels, ranges, outcome/world-action filters, communication channel/status filters, and Custom dependencies are runtime-validated. Filtering and metrics remain server-owned. Schema version 5 separates current alliance/territory state from filtered historical alliance events, while state-only world snapshots contain no event history. Selected-agent exports use sender/recipient-aware communication filtering and direct multi-agent relevance for proposals and membership changes; unrelated direct messages and rejected diplomacy are excluded. Reset clears communications, alliances, proposals, alliance events, and their metrics while preserving active personality values.
+Export requests, agent IDs, levels, ranges, outcome/world-action filters, communication channel/status filters, and Custom dependencies are runtime-validated. Filtering and metrics remain server-owned. Schema version 7 preserves model assignments and attempt-aware usage without credentials; schema-v6 imports remain supported. Selected-agent exports use sender/recipient-aware communication filtering and direct multi-agent relevance for proposals and membership changes; unrelated direct messages and rejected diplomacy are excluded. Reset clears communications, alliances, proposals, alliance events, and their metrics while preserving active personality values and unlocking preserved assignments for the new experiment.
 
 Actual cost is accepted only from OpenRouter's safe `usage.cost`. Missing cost is unknown, never zero; scripted-test providers explicitly report zero. There is still no authentication, budget enforcement, persistence, provider-management endpoint, upload, or sharing link. The loopback-only boundary remains mandatory.
 

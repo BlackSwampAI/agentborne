@@ -9,6 +9,11 @@ export const RECENT_CONTROL_CHANGE_LIMIT = 6;
 export const RECENT_ALLIANCE_EVENT_LIMIT = 8;
 export const PERSONALITY_MAX_LENGTH = 600;
 export const PROVIDER_ERROR_MAX_LENGTH = 240;
+export const OPENROUTER_MODEL_CONTEXT_MINIMUM = 16_384;
+export const OPENROUTER_MAX_OUTPUT_TOKENS = 4_096;
+export const OPENROUTER_PROVIDER_TIMEOUT_MS = 75_000;
+export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v1';
+export const OPENROUTER_REQUIRED_PARAMETERS = ['max_tokens'] as const;
 export const DEVELOPMENT_WORLD_CONFIG = {
   latitude: 41.6528,
   longitude: -83.5379,
@@ -764,10 +769,206 @@ export type ProviderDecisionEnvelope = z.infer<
 export const providerModeSchema = z.enum(['openrouter', 'scripted-test']);
 export type ProviderMode = z.infer<typeof providerModeSchema>;
 
+export const modelIdSchema = z.string().trim().min(1).max(200);
+export type ModelId = z.infer<typeof modelIdSchema>;
+
+const priceStringSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+(?:\.\d+)?$/)
+  .max(80);
+
+export const reasoningEffortSchema = z.enum([
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]);
+export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
+
+export const reasoningProfileSchema = z.enum([
+  'provider-default',
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]);
+export type ReasoningProfile = z.infer<typeof reasoningProfileSchema>;
+
+export const compatibleModelReasoningSchema = z.object({
+  supportedEfforts: z.array(reasoningEffortSchema).nullable().optional(),
+  defaultEffort: reasoningEffortSchema.optional(),
+  defaultEnabled: z.boolean().optional(),
+  supportsMaxTokens: z.boolean().optional(),
+  mandatory: z.boolean(),
+});
+
+export const compatibleModelSchema = z.object({
+  id: modelIdSchema,
+  name: z.string().trim().min(1).max(160),
+  author: z.string().trim().min(1).max(100),
+  contextLength: z.number().int().min(OPENROUTER_MODEL_CONTEXT_MINIMUM),
+  inputPricePerToken: priceStringSchema,
+  outputPricePerToken: priceStringSchema,
+  requestPrice: priceStringSchema.optional(),
+  supportedParameters: z.array(z.string().trim().min(1).max(80)).max(80),
+  createdAt: z.iso.datetime().optional(),
+  expirationDate: z.iso.date().nullable().optional(),
+  isFree: z.boolean(),
+  reasoning: compatibleModelReasoningSchema.optional(),
+});
+export type CompatibleModel = z.infer<typeof compatibleModelSchema>;
+
+const reasoningProfileOrder: Exclude<
+  ReasoningProfile,
+  'provider-default' | 'off'
+>[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+export function reasoningProfilesForModel(
+  model: CompatibleModel | undefined,
+): ReasoningProfile[] {
+  if (!model?.reasoning) return ['provider-default'];
+  const advertised = new Set(model.reasoning.supportedEfforts ?? []);
+  return [
+    'provider-default',
+    ...(model.reasoning.mandatory ? [] : (['off'] as const)),
+    ...reasoningProfileOrder.filter((profile) => advertised.has(profile)),
+  ];
+}
+
+export function modelSupportsReasoningProfile(
+  model: CompatibleModel | undefined,
+  profile: ReasoningProfile,
+): boolean {
+  return reasoningProfilesForModel(model).includes(profile);
+}
+
+export const modelOverrideSchema = z.object({
+  agentId: agentIdSchema,
+  modelId: modelIdSchema,
+  reasoningProfile: reasoningProfileSchema.default('provider-default'),
+});
+export const experimentModelConfigurationSchema = z
+  .object({
+    globalModelId: modelIdSchema.nullable(),
+    globalReasoningProfile: reasoningProfileSchema.default('provider-default'),
+    overrides: z
+      .array(modelOverrideSchema)
+      .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+    /** Retained for version-6 import compatibility; runtime selection is never turn-locked. */
+    locked: z.boolean().default(false),
+  })
+  .strict()
+  .refine(
+    ({ overrides }) =>
+      new Set(overrides.map(({ agentId }) => agentId)).size ===
+      overrides.length,
+    { message: 'Each agent may have at most one model override.' },
+  );
+export type ExperimentModelConfiguration = z.infer<
+  typeof experimentModelConfigurationSchema
+>;
+
+export const resolvedAgentModelSchema = z.object({
+  agentId: agentIdSchema,
+  modelId: modelIdSchema.nullable(),
+  reasoningProfile: reasoningProfileSchema.default('provider-default'),
+  source: z.enum(['global', 'override', 'missing']),
+  available: z.boolean(),
+  issue: z.enum(['missing', 'unavailable', 'reasoning-unavailable']).optional(),
+});
+export type ResolvedAgentModel = z.infer<typeof resolvedAgentModelSchema>;
+
+export const modelCatalogErrorSchema = z.object({
+  code: z.enum([
+    'configuration',
+    'timeout',
+    'network',
+    'provider-http',
+    'invalid-response',
+  ]),
+  message: z.string().trim().min(1).max(240),
+});
+export const modelCatalogResponseSchema = z.object({
+  models: z.array(compatibleModelSchema),
+  filteredOutCount: z.number().int().nonnegative(),
+  fetchedAt: z.iso.datetime().optional(),
+  expiresAt: z.iso.datetime().optional(),
+  stale: z.boolean(),
+  error: modelCatalogErrorSchema.optional(),
+  requirements: z.object({
+    input: z.literal('text'),
+    output: z.literal('text'),
+    endpoint: z.literal('chat-completions'),
+    requiredParameters: z
+      .array(z.enum(OPENROUTER_REQUIRED_PARAMETERS))
+      .length(OPENROUTER_REQUIRED_PARAMETERS.length),
+    minimumContextLength: z.literal(OPENROUTER_MODEL_CONTEXT_MINIMUM),
+    streaming: z.literal(false),
+  }),
+});
+export type ModelCatalogResponse = z.infer<typeof modelCatalogResponseSchema>;
+
+export const updateExperimentModelsRequestSchema = z
+  .object({
+    globalModelId: modelIdSchema.nullable(),
+    globalReasoningProfile: reasoningProfileSchema.default('provider-default'),
+    overrides: z
+      .array(modelOverrideSchema)
+      .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+  })
+  .strict();
+export const updateExperimentModelsResponseSchema = z.object({
+  snapshot: z.lazy(() => simulationSnapshotSchema),
+});
+
+export const modelVerificationStatusSchema = z.enum([
+  'untested',
+  'verified',
+  'failed',
+]);
+export const modelVerificationSchema = z.object({
+  modelId: modelIdSchema,
+  reasoningProfile: reasoningProfileSchema.default('provider-default'),
+  contractVersion: z.literal(AGENT_DECISION_CONTRACT_VERSION),
+  status: modelVerificationStatusSchema,
+  testedAt: z.iso.datetime().optional(),
+  failure: z
+    .object({
+      code: z.string().trim().min(1).max(80),
+      message: z.string().trim().min(1).max(PROVIDER_ERROR_MAX_LENGTH),
+    })
+    .optional(),
+  provider: z.lazy(() => providerMetadataSchema).optional(),
+});
+export type ModelVerification = z.infer<typeof modelVerificationSchema>;
+
+export const verifyModelRequestSchema = z
+  .object({
+    modelId: modelIdSchema,
+    reasoningProfile: reasoningProfileSchema.default('provider-default'),
+    force: z.boolean().optional(),
+  })
+  .strict();
+export const verifyModelResponseSchema = z.object({
+  verification: modelVerificationSchema,
+});
+
 export const providerMetadataSchema = z.object({
   provider: providerModeSchema,
-  model: z.string().trim().min(1).max(120),
+  model: modelIdSchema,
+  selectedModel: modelIdSchema.optional(),
+  resolvedModel: modelIdSchema.optional(),
   requestId: z.string().trim().min(1).max(160).optional(),
+  httpStatus: z.number().int().min(100).max(599).optional(),
+  finishReason: z.string().trim().min(1).max(80).optional(),
+  nativeFinishReason: z.string().trim().min(1).max(120).optional(),
   latencyMs: z.number().int().nonnegative().max(300_000),
   promptTokens: z.number().int().nonnegative().optional(),
   completionTokens: z.number().int().nonnegative().optional(),
@@ -784,14 +985,52 @@ export const providerFailureSchema = z.object({
     'configuration',
     'timeout',
     'network',
+    'model-unavailable',
     'provider-http',
+    'cancelled',
     'malformed-response',
     'unsupported-response',
+    'output-length',
+    'missing-text-output',
+    'invalid-json',
+    // Retained so schema-v6 exports produced by the superseded tool contract
+    // remain importable. The text contract never emits these codes.
+    'missing-tool-call',
+    'multiple-tool-calls',
+    'wrong-tool',
+    'invalid-tool-arguments',
+    'invalid-decision',
+    'simulation-validation',
   ]),
   message: z.string().trim().min(1).max(PROVIDER_ERROR_MAX_LENGTH),
   retryable: z.boolean(),
+  latencyMs: z.number().int().nonnegative().max(300_000).optional(),
+  httpStatus: z.number().int().min(100).max(599).optional(),
+  providerCode: z.string().trim().min(1).max(80).optional(),
+  providerMessage: z
+    .string()
+    .trim()
+    .min(1)
+    .max(PROVIDER_ERROR_MAX_LENGTH)
+    .optional(),
+  requestId: z.string().trim().min(1).max(160).optional(),
+  model: modelIdSchema.optional(),
+  finishReason: z.string().trim().min(1).max(80).optional(),
+  nativeFinishReason: z.string().trim().min(1).max(120).optional(),
 });
 export type ProviderFailure = z.infer<typeof providerFailureSchema>;
+
+export const modelAttemptSchema = z.object({
+  attemptNumber: z.number().int().positive(),
+  kind: z.enum(['initial', 'manual-retry']),
+  startedAt: z.iso.datetime(),
+  completedAt: z.iso.datetime(),
+  modelId: modelIdSchema,
+  reasoningProfile: reasoningProfileSchema.default('provider-default'),
+  failure: providerFailureSchema.optional(),
+  provider: providerMetadataSchema.optional(),
+});
+export type ModelAttempt = z.infer<typeof modelAttemptSchema>;
 
 const turnRecordBaseSchema = z.object({
   turnNumber: z.number().int().positive(),
@@ -800,6 +1039,7 @@ const turnRecordBaseSchema = z.object({
   completedAt: z.iso.datetime(),
   observation: agentObservationSchema,
   allianceEvents: z.array(allianceEventSchema).default([]),
+  modelAttempts: z.array(modelAttemptSchema).max(1_000).default([]),
 });
 
 const completedTurnFields = {
@@ -812,30 +1052,47 @@ const completedTurnFields = {
   diplomacyResult: diplomacyResultSchema,
 };
 
-export const agentTurnRecordSchema = z.discriminatedUnion('outcome', [
-  turnRecordBaseSchema.extend({
-    outcome: z.literal('accepted'),
-    ...completedTurnFields,
-    worldActionResult: z.object({
-      accepted: z.literal(true),
-      event: nonCommunicationWorldEventSchema,
+export const agentTurnRecordSchema = z
+  .discriminatedUnion('outcome', [
+    turnRecordBaseSchema.extend({
+      outcome: z.literal('accepted'),
+      ...completedTurnFields,
+      worldActionResult: z.object({
+        accepted: z.literal(true),
+        event: nonCommunicationWorldEventSchema,
+      }),
     }),
-  }),
-  turnRecordBaseSchema.extend({
-    outcome: z.literal('rejected'),
-    ...completedTurnFields,
-    worldActionResult: z.object({
-      accepted: z.literal(false),
-      reason: invalidActionReasonSchema,
-      details: z.string().min(1).max(300),
+    turnRecordBaseSchema.extend({
+      outcome: z.literal('rejected'),
+      ...completedTurnFields,
+      worldActionResult: z.object({
+        accepted: z.literal(false),
+        reason: invalidActionReasonSchema,
+        details: z.string().min(1).max(300),
+      }),
     }),
-  }),
-  turnRecordBaseSchema.extend({
-    outcome: z.literal('provider-error'),
-    failure: providerFailureSchema,
-    provider: providerMetadataSchema.optional(),
-  }),
-]);
+    turnRecordBaseSchema.extend({
+      outcome: z.literal('provider-error'),
+      failure: providerFailureSchema,
+      provider: providerMetadataSchema.optional(),
+    }),
+    turnRecordBaseSchema.extend({
+      outcome: z.literal('operator-skipped'),
+      failure: providerFailureSchema,
+      provider: providerMetadataSchema.optional(),
+    }),
+  ])
+  .superRefine((turn, context) => {
+    if (
+      turn.outcome === 'operator-skipped' &&
+      turn.failure.model !== undefined &&
+      turn.provider?.model !== turn.failure.model
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Skipped-turn failure and provider models must match.',
+      });
+  });
 export type AgentTurnRecord = z.infer<typeof agentTurnRecordSchema>;
 
 export const simulationStatusSchema = z.enum([
@@ -854,9 +1111,23 @@ export const simulationSnapshotSchema = z
     turnNumber: z.number().int().nonnegative(),
     nextAgentId: agentIdSchema,
     activeAgentId: agentIdSchema.nullable(),
+    cancellationRequested: z.boolean().default(false),
+    pendingFailedTurn: z
+      .object({
+        turnNumber: z.number().int().positive(),
+        agentId: agentIdSchema,
+        failure: providerFailureSchema,
+        attempts: z.array(modelAttemptSchema).min(1).max(1_000),
+      })
+      .nullable()
+      .default(null),
     status: simulationStatusSchema,
     providerMode: providerModeSchema,
     providerConfigured: z.boolean(),
+    modelConfiguration: experimentModelConfigurationSchema,
+    resolvedModels: z
+      .array(resolvedAgentModelSchema)
+      .length(DEVELOPMENT_WORLD_CONFIG.agentCount),
     turns: z.array(agentTurnRecordSchema).max(120),
     experiment: z.object({
       id: z.uuid().brand<'ExperimentId'>(),
@@ -976,12 +1247,21 @@ export const singleTurnResponseSchema = z.object({
 });
 export type SingleTurnResponse = z.infer<typeof singleTurnResponseSchema>;
 
+export const cancelledTurnResponseSchema = z.object({
+  snapshot: simulationSnapshotSchema,
+  cancelled: z.literal(true),
+});
+export type CancelledTurnResponse = z.infer<typeof cancelledTurnResponseSchema>;
+
 export const resetSimulationResponseSchema = z.object({
   snapshot: simulationSnapshotSchema,
 });
 export type ResetSimulationResponse = z.infer<
   typeof resetSimulationResponseSchema
 >;
+export const cancelSimulationResponseSchema = z.object({
+  snapshot: simulationSnapshotSchema,
+});
 
 export const updateAgentPersonalityRequestSchema = z
   .object({ personality: personalitySchema })
@@ -1022,6 +1302,12 @@ export const apiErrorCodeSchema = z.enum([
   'invalid_export',
   'export_conflict',
   'records_unavailable',
+  'model_configuration_conflict',
+  'invalid_model_configuration',
+  'models_unavailable',
+  'model_verification_conflict',
+  'cancel_conflict',
+  'invalid_import',
   'not_found',
   'internal_error',
 ]);
@@ -1049,11 +1335,51 @@ export type PersonalityConfigurationEvent = z.infer<
   typeof personalityConfigurationEventSchema
 >;
 
+export const modelConfigurationEventSchema = z
+  .object({
+    type: z.literal('model-assignment-changed'),
+    timestamp: z.iso.datetime(),
+    scope: z.enum(['global', 'agent']),
+    agentId: agentIdSchema.optional(),
+    previousModelId: modelIdSchema.nullable(),
+    newModelId: modelIdSchema.nullable(),
+    previousReasoningProfile:
+      reasoningProfileSchema.default('provider-default'),
+    newReasoningProfile: reasoningProfileSchema.default('provider-default'),
+    effectiveTurn: z.number().int().positive(),
+  })
+  .strict()
+  .superRefine((event, context) => {
+    if (event.scope === 'agent' && event.agentId === undefined)
+      context.addIssue({
+        code: 'custom',
+        path: ['agentId'],
+        message: 'Agent-scoped model changes require an agent ID.',
+      });
+    if (event.scope === 'global' && event.agentId !== undefined)
+      context.addIssue({
+        code: 'custom',
+        path: ['agentId'],
+        message: 'Global model changes must not include an agent ID.',
+      });
+  });
+export type ModelConfigurationEvent = z.infer<
+  typeof modelConfigurationEventSchema
+>;
+export const experimentConfigurationEventSchema = z.union([
+  personalityConfigurationEventSchema,
+  modelConfigurationEventSchema,
+]);
+export type ExperimentConfigurationEvent = z.infer<
+  typeof experimentConfigurationEventSchema
+>;
+
 export const experimentManifestSchema = z.object({
   id: experimentIdSchema,
   startedAt: z.iso.datetime(),
   generatedAt: z.iso.datetime().optional(),
   providerMode: providerModeSchema,
+  modelConfiguration: experimentModelConfigurationSchema.optional(),
   initialAgents: z
     .array(agentProfileSchema)
     .length(DEVELOPMENT_WORLD_CONFIG.agentCount)
@@ -1082,71 +1408,91 @@ export const tokenTotalsSchema = z.object({
   cacheWriteTokens: z.number().int().nonnegative().optional(),
 });
 
-export const metricCountsSchema = z.object({
-  totalTurns: z.number().int().nonnegative(),
-  accepted: z.number().int().nonnegative(),
-  rejected: z.number().int().nonnegative(),
-  providerErrors: z.number().int().nonnegative(),
-  requestedMoves: z.number().int().nonnegative(),
-  requestedInfections: z.number().int().nonnegative(),
-  requestedCaptures: z.number().int().nonnegative(),
-  requestedWaits: z.number().int().nonnegative(),
-  acceptedMovements: z.number().int().nonnegative(),
-  successfullyInfectedCells: z.number().int().nonnegative(),
-  successfulCaptures: z.number().int().nonnegative(),
-  acceptedWaits: z.number().int().nonnegative().default(0),
-  rejectedWorldActions: z.number().int().nonnegative().default(0),
-  territoryGainedThroughInfection: z.number().int().nonnegative(),
-  territoryGainedThroughCapture: z.number().int().nonnegative(),
-  territoryLostThroughCapture: z.number().int().nonnegative(),
-  publicMessagesRequested: z.number().int().nonnegative().default(0),
-  publicMessagesAccepted: z.number().int().nonnegative().default(0),
-  publicMessagesRejected: z.number().int().nonnegative().default(0),
-  directMessagesRequested: z.number().int().nonnegative().default(0),
-  directMessagesDelivered: z.number().int().nonnegative().default(0),
-  directMessagesRejected: z.number().int().nonnegative().default(0),
-  publicMessagesSent: z.number().int().nonnegative().default(0),
-  directMessagesSent: z.number().int().nonnegative().default(0),
-  directMessagesReceived: z.number().int().nonnegative().default(0),
-  diplomacyProposalsRequested: z.number().int().nonnegative().default(0),
-  diplomacyAcceptancesRequested: z.number().int().nonnegative().default(0),
-  diplomacyDeparturesRequested: z.number().int().nonnegative().default(0),
-  diplomacyProposalsAccepted: z.number().int().nonnegative().default(0),
-  diplomacyAcceptancesAccepted: z.number().int().nonnegative().default(0),
-  diplomacyDeparturesAccepted: z.number().int().nonnegative().default(0),
-  diplomacyRejected: z.number().int().nonnegative().default(0),
-  diplomacyRejections: z
-    .array(
-      z.object({
-        type: z.enum([
-          'propose-alliance',
-          'accept-alliance',
-          'leave-alliance',
-          'invalid',
-        ]),
-        reason: diplomacyRejectionReasonSchema,
-        count: z.number().int().positive(),
-      }),
+export const metricCountsSchema = z
+  .object({
+    totalTurns: z.number().int().nonnegative(),
+    accepted: z.number().int().nonnegative(),
+    rejected: z.number().int().nonnegative(),
+    providerErrors: z.number().int().nonnegative(),
+    operatorSkipped: z.number().int().nonnegative().default(0),
+    modelCalls: z.number().int().nonnegative().default(0),
+    failedModelAttempts: z.number().int().nonnegative().default(0),
+    manualRetryAttempts: z.number().int().nonnegative().default(0),
+    retriedTurns: z.number().int().nonnegative().default(0),
+    recoveredByRetry: z.number().int().nonnegative().default(0),
+    requestedMoves: z.number().int().nonnegative(),
+    requestedInfections: z.number().int().nonnegative(),
+    requestedCaptures: z.number().int().nonnegative(),
+    requestedWaits: z.number().int().nonnegative(),
+    acceptedMovements: z.number().int().nonnegative(),
+    successfullyInfectedCells: z.number().int().nonnegative(),
+    successfulCaptures: z.number().int().nonnegative(),
+    acceptedWaits: z.number().int().nonnegative().default(0),
+    rejectedWorldActions: z.number().int().nonnegative().default(0),
+    territoryGainedThroughInfection: z.number().int().nonnegative(),
+    territoryGainedThroughCapture: z.number().int().nonnegative(),
+    territoryLostThroughCapture: z.number().int().nonnegative(),
+    publicMessagesRequested: z.number().int().nonnegative().default(0),
+    publicMessagesAccepted: z.number().int().nonnegative().default(0),
+    publicMessagesRejected: z.number().int().nonnegative().default(0),
+    directMessagesRequested: z.number().int().nonnegative().default(0),
+    directMessagesDelivered: z.number().int().nonnegative().default(0),
+    directMessagesRejected: z.number().int().nonnegative().default(0),
+    publicMessagesSent: z.number().int().nonnegative().default(0),
+    directMessagesSent: z.number().int().nonnegative().default(0),
+    directMessagesReceived: z.number().int().nonnegative().default(0),
+    diplomacyProposalsRequested: z.number().int().nonnegative().default(0),
+    diplomacyAcceptancesRequested: z.number().int().nonnegative().default(0),
+    diplomacyDeparturesRequested: z.number().int().nonnegative().default(0),
+    diplomacyProposalsAccepted: z.number().int().nonnegative().default(0),
+    diplomacyAcceptancesAccepted: z.number().int().nonnegative().default(0),
+    diplomacyDeparturesAccepted: z.number().int().nonnegative().default(0),
+    diplomacyRejected: z.number().int().nonnegative().default(0),
+    diplomacyRejections: z
+      .array(
+        z.object({
+          type: z.enum([
+            'propose-alliance',
+            'accept-alliance',
+            'leave-alliance',
+            'invalid',
+          ]),
+          reason: diplomacyRejectionReasonSchema,
+          count: z.number().int().positive(),
+        }),
+      )
+      .max(48)
+      .default([]),
+    proposalsCreated: z.number().int().nonnegative().default(0),
+    proposalsSent: z.number().int().nonnegative().default(0),
+    proposalsReceived: z.number().int().nonnegative().default(0),
+    proposalsExpired: z.number().int().nonnegative().default(0),
+    proposalsInvalidated: z.number().int().nonnegative().default(0),
+    alliancesFormed: z.number().int().nonnegative().default(0),
+    alliancesJoined: z.number().int().nonnegative().default(0),
+    alliancesLeft: z.number().int().nonnegative().default(0),
+    alliancesDissolved: z.number().int().nonnegative().default(0),
+    alliedCaptureAttempts: z.number().int().nonnegative().default(0),
+    alliedCaptureRejections: z.number().int().nonnegative().default(0),
+    uniqueVisitedCells: z.number().int().nonnegative(),
+    averageLatencyMs: z.number().nonnegative().optional(),
+    tokens: tokenTotalsSchema,
+    knownCostCredits: z.number().nonnegative().finite(),
+    turnsWithUnknownCost: z.number().int().nonnegative(),
+  })
+  .superRefine((metrics, context) => {
+    if (
+      metrics.totalTurns !==
+      metrics.accepted +
+        metrics.rejected +
+        metrics.providerErrors +
+        metrics.operatorSkipped
     )
-    .max(48)
-    .default([]),
-  proposalsCreated: z.number().int().nonnegative().default(0),
-  proposalsSent: z.number().int().nonnegative().default(0),
-  proposalsReceived: z.number().int().nonnegative().default(0),
-  proposalsExpired: z.number().int().nonnegative().default(0),
-  proposalsInvalidated: z.number().int().nonnegative().default(0),
-  alliancesFormed: z.number().int().nonnegative().default(0),
-  alliancesJoined: z.number().int().nonnegative().default(0),
-  alliancesLeft: z.number().int().nonnegative().default(0),
-  alliancesDissolved: z.number().int().nonnegative().default(0),
-  alliedCaptureAttempts: z.number().int().nonnegative().default(0),
-  alliedCaptureRejections: z.number().int().nonnegative().default(0),
-  uniqueVisitedCells: z.number().int().nonnegative(),
-  averageLatencyMs: z.number().nonnegative().optional(),
-  tokens: tokenTotalsSchema,
-  knownCostCredits: z.number().nonnegative().finite(),
-  turnsWithUnknownCost: z.number().int().nonnegative(),
-});
+      context.addIssue({
+        code: 'custom',
+        message: 'Logical turn outcome totals do not reconcile.',
+      });
+  });
 export type MetricCounts = z.infer<typeof metricCountsSchema>;
 
 export const experimentMetricsSchema = z.object({
@@ -1161,6 +1507,7 @@ export const exportOutcomeSchema = z.enum([
   'accepted',
   'rejected',
   'provider-error',
+  'operator-skipped',
 ]);
 export const exportActionSchema = z.enum(['move', 'infect', 'capture', 'wait']);
 export const exportCommunicationChannelSchema = z.enum([
@@ -1263,7 +1610,7 @@ export const experimentExportRequestSchema = z
   .object({
     agents: exportSelectionSchema,
     turns: exportTurnSelectionSchema,
-    outcomes: z.array(exportOutcomeSchema).min(1).max(3),
+    outcomes: z.array(exportOutcomeSchema).min(1).max(4),
     actions: z.array(exportActionSchema).min(1).max(4),
     communications: z
       .object({
@@ -1341,6 +1688,7 @@ export const experimentExportTurnSchema = z.object({
   diplomacyResult: diplomacyResultSchema.optional(),
   failure: providerFailureSchema.optional(),
   provider: providerMetadataSchema.optional(),
+  modelAttempts: z.array(modelAttemptSchema).max(1_000).default([]),
 });
 
 export const experimentExportWorldStateSchema = worldSnapshotObjectSchema
@@ -1409,7 +1757,7 @@ export type ExperimentExportWorldState = z.infer<
 
 export const experimentExportDocumentSchema = z
   .object({
-    schemaVersion: z.literal(5),
+    schemaVersion: z.literal(7),
     generatedAt: z.iso.datetime(),
     experiment: experimentManifestSchema,
     retention: experimentRetentionSchema,
@@ -1434,9 +1782,7 @@ export const experimentExportDocumentSchema = z
       )
       .min(1)
       .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
-    configurationEvents: z
-      .array(personalityConfigurationEventSchema)
-      .optional(),
+    configurationEvents: z.array(experimentConfigurationEventSchema).optional(),
     metrics: experimentMetricsSchema.optional(),
     currentTerritory: territoryScoreboardSchema.optional(),
     currentAlliances: z.array(allianceTerritorySummarySchema).max(4).optional(),
@@ -1469,7 +1815,16 @@ export const experimentExportDocumentSchema = z
       });
     const personalityHistory =
       level === 'full-safe' || custom?.personalityTextHistory;
-    if (Boolean(document.configurationEvents) !== Boolean(personalityHistory))
+    if (personalityHistory && document.configurationEvents === undefined)
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Personality history inclusion does not match the export level.',
+      });
+    if (
+      !personalityHistory &&
+      document.configurationEvents?.some((event) => !('type' in event))
+    )
       context.addIssue({
         code: 'custom',
         message:
@@ -1531,6 +1886,7 @@ export const experimentExportDocumentSchema = z
         });
       if (
         turn.outcome !== 'provider-error' &&
+        turn.outcome !== 'operator-skipped' &&
         (Boolean(turn.worldActionResult) !== results ||
           Boolean(turn.communicationResult) !== results ||
           Boolean(turn.diplomacyResult) !== results)
@@ -1552,4 +1908,12 @@ export type ExperimentExportDocument = z.infer<
 
 export const experimentExportResponseSchema = z.object({
   document: experimentExportDocumentSchema,
+});
+export const experimentImportRequestSchema = z
+  .object({ document: z.unknown() })
+  .strict();
+export const experimentImportResponseSchema = z.object({
+  snapshot: simulationSnapshotSchema,
+  legacy: z.boolean(),
+  message: z.string().trim().min(1).max(300),
 });

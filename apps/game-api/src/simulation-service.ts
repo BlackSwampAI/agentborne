@@ -13,6 +13,9 @@ import {
   experimentIdSchema,
   experimentExportDocumentSchema,
   experimentExportPreviewSchema,
+  experimentModelConfigurationSchema,
+  modelSupportsReasoningProfile,
+  updateExperimentModelsRequestSchema,
   h3CellSchema,
   RECENT_DIRECT_MESSAGE_LIMIT,
   RECENT_PUBLIC_MESSAGE_LIMIT,
@@ -28,9 +31,15 @@ import {
   type ExperimentExportDocument,
   type ExperimentExportPreview,
   type ExperimentId,
-  type PersonalityConfigurationEvent,
+  type ExperimentModelConfiguration,
+  type CompatibleModel,
+  type ModelId,
+  type ModelAttempt,
+  type ExperimentConfigurationEvent,
   type H3Cell,
   type ProviderFailure,
+  type ProviderMetadata,
+  type ReasoningProfile,
   type SimulationSnapshot,
   type SimulationStatus,
   type WorldEvent,
@@ -61,6 +70,15 @@ const MAX_TURN_HISTORY = 120;
 const MAX_WORLD_EVENT_HISTORY = 120;
 const DEFAULT_EXPERIMENT_RETENTION = 5_000;
 
+interface PendingFailedTurn {
+  turnNumber: number;
+  agentId: AgentId;
+  startedAt: string;
+  observation: AgentObservation;
+  failure: ProviderFailure;
+  attempts: ModelAttempt[];
+}
+
 export class SimulationConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -68,8 +86,19 @@ export class SimulationConflictError extends Error {
   }
 }
 
+export class SimulationTurnCancelledError extends Error {
+  constructor() {
+    super('The active model request was cancelled without consuming a turn.');
+    this.name = 'SimulationTurnCancelledError';
+  }
+}
+
 export type SimulationValidationCode =
-  'invalid_agent_id' | 'unknown_agent' | 'invalid_personality';
+  | 'invalid_agent_id'
+  | 'unknown_agent'
+  | 'invalid_personality'
+  | 'invalid_model_configuration'
+  | 'models_unavailable';
 
 export class SimulationValidationError extends Error {
   constructor(
@@ -104,15 +133,22 @@ export class SimulationService {
   #completedTurnCount = 0;
   #cursor = 0;
   #busy = false;
+  #verificationBusy = false;
   #status: SimulationStatus;
   #activeAgentId: AgentId | null = null;
+  #activeRequestController: AbortController | null = null;
+  #cancellationRequested = false;
+  #pendingFailedTurn: PendingFailedTurn | null = null;
   #experimentId: ExperimentId;
   #experimentStartedAt: string;
   #experimentTurns: AgentTurnRecord[] = [];
   #initialExperimentAgents: Agent[];
   #initialExperimentWorld: SimulationSnapshot['world'];
-  #configurationEvents: PersonalityConfigurationEvent[] = [];
+  #configurationEvents: ExperimentConfigurationEvent[] = [];
   #experimentMetrics: ExperimentMetricAccumulator;
+  #modelConfiguration: ExperimentModelConfiguration;
+  #availableModelIds = new Set<ModelId>();
+  #availableModels = new Map<ModelId, CompatibleModel>();
 
   constructor({
     provider,
@@ -148,6 +184,18 @@ export class SimulationService {
     this.#experimentMetrics = new ExperimentMetricAccumulator([
       ...this.#state.agents.keys(),
     ]);
+    const scriptedModel =
+      (provider.model as ModelId | undefined) ??
+      (provider.mode === 'scripted-test'
+        ? ('deterministic-script' as ModelId)
+        : null);
+    this.#modelConfiguration = experimentModelConfigurationSchema.parse({
+      globalModelId: scriptedModel,
+      globalReasoningProfile: 'provider-default',
+      overrides: [],
+      locked: false,
+    });
+    if (scriptedModel) this.#availableModelIds.add(scriptedModel);
   }
 
   getSnapshot(): SimulationSnapshot {
@@ -161,9 +209,20 @@ export class SimulationService {
       turnNumber: this.#completedTurnCount,
       nextAgentId: next.id,
       activeAgentId: this.#activeAgentId,
+      cancellationRequested: this.#cancellationRequested,
+      pendingFailedTurn: this.#pendingFailedTurn
+        ? {
+            turnNumber: this.#pendingFailedTurn.turnNumber,
+            agentId: this.#pendingFailedTurn.agentId,
+            failure: this.#pendingFailedTurn.failure,
+            attempts: this.#pendingFailedTurn.attempts,
+          }
+        : null,
       status: this.#status,
       providerMode: this.#provider.mode,
       providerConfigured: this.#provider.configured,
+      modelConfiguration: this.#modelConfiguration,
+      resolvedModels: agents.map(({ id }) => this.#resolvedModel(id)),
       turns: this.#turns,
       experiment: {
         id: this.#experimentId,
@@ -182,7 +241,7 @@ export class SimulationService {
   }
 
   reset(): SimulationSnapshot {
-    if (this.#busy) {
+    if (this.#busy || this.#verificationBusy) {
       throw new SimulationConflictError(
         'Reset is unavailable while a model turn is in progress.',
       );
@@ -210,6 +269,9 @@ export class SimulationService {
     this.#completedTurnCount = 0;
     this.#cursor = 0;
     this.#activeAgentId = null;
+    this.#activeRequestController = null;
+    this.#cancellationRequested = false;
+    this.#pendingFailedTurn = null;
     this.#experimentId = experimentIdSchema.parse(this.#createExperimentId());
     this.#experimentStartedAt = this.#now();
     this.#experimentTurns = [];
@@ -221,15 +283,170 @@ export class SimulationService {
     this.#experimentMetrics = new ExperimentMetricAccumulator([
       ...this.#state.agents.keys(),
     ]);
+    this.#modelConfiguration = {
+      ...this.#modelConfiguration,
+      locked: false,
+    };
     this.#status = this.#provider.configured ? 'paused' : 'configuration-error';
     return this.getSnapshot();
+  }
+
+  setCompatibleModels(models: CompatibleModel[]): void {
+    this.#availableModels = new Map(models.map((model) => [model.id, model]));
+    this.#availableModelIds = new Set(models.map(({ id }) => id));
+    if (this.#provider.mode === 'scripted-test')
+      this.#availableModelIds.add('deterministic-script' as ModelId);
+  }
+
+  updateModelConfiguration(input: unknown): SimulationSnapshot {
+    if (this.#busy || this.#verificationBusy)
+      throw new SimulationConflictError(
+        'Model changes are unavailable while a model turn is in progress.',
+      );
+    const parsed = updateExperimentModelsRequestSchema.safeParse(input);
+    if (!parsed.success)
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'The model assignment is invalid.',
+      );
+    const agentIds = new Set(this.#state.agents.keys());
+    if (parsed.data.overrides.some(({ agentId }) => !agentIds.has(agentId)))
+      throw new SimulationValidationError(
+        'unknown_agent',
+        'A model override references an unknown agent.',
+      );
+    const selected = [
+      parsed.data.globalModelId,
+      ...parsed.data.overrides.map(({ modelId }) => modelId),
+    ].filter((modelId): modelId is ModelId => modelId !== null);
+    if (selected.some((modelId) => !this.#availableModelIds.has(modelId)))
+      throw new SimulationValidationError(
+        'models_unavailable',
+        'One or more selected models are not in the compatible OpenRouter catalog.',
+      );
+    if (
+      (parsed.data.globalModelId !== null &&
+        !modelSupportsReasoningProfile(
+          this.#availableModels.get(parsed.data.globalModelId),
+          parsed.data.globalReasoningProfile,
+        )) ||
+      parsed.data.overrides.some(
+        ({ modelId, reasoningProfile }) =>
+          !modelSupportsReasoningProfile(
+            this.#availableModels.get(modelId),
+            reasoningProfile,
+          ),
+      )
+    )
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'A selected reasoning profile is not advertised by its model.',
+      );
+    const nextConfiguration = experimentModelConfigurationSchema.parse({
+      ...parsed.data,
+      locked: false,
+    });
+    this.#recordModelConfigurationChanges(
+      this.#modelConfiguration,
+      nextConfiguration,
+    );
+    this.#modelConfiguration = nextConfiguration;
+    return this.getSnapshot();
+  }
+
+  importModelConfiguration(document: unknown): {
+    snapshot: SimulationSnapshot;
+    legacy: boolean;
+    message: string;
+  } {
+    if (this.#busy || this.#verificationBusy)
+      throw new SimulationConflictError(
+        'Import is unavailable while a model request is active.',
+      );
+    if (
+      typeof document !== 'object' ||
+      document === null ||
+      Array.isArray(document)
+    )
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'The experiment import is invalid.',
+      );
+    const root = document as Record<string, unknown>;
+    const version = root.schemaVersion;
+    if (version !== 5 && version !== 6 && version !== 7)
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'Only schema-version 5, 6, or 7 experiment exports can be imported.',
+      );
+    if (version === 5) {
+      const legacyConfiguration: ExperimentModelConfiguration = {
+        globalModelId: null,
+        globalReasoningProfile: 'provider-default',
+        overrides: [],
+        locked: false,
+      };
+      this.#recordModelConfigurationChanges(
+        this.#modelConfiguration,
+        legacyConfiguration,
+      );
+      this.#modelConfiguration = legacyConfiguration;
+      return {
+        snapshot: this.getSnapshot(),
+        legacy: true,
+        message:
+          'Legacy experiment preserved. Select compatible models before continuing.',
+      };
+    }
+    const experiment =
+      typeof root.experiment === 'object' && root.experiment !== null
+        ? (root.experiment as Record<string, unknown>)
+        : undefined;
+    const configuration = experimentModelConfigurationSchema.safeParse(
+      experiment?.modelConfiguration,
+    );
+    if (!configuration.success)
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'The imported model assignment is invalid.',
+      );
+    const knownAgents = new Set(this.#state.agents.keys());
+    if (
+      configuration.data.overrides.some(
+        ({ agentId }) => !knownAgents.has(agentId),
+      )
+    )
+      throw new SimulationValidationError(
+        'unknown_agent',
+        'The imported model assignment references an unknown agent.',
+      );
+    const importedConfiguration: ExperimentModelConfiguration = {
+      globalModelId: configuration.data.globalModelId,
+      globalReasoningProfile: configuration.data.globalReasoningProfile,
+      overrides: structuredClone(configuration.data.overrides),
+      locked: false,
+    };
+    this.#recordModelConfigurationChanges(
+      this.#modelConfiguration,
+      importedConfiguration,
+    );
+    this.#modelConfiguration = importedConfiguration;
+    return {
+      snapshot: this.getSnapshot(),
+      legacy: false,
+      message: this.getSnapshot().resolvedModels.every(
+        ({ available }) => available,
+      )
+        ? 'Model assignments imported.'
+        : 'Model assignments imported; unavailable models or reasoning profiles require explicit replacement.',
+    };
   }
 
   updateAgentPersonality(
     agentIdInput: unknown,
     personalityInput: unknown,
   ): Agent {
-    if (this.#busy) {
+    if (this.#busy || this.#verificationBusy) {
       throw new SimulationConflictError(
         'Personality changes are unavailable while a model turn is in progress.',
       );
@@ -275,7 +492,7 @@ export class SimulationService {
   }
 
   restoreDefaultPersonalities(): SimulationSnapshot {
-    if (this.#busy) {
+    if (this.#busy || this.#verificationBusy) {
       throw new SimulationConflictError(
         'Personality changes are unavailable while a model turn is in progress.',
       );
@@ -286,7 +503,7 @@ export class SimulationService {
         personality,
       ]),
     );
-    const configurationEvents: PersonalityConfigurationEvent[] = [];
+    const configurationEvents: ExperimentConfigurationEvent[] = [];
     this.#state = {
       ...this.#state,
       agents: new Map(
@@ -312,7 +529,7 @@ export class SimulationService {
   }
 
   previewExperimentExport(request: unknown): ExperimentExportPreview {
-    if (this.#busy)
+    if (this.#busy || this.#verificationBusy)
       throw new SimulationConflictError(
         'Export is unavailable while a model turn is in progress.',
       );
@@ -322,7 +539,7 @@ export class SimulationService {
   }
 
   generateExperimentExport(request: unknown): ExperimentExportDocument {
-    if (this.#busy)
+    if (this.#busy || this.#verificationBusy)
       throw new SimulationConflictError(
         'Export is unavailable while a model turn is in progress.',
       );
@@ -331,35 +548,178 @@ export class SimulationService {
     );
   }
 
+  cancelCurrentRequest(): SimulationSnapshot {
+    if (!this.#busy || !this.#activeRequestController)
+      throw new SimulationConflictError(
+        'There is no active model request to cancel.',
+      );
+    this.#cancellationRequested = true;
+    this.#activeRequestController.abort();
+    return this.getSnapshot();
+  }
+
+  async verifyModel(
+    modelId: ModelId,
+    reasoningProfile: ReasoningProfile,
+  ): Promise<ProviderMetadata> {
+    if (this.#busy || this.#verificationBusy)
+      throw new SimulationConflictError(
+        'A provider request is already in progress.',
+      );
+    const model = this.#availableModels.get(modelId);
+    if (!model)
+      throw new SimulationValidationError(
+        'models_unavailable',
+        'The selected model is not in the compatible OpenRouter catalog.',
+      );
+    if (!modelSupportsReasoningProfile(model, reasoningProfile))
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'The selected reasoning profile is not advertised by this model.',
+      );
+    const agents = [...this.#state.agents.values()];
+    const agent = agents[this.#cursor % agents.length];
+    if (!agent) throw new Error('The development world has no agents.');
+    this.#verificationBusy = true;
+    try {
+      const result = await this.#provider.decide(
+        structuredClone(this.#buildObservation(agent.id)),
+        modelId,
+        { reasoningProfile },
+      );
+      return result.metadata;
+    } finally {
+      this.#verificationBusy = false;
+    }
+  }
+
   async executeNextTurn(): Promise<AgentTurnRecord> {
-    if (this.#busy) {
+    if (this.#pendingFailedTurn)
+      throw new SimulationConflictError(
+        'The failed turn must be retried or skipped before starting another turn.',
+      );
+    return this.#executeTurnAttempt('initial');
+  }
+
+  async retryFailedTurn(): Promise<AgentTurnRecord> {
+    if (!this.#pendingFailedTurn)
+      throw new SimulationConflictError(
+        'There is no failed turn awaiting a manual retry.',
+      );
+    return this.#executeTurnAttempt('manual-retry');
+  }
+
+  skipFailedTurn(): AgentTurnRecord {
+    if (this.#busy || this.#verificationBusy)
+      throw new SimulationConflictError('A model request is still active.');
+    const pending = this.#pendingFailedTurn;
+    if (!pending)
+      throw new SimulationConflictError(
+        'There is no failed turn awaiting an operator decision.',
+      );
+    const agents = [...this.#state.agents.values()];
+    const record = agentTurnRecordSchema.parse({
+      turnNumber: pending.turnNumber,
+      agentId: pending.agentId,
+      startedAt: pending.startedAt,
+      completedAt: this.#now(),
+      observation: pending.observation,
+      outcome: 'operator-skipped',
+      failure: pending.failure,
+      provider: pending.attempts.at(-1)?.provider,
+      modelAttempts: pending.attempts,
+      allianceEvents: [],
+    });
+    this.#pendingFailedTurn = null;
+    this.#commitCompletedTurn(record, this.#state, agents.length);
+    this.#status = 'paused';
+    return record;
+  }
+
+  async #executeTurnAttempt(
+    attemptKind: 'initial' | 'manual-retry',
+  ): Promise<AgentTurnRecord> {
+    if (this.#busy || this.#verificationBusy) {
       throw new SimulationConflictError('A model turn is already in progress.');
     }
     const agents = [...this.#state.agents.values()];
-    const agent = agents[this.#cursor % agents.length];
+    const unresolved = agents
+      .map(({ id }) => this.#resolvedModel(id))
+      .filter(({ available }) => !available);
+    if (unresolved.length)
+      throw new SimulationValidationError(
+        'models_unavailable',
+        'Every agent requires an available compatible model before the experiment can run.',
+      );
+    const pending = this.#pendingFailedTurn;
+    const agent = pending
+      ? agents.find(({ id }) => id === pending.agentId)
+      : agents[this.#cursor % agents.length];
     if (!agent) throw new Error('The development world has no agents.');
 
     this.#busy = true;
     this.#activeAgentId = agent.id;
+    this.#activeRequestController = new AbortController();
+    this.#cancellationRequested = false;
     this.#status = 'waiting-for-model';
+    const startedAt = pending?.startedAt ?? this.#now();
+    const observation =
+      pending?.observation ?? this.#buildObservation(agent.id);
+    const turnNumber = pending?.turnNumber ?? this.#completedTurnCount + 1;
+    const attemptStartedAt = this.#now();
+    const resolvedModel = this.#resolvedModel(agent.id);
+    const selectedModel = resolvedModel.modelId!;
+    let providerResult: ProviderDecision | undefined;
 
     try {
-      const startedAt = this.#now();
-      const observation = this.#buildObservation(agent.id);
-      const turnNumber = this.#completedTurnCount + 1;
       const providerObservation = structuredClone(observation);
-      let providerResult: ProviderDecision;
 
       try {
-        providerResult = await this.#provider.decide(providerObservation);
+        providerResult = await this.#provider.decide(
+          providerObservation,
+          selectedModel,
+          {
+            reasoningProfile: resolvedModel.reasoningProfile,
+            signal: this.#activeRequestController.signal,
+          },
+        );
+        if (this.#activeRequestController.signal.aborted)
+          throw new AgentProviderError({
+            code: 'cancelled',
+            message: 'The model request was cancelled by the operator.',
+            retryable: false,
+            model: selectedModel,
+          });
       } catch (error) {
         const providerError = asProviderError(error);
-        const expiredState = expireAllianceProposals(this.#state, turnNumber, {
-          now: this.#now,
-          createEventId: this.#createEventId,
-          createAllianceId: this.#createAllianceId,
-          createProposalId: this.#createProposalId,
-        });
+        if (providerError.failure.code === 'cancelled') {
+          this.#status = 'paused';
+          throw new SimulationTurnCancelledError();
+        }
+        const attemptProvider = providerError.metadata ?? {
+          provider: this.#provider.mode,
+          model: providerError.failure.model ?? selectedModel,
+          latencyMs: providerError.failure.latencyMs ?? 0,
+        };
+        const attempt = {
+          attemptNumber: (pending?.attempts.length ?? 0) + 1,
+          kind: attemptKind,
+          startedAt: attemptStartedAt,
+          completedAt: this.#now(),
+          modelId: selectedModel,
+          reasoningProfile: resolvedModel.reasoningProfile,
+          failure: providerError.failure,
+          provider: attemptProvider,
+        } satisfies ModelAttempt;
+        const attempts = [...(pending?.attempts ?? []), attempt];
+        this.#pendingFailedTurn = {
+          turnNumber,
+          agentId: agent.id,
+          startedAt,
+          observation,
+          failure: providerError.failure,
+          attempts,
+        };
         const record = agentTurnRecordSchema.parse({
           turnNumber,
           agentId: agent.id,
@@ -368,23 +728,19 @@ export class SimulationService {
           observation,
           outcome: 'provider-error',
           failure: providerError.failure,
-          provider: providerError.metadata,
-          allianceEvents: allianceEventsSince(this.#state, expiredState),
+          provider: attemptProvider,
+          modelAttempts: attempts,
+          allianceEvents: [],
         });
-        this.#commitCompletedTurn(
-          record,
-          {
-            ...expiredState,
-            events: expiredState.events.slice(-MAX_WORLD_EVENT_HISTORY),
-          },
-          agents.length,
-        );
         this.#status =
           providerError.failure.code === 'configuration'
             ? 'configuration-error'
             : 'provider-error';
         return record;
       }
+
+      if (!providerResult)
+        throw new Error('The provider completed without a decision result.');
 
       const preActionState = this.#state;
       const occurredAt = this.#now();
@@ -431,62 +787,114 @@ export class SimulationService {
         turnNumber,
         context,
       );
-      let record: AgentTurnRecord;
       const candidateState = {
         ...stateAfterExpiration,
         events: stateAfterExpiration.events.slice(-MAX_WORLD_EVENT_HISTORY),
       };
 
-      if (appliedAction.result.accepted) {
-        record = agentTurnRecordSchema.parse({
-          turnNumber,
-          agentId: agent.id,
-          startedAt,
-          completedAt: this.#now(),
-          observation,
-          outcome: 'accepted',
-          worldAction: providerResult.decision.worldAction,
-          communication,
-          diplomacy,
-          summary: providerResult.decision.summary,
-          worldActionResult: appliedAction.result,
-          communicationResult: appliedCommunication.result,
-          diplomacyResult: appliedDiplomacy.result,
-          allianceEvents: allianceEventsSince(
-            preActionState,
-            stateAfterExpiration,
-          ),
-          provider: providerResult.metadata,
-        });
-      } else {
-        record = agentTurnRecordSchema.parse({
-          turnNumber,
-          agentId: agent.id,
-          startedAt,
-          completedAt: this.#now(),
-          observation,
-          outcome: 'rejected',
-          worldAction: providerResult.decision.worldAction,
-          communication,
-          diplomacy,
-          summary: providerResult.decision.summary,
-          worldActionResult: appliedAction.result,
-          communicationResult: appliedCommunication.result,
-          diplomacyResult: appliedDiplomacy.result,
-          allianceEvents: allianceEventsSince(
-            preActionState,
-            stateAfterExpiration,
-          ),
-          provider: providerResult.metadata,
-        });
-      }
+      const completed = {
+        turnNumber,
+        agentId: agent.id,
+        startedAt,
+        completedAt: this.#now(),
+        observation,
+        worldAction: providerResult.decision.worldAction,
+        communication,
+        diplomacy,
+        summary: providerResult.decision.summary,
+        worldActionResult: appliedAction.result,
+        communicationResult: appliedCommunication.result,
+        diplomacyResult: appliedDiplomacy.result,
+        allianceEvents: allianceEventsSince(
+          preActionState,
+          stateAfterExpiration,
+        ),
+        provider: providerResult.metadata,
+        modelAttempts: [
+          ...(pending?.attempts ?? []),
+          {
+            attemptNumber: (pending?.attempts.length ?? 0) + 1,
+            kind: attemptKind,
+            startedAt: attemptStartedAt,
+            completedAt: this.#now(),
+            modelId: selectedModel,
+            reasoningProfile: resolvedModel.reasoningProfile,
+            provider: providerResult.metadata,
+          },
+        ],
+      };
+      const record = agentTurnRecordSchema.parse(
+        appliedAction.result.accepted
+          ? {
+              ...completed,
+              outcome: 'accepted',
+              worldActionResult: appliedAction.result,
+            }
+          : {
+              ...completed,
+              outcome: 'rejected',
+              worldActionResult: appliedAction.result,
+            },
+      );
 
+      this.#pendingFailedTurn = null;
       this.#commitCompletedTurn(record, candidateState, agents.length);
       this.#status = 'paused';
       return record;
+    } catch (error) {
+      if (
+        error instanceof SimulationTurnCancelledError ||
+        !(error instanceof Error) ||
+        error.name !== 'ZodError'
+      )
+        throw error;
+      const failure: ProviderFailure = {
+        code: 'simulation-validation',
+        message: 'The model decision failed post-provider validation.',
+        retryable: true,
+        model: selectedModel,
+      };
+      const attempt = {
+        attemptNumber: (pending?.attempts.length ?? 0) + 1,
+        kind: attemptKind,
+        startedAt: attemptStartedAt,
+        completedAt: this.#now(),
+        modelId: selectedModel,
+        reasoningProfile: resolvedModel.reasoningProfile,
+        failure,
+        provider: {
+          provider: this.#provider.mode,
+          model: selectedModel,
+          latencyMs: 0,
+        },
+      } satisfies ModelAttempt;
+      const attempts = [...(pending?.attempts ?? []), attempt];
+      this.#pendingFailedTurn = {
+        turnNumber,
+        agentId: agent.id,
+        startedAt,
+        observation,
+        failure,
+        attempts,
+      };
+      this.#status = 'provider-error';
+      return agentTurnRecordSchema.parse({
+        turnNumber,
+        agentId: agent.id,
+        startedAt,
+        completedAt: this.#now(),
+        observation,
+        outcome: 'provider-error',
+        failure,
+        provider: attempt.provider,
+        modelAttempts: attempts,
+        allianceEvents: [],
+      });
     } finally {
       this.#busy = false;
       this.#activeAgentId = null;
+      this.#activeRequestController = null;
+      this.#cancellationRequested = false;
       if (this.#status === 'waiting-for-model') {
         this.#status = this.#provider.configured
           ? 'paused'
@@ -512,6 +920,62 @@ export class SimulationService {
     this.#experimentMetrics.add(record);
     this.#completedTurnCount = record.turnNumber;
     this.#cursor = cursor;
+    this.#modelConfiguration = { ...this.#modelConfiguration, locked: false };
+  }
+
+  #recordModelConfigurationChanges(
+    previous: ExperimentModelConfiguration,
+    next: ExperimentModelConfiguration,
+  ): void {
+    const timestamp = this.#now();
+    const effectiveTurn = this.#completedTurnCount + 1;
+    const events: ExperimentConfigurationEvent[] = [];
+    if (
+      previous.globalModelId !== next.globalModelId ||
+      previous.globalReasoningProfile !== next.globalReasoningProfile
+    )
+      events.push({
+        type: 'model-assignment-changed',
+        timestamp,
+        scope: 'global',
+        previousModelId: previous.globalModelId,
+        newModelId: next.globalModelId,
+        previousReasoningProfile: previous.globalReasoningProfile,
+        newReasoningProfile: next.globalReasoningProfile,
+        effectiveTurn,
+      });
+    const previousOverrides = new Map(
+      previous.overrides.map((override) => [override.agentId, override]),
+    );
+    const nextOverrides = new Map(
+      next.overrides.map((override) => [override.agentId, override]),
+    );
+    for (const agentId of new Set([
+      ...previousOverrides.keys(),
+      ...nextOverrides.keys(),
+    ])) {
+      const previousOverride = previousOverrides.get(agentId);
+      const nextOverride = nextOverrides.get(agentId);
+      if (
+        previousOverride?.modelId === nextOverride?.modelId &&
+        previousOverride?.reasoningProfile === nextOverride?.reasoningProfile
+      )
+        continue;
+      events.push({
+        type: 'model-assignment-changed',
+        timestamp,
+        scope: 'agent',
+        agentId,
+        previousModelId: previousOverride?.modelId ?? previous.globalModelId,
+        newModelId: nextOverride?.modelId ?? next.globalModelId,
+        previousReasoningProfile:
+          previousOverride?.reasoningProfile ?? previous.globalReasoningProfile,
+        newReasoningProfile:
+          nextOverride?.reasoningProfile ?? next.globalReasoningProfile,
+        effectiveTurn,
+      });
+    }
+    this.#configurationEvents = [...this.#configurationEvents, ...events];
   }
 
   #worldSnapshot(): SimulationSnapshot['world'] {
@@ -540,6 +1004,43 @@ export class SimulationService {
       configurationEvents: this.#configurationEvents,
       initialWorld: this.#initialExperimentWorld,
       currentWorld: this.#worldSnapshot(),
+      modelConfiguration: this.#modelConfiguration,
+    };
+  }
+
+  #resolvedModel(agentId: AgentId) {
+    const override = this.#modelConfiguration.overrides.find(
+      (candidate) => candidate.agentId === agentId,
+    );
+    const modelId = override?.modelId ?? this.#modelConfiguration.globalModelId;
+    const reasoningProfile =
+      override?.reasoningProfile ??
+      this.#modelConfiguration.globalReasoningProfile;
+    const source = override
+      ? ('override' as const)
+      : modelId
+        ? ('global' as const)
+        : ('missing' as const);
+    const modelAvailable =
+      modelId !== null && this.#availableModelIds.has(modelId);
+    const reasoningAvailable = modelSupportsReasoningProfile(
+      modelId === null ? undefined : this.#availableModels.get(modelId),
+      reasoningProfile,
+    );
+    const available = modelAvailable && reasoningAvailable;
+    return {
+      agentId,
+      modelId,
+      reasoningProfile,
+      source,
+      available,
+      ...(modelId === null
+        ? { issue: 'missing' as const }
+        : !modelAvailable
+          ? { issue: 'unavailable' as const }
+          : available
+            ? {}
+            : { issue: 'reasoning-unavailable' as const }),
     };
   }
 

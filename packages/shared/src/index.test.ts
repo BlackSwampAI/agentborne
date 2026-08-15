@@ -28,6 +28,9 @@ import {
   diplomacyIntentSchema,
   diplomacyResultSchema,
   DEVELOPMENT_WORLD_CONFIG,
+  experimentModelConfigurationSchema,
+  reasoningProfilesForModel,
+  type CompatibleModel,
 } from '.';
 
 const agentId = '128f3f38-6b7d-4db7-9e95-751b4ce2681e';
@@ -96,7 +99,7 @@ const baseTurn = {
 };
 const provider = {
   provider: 'openrouter',
-  model: 'google/gemini-3.7-flash',
+  model: 'example/compatible-model',
   latencyMs: 100,
 };
 const event = {
@@ -134,6 +137,17 @@ const snapshot = {
   status: 'paused',
   providerMode: 'openrouter',
   providerConfigured: true,
+  modelConfiguration: {
+    globalModelId: 'author/compatible-model',
+    overrides: [],
+    locked: false,
+  },
+  resolvedModels: worldAgents.map(({ id }) => ({
+    agentId: id,
+    modelId: 'author/compatible-model',
+    source: 'global',
+    available: true,
+  })),
   turns: [],
   experiment: {
     id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -316,6 +330,7 @@ describe('agent observation and decision schemas', () => {
         captureEligibilitySchema.parse({ eligible: false, blockedReason }),
       ).toEqual({ eligible: false, blockedReason });
     }
+
     expect(
       captureEligibilitySchema.safeParse({
         eligible: false,
@@ -511,6 +526,53 @@ describe('agent observation and decision schemas', () => {
         recentControlChanges: Array(7).fill(change),
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('reasoning profiles', () => {
+  const model: CompatibleModel = {
+    id: 'example/reasoning-model',
+    name: 'Reasoning Model',
+    author: 'example',
+    contextLength: 16_384,
+    inputPricePerToken: '0',
+    outputPricePerToken: '0',
+    supportedParameters: ['max_tokens'],
+    isFree: true,
+  };
+
+  it('offers only metadata-advertised effort levels in stable order', () => {
+    expect(
+      reasoningProfilesForModel({
+        ...model,
+        reasoning: {
+          mandatory: false,
+          supportedEfforts: ['xhigh', 'low', 'medium'],
+        },
+      }),
+    ).toEqual(['provider-default', 'off', 'low', 'medium', 'xhigh']);
+    expect(reasoningProfilesForModel(model)).toEqual(['provider-default']);
+  });
+
+  it('omits Off for mandatory reasoning while retaining advertised efforts', () => {
+    expect(
+      reasoningProfilesForModel({
+        ...model,
+        reasoning: { mandatory: true, supportedEfforts: ['high', 'low'] },
+      }),
+    ).toEqual(['provider-default', 'low', 'high']);
+  });
+
+  it('defaults older model assignments to Provider default', () => {
+    expect(
+      experimentModelConfigurationSchema.parse({
+        globalModelId: model.id,
+        overrides: [{ agentId, modelId: model.id }],
+      }),
+    ).toMatchObject({
+      globalReasoningProfile: 'provider-default',
+      overrides: [{ reasoningProfile: 'provider-default' }],
+    });
   });
 });
 
