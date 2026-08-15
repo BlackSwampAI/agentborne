@@ -1550,7 +1550,9 @@ describe('WorldLab', () => {
       });
       fireEvent.click(screen.getByRole('button', { name: 'Start' }));
       await act(async () => void (await vi.advanceTimersByTimeAsync(1_000)));
-      expect(screen.getByText(/Turn stopped/)).toHaveTextContent('example/alpha');
+      expect(screen.getByText(/Turn stopped/)).toHaveTextContent(
+        'example/alpha',
+      );
       fireEvent.click(screen.getByText('Model: Alpha'));
       expect(screen.getByLabelText('Global model')).toBeEnabled();
       await act(async () => void (await vi.advanceTimersByTimeAsync(10_000)));
