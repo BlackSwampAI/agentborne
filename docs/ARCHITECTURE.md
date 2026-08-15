@@ -23,6 +23,10 @@ The Game API also owns one process-local experiment record. Each completed safe 
 - `POST /api/simulation/personalities/restore-defaults` — restore all eight milestone personality directives without resetting progress
 - `POST /api/simulation/experiment/export/preview` — validate filters and report subset size, retention, cost, and approximate sharing tokens
 - `POST /api/simulation/experiment/export` — construct one schema-versioned safe JSON document
+- `GET /api/simulation/models` — return the cached, sanitized compatible model catalog
+- `POST /api/simulation/models/refresh` — explicitly refresh that catalog
+- `POST /api/simulation/experiment/models` — replace the unlocked global/per-agent assignment
+- `POST /api/simulation/experiment/import` — restore model assignments from a validated export
 
 The legacy `GET /api/development-world` and `GET /health` endpoints remain for low-level diagnostics.
 
@@ -50,17 +54,21 @@ Snapshots keep the newest 120 turn records and 120 world events. Observations ex
 
 The active experiment has a runtime-validated UUID, start time, initial eight-agent configuration, immutable personality-change events, initial world, and up to 5,000 complete safe turns. The existing browser snapshot and world-event list remain capped at 120. Absolute numbering, first/last retained turns, dropped count, and completeness disclose truncation. Reset creates a new experiment and clears telemetry/cost while preserving active personalities; no previous experiments survive reset or process restart.
 
-Metrics and filtering are deterministic Game API responsibilities. Historical metrics describe the filtered retained subset; current individual and alliance territory remain separate. Schema version 5 preserves action, communication, usage, cost, and retention metrics and adds diplomacy requested/accepted/rejected categories, proposal expiry/invalidation, formations, joins, departures, dissolutions, allied capture attempts, and per-agent multi-party relevance. A turn still belongs to its actor; communications retain sender/recipient semantics; alliance events are selected for every directly affected agent. Preview separately reports matching turns, communications, control changes, and diplomacy/alliance events. Initial/current worlds are state-only and include active alliances and proposals without event history.
+Metrics and filtering are deterministic Game API responsibilities. Schema version 6 adds experiment model assignments to the schema-version-5 action, communication, diplomacy, usage, cost, retention, and alliance data. A turn's provider metadata records the resolved model and returned token/cost usage. Imports preserve recorded slugs; legacy schema-v5 documents have no assignment and remain blocked until the operator selects one.
 
 The agent runtime follows [OpenRouter's usage-accounting contract](https://openrouter.ai/docs/cookbook/administration/usage-accounting) and normalizes optional non-streaming usage fields: prompt, completion, total, reasoning, cached-read, cache-write tokens, and actual `usage.cost` as `costCredits`. It never derives price from a table. Safe usage already returned with a billable response is retained on later decision JSON/schema failure; network and HTTP failures without usage remain unknown. Scripted providers explicitly report zero tokens and zero cost.
 
 ## Packages
 
-`packages/shared` owns centralized development limits and all public schemas, including typed alliances/proposals/diplomacy/results/events, alliance-aware observations and metrics, and schema-v5 exports. Types are inferred from Zod.
+`packages/shared` owns centralized development limits and all public schemas, including the model capability contract, typed catalog data, assignments, alliances/proposals/diplomacy/results/events, metrics, and schema-v6 exports. Types are inferred from Zod.
 
 `packages/world-engine` remains deterministic and has no model, HTTP, UI, storage, or credential dependency. It validates world action, communication, and diplomacy independently and is the sole alliance mutation authority. Direct proximity is derived from a separately supplied pre-action state.
 
-`packages/agent-runtime` contains the OpenRouter adapter. The configured model and existing default remain untouched and model IDs are never special-cased. One strict root-object JSON Schema request contains a four-way `worldAction` union plus nullable public/direct communication and three-way diplomacy unions. The bounded request still uses `max_tokens: 1024` with excluded low-effort reasoning. Zod and the world engine remain authoritative. Scripted and browser-test providers emit the same shape.
+`packages/agent-runtime` contains the OpenRouter adapter and server-only catalog client. The contract requires text input/output, chat completions, `max_tokens`, `response_format`, `structured_outputs`, non-streaming operation, and at least 16,384 context tokens. The 16,384 floor covers the bounded complete observation and fixed prompt plus the 1,024-token response budget with substantial safety headroom. Catalog requests use matching server filters, then locally validate every entry. No model-family logic, allowlist, reasoning option, tool requirement, or model default exists.
+
+The catalog has an eight-second timeout and five-minute in-memory TTL. A successful response replaces the cache. A timeout, transport/HTTP failure, or malformed response retains the last successful catalog and marks it stale with a safe error; without a prior success it returns an empty error state. Manual refresh bypasses TTL while coalescing concurrent refreshes.
+
+Every agent resolves an explicit global assignment or per-agent override before execution. The acting agent's resolved slug is passed to its request. Assignments lock after the first completed turn; reset creates a new experiment while preserving and unlocking them. No unavailable or missing model is substituted.
 
 The provider abort timeout covers the complete response lifecycle, including body reading, JSON decoding, response extraction, and schema validation, and is cleared after every outcome. Non-success responses retain only bounded, sanitized in-process diagnostics for the opt-in CLI smoke; those details do not enter simulation records or API responses. Scripted providers are explicit deterministic seams selected only by tests or `AGENTBORNE_PROVIDER=scripted`; there is no automatic fallback.
 
@@ -71,3 +79,4 @@ Nearby-message authority, observation bounds, and export selection semantics are
 Contested control, capture, territory authority, and schema-v3 selection semantics are recorded in [ADR 0006](adr/0006-contested-hex-control.md).
 Decoupled communication and schema-v4 selection semantics are recorded in [ADR 0007](adr/0007-decoupled-world-communication.md).
 Formal alliances, the expanded experiment, and schema-v5 semantics are recorded in [ADR 0008](adr/0008-formal-alliances-experiment.md).
+Capability-driven model discovery and experiment assignments are recorded in [ADR 0009](adr/0009-capability-driven-model-catalog.md).

@@ -43,6 +43,8 @@ Third focused slice: communication is decoupled from the world action while rema
 
 Fourth focused slice: expand the Toledo development world to 127 cells and eight fixed agents, add engine-authoritative formal proposal/accept/leave alliances, deterministic effective territory colors, alliance-aware capture blocking, bounded alliance observations/events/telemetry, schema-v5 exports, and an exact browser-owned run-to-turn-200 experiment. Individual control remains authoritative, all decision components share one inference, and persistence, server scheduling, leadership, generic relationships, resources, and combat remain deferred.
 
+Fifth focused slice: replace environment-selected models with a server-owned capability-filtered OpenRouter catalog, experiment-level global and per-agent assignments, schema-v6 assignment preservation, usage visibility, and a map-first operator layout with bounded collapsible activity. Model families remain irrelevant to compatibility; persistence, authentication, spending controls, and live catalog persistence remain deferred.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.
