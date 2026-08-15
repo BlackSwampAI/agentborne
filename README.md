@@ -1,6 +1,6 @@
 # Agentborne
 
-Agentborne is the working title for an agent-first GPS containment game. Six persistent, named model-backed agents move, infect, capture contested territory, wait, and optionally communicate in the same inference in a real Toledo H3 world while the World Lab exposes every safe decision record.
+Agentborne is the working title for an agent-first GPS containment game. Eight persistent, named model-backed agents move, infect, capture contested territory, communicate, and conduct formal alliance diplomacy in one inference in a real Toledo H3 world while the World Lab exposes every safe decision record.
 
 ## Workspace
 
@@ -28,7 +28,7 @@ Open the World Lab at <http://localhost:3000>. The Game API binds to <http://127
 
 Each Single turn or completed playback interval makes one third-party OpenRouter request and may incur cost. Start is deliberately disabled when the server has no key. This development API has no authentication or cost controls and is not suitable for an unauthenticated public deployment.
 
-State is held only in the Game API process. The API captures one active safe experiment with up to 5,000 complete turn records while the browser snapshot remains capped at 120. Every provider decision contains one required world action—move, infect, capture, or wait—and at most one optional communication. Public messages reach every agent; direct messages require a distinct existing recipient within inclusive pre-action H3 distance three. Both components are validated independently, remain attached to one turn, and use one provider call. Message text is authoritatively trimmed and bounded to 1–280 characters. Observations contain the latest 12 public messages and latest six relevant inbound/outbound direct messages. Every infected hex has exactly one individual controller, and the existing capture rules remain unchanged. The six default personalities are unchanged. Minimal, Standard, Full safe, and Custom schema-v4 exports filter the same safe retained experiment without changing prompts or inference usage. OpenRouter's returned `usage.cost` is shown as known cost; missing cost remains explicitly unknown. Restarting the API loses the experiment. Reset clears public/direct history and metrics, creates a new experiment identity and open Toledo world, and preserves active personalities.
+State is held only in the Game API process. The API captures one active safe experiment with up to 5,000 complete turn records while the browser snapshot remains capped at 120. Every provider decision contains one required world action, at most one communication, and at most one formal diplomacy intent; all three components are independently validated and use one provider call. Formal proposals are public state, expire after eight completed turns, and can create, recruit into, or leave one engine-owned alliance per agent. The engine assigns one of four accessible display colors while preserving individual ownership and permanent base colors. Allied territory cannot be captured. Observations retain the existing bounded public/direct windows plus authoritative proposals, alliance events, and individual/alliance territory totals. Minimal, Standard, Full safe, and Custom schema-v5 exports preserve the decoupled communication model and add diplomacy/alliance state, events, and metrics. Reset clears world/alliance progress while preserving all eight edited personalities; Restore Defaults reinstates the exact eight milestone defaults without changing progress.
 
 Export previews report exact serialized UTF-8 bytes and a model-agnostic `ceil(bytes / 4)` approximate AI-input-token estimate. Compact JSON is the default for AI sharing; Pretty JSON remains available for human review, and preview estimates reflect the selected serialization. This is a sharing-budget aid, not tokenizer output or a billing guarantee. Exports exclude fixed prompts, raw provider payloads, credentials, authorization headers, private reasoning, and unbounded diagnostics.
 
@@ -44,10 +44,12 @@ The command uses Node 24's built-in environment parser to read only `OPENROUTER_
 
 ## Development map source
 
-The map centers on Toledo, Ohio (`41.6528, -83.5379`) at H3 resolution 9 and renders a radius-four disk. MapLibre uses the public OpenStreetMap raster tile endpoint with attribution for light local development only. A public deployment must choose a compliant production tile source.
+The map centers on Toledo, Ohio (`41.6528, -83.5379`) at H3 resolution 9 and renders a deterministic radius-six disk of exactly 127 cells with eight fixed perimeter starts. MapLibre uses the public OpenStreetMap raster tile endpoint with attribution for light local development only. A public deployment must choose a compliant production tile source.
 
-Formal alliances, combat systems, relationships, group chat, persistent memory, player mechanics, persistence, autonomous scheduling, and provider configuration UI remain deferred to later roadmap milestones.
+Alliance leadership, merging, custom metadata, combat systems, relationship scores, group chat, persistent memory, player mechanics, persistence, autonomous scheduling, and provider configuration UI remain deferred.
 
 When every development cell is infected, World Lab automatically pauses playback and disables Start to avoid accidental provider calls. Reset and export remain available, and Single turn remains an explicitly manual diagnostic action.
+
+World Lab also provides a browser-owned **Run to turn 200** control. It continues the existing sequential loop only for the remaining turns, displays progress, and pauses immediately after total completed turn 200 unless full infection stops it first.
 
 See [Testing](docs/TESTING.md), [Architecture](docs/ARCHITECTURE.md), [Security](docs/SECURITY.md), and the [Roadmap](ROADMAP.md).

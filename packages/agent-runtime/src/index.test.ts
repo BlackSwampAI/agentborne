@@ -17,6 +17,8 @@ const observation = agentObservationSchema.parse({
     cell: '892a1072893ffff',
     state: 'open',
     controllerAgentId: null,
+    controllerAllianceId: null,
+    effectiveColor: null,
   },
   captureEligibility: {
     eligible: false,
@@ -27,6 +29,8 @@ const observation = agentObservationSchema.parse({
       cell: '892a1072883ffff',
       state: 'open',
       controllerAgentId: null,
+      controllerAllianceId: null,
+      effectiveColor: null,
     },
   ],
   nearbyAgents: [
@@ -35,6 +39,7 @@ const observation = agentObservationSchema.parse({
       name: 'Rook',
       currentCell: '892a1072883ffff',
       distance: 1,
+      allianceId: null,
     },
   ],
   recentEvents: [],
@@ -47,13 +52,23 @@ const observation = agentObservationSchema.parse({
     ['442a1667-39c8-48e9-8c89-23803f9e2101', 'Solace', '#c59cff'],
     ['5f812a08-05f2-4950-bf2d-4df59d05e9c2', 'Verge', '#6ee7a8'],
     ['67a43b5c-ced8-45bd-970f-a89ac57853fc', 'Jinx', '#ff91c8'],
+    ['78b6d86c-39b4-47d8-9d7a-0b92686ada71', 'Bastion', '#3b5ccc'],
+    ['89ce9ddb-611f-4a46-8f7b-36e656494aa2', 'Cipher', '#9b4d3f'],
   ].map(([agentId, name, color]) => ({
     agentId,
     name,
     color,
+    allianceId: null,
+    effectiveColor: color,
     controlledCellCount: 0,
   })),
   recentControlChanges: [],
+  actingAllianceId: null,
+  actingAlliance: null,
+  activeAlliances: [],
+  inboundAllianceProposals: [],
+  outboundAllianceProposals: [],
+  recentAllianceEvents: [],
 });
 
 function response(content: string, status = 200) {
@@ -120,7 +135,7 @@ describe('OpenRouterAgentProvider', () => {
     expect(request.reasoning).toEqual({ effort: 'low', exclude: true });
     expect(request.messages[1]!.content).toContain(observation.personality);
     expect(request.messages[0]!.content).toContain(
-      'Capture eligibility, the territory scoreboard, and recent control-change history are observations',
+      'Capture eligibility, scoreboards, proposals, alliance events, and messages are observations',
     );
     expect(request.messages[0]!.content).toContain(
       'controller physically present on its controlled hex defends it',
@@ -149,6 +164,7 @@ describe('OpenRouterAgentProvider', () => {
     expect(schema.properties.worldAction).toHaveProperty('anyOf');
     expect(schema.properties.worldAction.anyOf).toHaveLength(4);
     expect(schema.properties.communication.anyOf).toHaveLength(3);
+    expect(schema.properties.diplomacy.anyOf).toHaveLength(4);
 
     visitJsonValues(schema, (schemaNode) => {
       expect(schemaNode).not.toHaveProperty('oneOf');
@@ -289,6 +305,35 @@ describe('OpenRouterAgentProvider', () => {
       decision: {
         worldAction: { type: 'infect' },
         communication: { channel: 'public' },
+      },
+    });
+  });
+
+  it('preserves malformed diplomacy for independent sanitized engine rejection', async () => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () =>
+        response(
+          JSON.stringify({
+            worldAction: { type: 'wait' },
+            communication: {
+              channel: 'public',
+              message: 'The valid message remains.',
+            },
+            diplomacy: {
+              type: 'propose-alliance',
+              recipientId: 'malformed-id',
+            },
+            summary: 'Validate components independently.',
+          }),
+        ),
+      ),
+    });
+    await expect(provider.decide(observation)).resolves.toMatchObject({
+      decision: {
+        worldAction: { type: 'wait' },
+        communication: { channel: 'public' },
+        diplomacy: { type: 'propose-alliance', recipientId: 'malformed-id' },
       },
     });
   });

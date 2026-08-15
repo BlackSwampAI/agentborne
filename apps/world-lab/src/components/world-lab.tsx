@@ -39,6 +39,7 @@ export function WorldLab() {
   const [selectedCell, setSelectedCell] = useState<H3Cell | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId | null>(null);
   const [running, setRunning] = useState(false);
+  const [runToTurn200, setRunToTurn200] = useState(false);
   const [inFlight, setInFlight] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [personalityPending, setPersonalityPending] = useState(false);
@@ -50,11 +51,24 @@ export function WorldLab() {
   const [exportOpen, setExportOpen] = useState(false);
   const [exportAgentIds, setExportAgentIds] = useState<AgentId[]>([]);
   const inFlightRef = useRef(false);
+  const runToTurn200Ref = useRef(false);
+  const completedTurnsRef = useRef(0);
+
+  useEffect(() => {
+    runToTurn200Ref.current = runToTurn200;
+  }, [runToTurn200]);
 
   const applySnapshot = useCallback((next: SimulationSnapshot) => {
+    completedTurnsRef.current = next.experiment.totalCompletedTurns;
     setSnapshot(next);
-    if (next.world.hexes.every(({ state }) => state === 'infected'))
+    if (
+      next.world.hexes.every(({ state }) => state === 'infected') ||
+      (runToTurn200Ref.current && next.experiment.totalCompletedTurns >= 200)
+    ) {
       setRunning(false);
+      setRunToTurn200(false);
+      runToTurn200Ref.current = false;
+    }
     setSelectedCell((current) => current ?? next.world.hexes[0]!.cell);
     setSelectedAgentId((current) => current ?? next.world.agents[0]!.id);
   }, []);
@@ -80,6 +94,12 @@ export function WorldLab() {
 
   const executeTurn = useCallback(async () => {
     if (inFlightRef.current) return;
+    if (runToTurn200Ref.current && completedTurnsRef.current >= 200) {
+      setRunning(false);
+      setRunToTurn200(false);
+      runToTurn200Ref.current = false;
+      return;
+    }
     inFlightRef.current = true;
     setInFlight(true);
     setUiError(null);
@@ -103,6 +123,7 @@ export function WorldLab() {
 
   useEffect(() => {
     if (!running || inFlight || resetting) return;
+    if (runToTurn200Ref.current && completedTurnsRef.current >= 200) return;
     const timer = window.setTimeout(() => void executeTurn(), speed);
     return () => window.clearTimeout(timer);
   }, [executeTurn, inFlight, resetting, running, snapshot?.turnNumber, speed]);
@@ -118,6 +139,8 @@ export function WorldLab() {
     )
       return;
     setRunning(false);
+    setRunToTurn200(false);
+    runToTurn200Ref.current = false;
     setResetting(true);
     setUiError(null);
     try {
@@ -130,6 +153,8 @@ export function WorldLab() {
       const payload = resetSimulationResponseSchema.parse(
         await response.json(),
       );
+      completedTurnsRef.current =
+        payload.snapshot.experiment.totalCompletedTurns;
       setSnapshot(payload.snapshot);
       setSelectedCell(payload.snapshot.world.hexes[0]!.cell);
       setSelectedAgentId(payload.snapshot.world.agents[0]!.id);
@@ -186,7 +211,7 @@ export function WorldLab() {
   const restoreDefaultPersonalities = async () => {
     if (
       !window.confirm(
-        'Restore the original personalities for all six agents? World progress will be preserved.',
+        'Restore the milestone defaults for all eight agents? World progress will be preserved.',
       )
     )
       return;
@@ -240,6 +265,17 @@ export function WorldLab() {
   const selectedHex = snapshot.world.hexes.find(
     ({ cell }) => cell === selectedCell,
   );
+  const selectedHexController =
+    selectedHex?.state === 'infected'
+      ? snapshot.world.agents.find(
+          ({ id }) => id === selectedHex.controllerAgentId,
+        )
+      : undefined;
+  const selectedHexAlliance = selectedHexController
+    ? snapshot.world.alliances.find(({ memberAgentIds }) =>
+        memberAgentIds.includes(selectedHexController.id),
+      )
+    : undefined;
   const latestTurn = selectedAgent
     ? snapshot.turns.findLast(({ agentId }) => agentId === selectedAgent.id)
     : undefined;
@@ -295,6 +331,7 @@ export function WorldLab() {
             longitude={longitude}
             hexes={snapshot.world.hexes}
             agents={snapshot.world.agents}
+            alliances={snapshot.world.alliances}
             selectedCell={selectedCell ?? snapshot.world.hexes[0]!.cell}
             selectedAgentId={selectedAgentId}
             onSelectCell={setSelectedCell}
@@ -323,7 +360,14 @@ export function WorldLab() {
             </p>
             <div className="control-row">
               {running ? (
-                <button type="button" onClick={() => setRunning(false)}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRunning(false);
+                    setRunToTurn200(false);
+                    runToTurn200Ref.current = false;
+                  }}
+                >
                   Pause
                 </button>
               ) : (
@@ -335,7 +379,11 @@ export function WorldLab() {
                     !snapshot.providerConfigured
                   }
                   type="button"
-                  onClick={() => setRunning(true)}
+                  onClick={() => {
+                    setRunToTurn200(false);
+                    runToTurn200Ref.current = false;
+                    setRunning(true);
+                  }}
                 >
                   Start
                 </button>
@@ -360,6 +408,31 @@ export function WorldLab() {
                 Reset world
               </button>
             </div>
+            <button
+              className="secondary-action"
+              disabled={
+                running ||
+                inFlight ||
+                resetting ||
+                personalityPending ||
+                !snapshot.providerConfigured ||
+                fullyInfected ||
+                snapshot.experiment.totalCompletedTurns >= 200
+              }
+              type="button"
+              onClick={() => {
+                runToTurn200Ref.current = true;
+                setRunToTurn200(true);
+                setRunning(true);
+              }}
+            >
+              Run to turn 200
+            </button>
+            <p role="status">
+              Experiment progress:{' '}
+              {Math.min(snapshot.experiment.totalCompletedTurns, 200)}/200
+              {runToTurn200 ? ' · bounded run active' : ''}
+            </p>
             <button
               className="secondary-action"
               disabled={personalityControlsDisabled}
@@ -422,6 +495,7 @@ export function WorldLab() {
             <AgentInspector
               key={`${selectedAgent.id}:${selectedAgent.personality}`}
               agent={selectedAgent}
+              snapshot={snapshot}
               cellState={
                 snapshot.world.hexes.find(
                   ({ cell }) => cell === selectedAgent.currentCell,
@@ -483,6 +557,7 @@ export function WorldLab() {
           />
 
           <TerritoryScoreboard entries={snapshot.experiment.currentTerritory} />
+          <AlliancePanel snapshot={snapshot} />
 
           {selectedHex && (
             <section
@@ -504,18 +579,44 @@ export function WorldLab() {
                         <span
                           className="agent-swatch"
                           style={{
-                            background: snapshot.world.agents.find(
-                              ({ id }) => id === selectedHex.controllerAgentId,
-                            )?.color,
+                            background:
+                              selectedHexAlliance?.color ??
+                              selectedHexController?.color,
                           }}
                         />
-                        {snapshot.world.agents.find(
-                          ({ id }) => id === selectedHex.controllerAgentId,
-                        )?.name ?? selectedHex.controllerAgentId}
+                        {selectedHexController?.name ??
+                          selectedHex.controllerAgentId}
                       </>
                     ) : (
                       'No controller'
                     )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Base color</dt>
+                  <dd>{selectedHexController?.color ?? 'None'}</dd>
+                </div>
+                <div>
+                  <dt>Alliance</dt>
+                  <dd>
+                    {selectedHexAlliance
+                      ? selectedHexAlliance.memberAgentIds
+                          .map(
+                            (id) =>
+                              snapshot.world.agents.find(
+                                (agent) => agent.id === id,
+                              )?.name,
+                          )
+                          .join(', ')
+                      : 'Unaffiliated'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Effective territory color</dt>
+                  <dd>
+                    {selectedHexAlliance?.color ??
+                      selectedHexController?.color ??
+                      'None'}
                   </dd>
                 </div>
                 <div>
@@ -615,8 +716,112 @@ function TerritoryScoreboard({
   );
 }
 
+function AlliancePanel({ snapshot }: { snapshot: SimulationSnapshot }) {
+  const unaffiliated = snapshot.world.agents.filter(
+    ({ id }) =>
+      !snapshot.world.alliances.some(({ memberAgentIds }) =>
+        memberAgentIds.includes(id),
+      ),
+  );
+  return (
+    <section
+      className="panel territory-panel"
+      aria-label="Alliance and territory panel"
+    >
+      <p className="panel-kicker">Formal engine authority</p>
+      <h2>Alliances</h2>
+      {snapshot.experiment.currentAlliances.length === 0 ? (
+        <p className="muted">No active alliances.</p>
+      ) : (
+        <ol>
+          {snapshot.experiment.currentAlliances.map((alliance) => (
+            <li key={alliance.allianceId}>
+              <span
+                className="agent-swatch"
+                style={{ background: alliance.color }}
+              />
+              <span>
+                {alliance.members
+                  .map(
+                    ({ name, controlledCellCount }) =>
+                      `${name} (${controlledCellCount})`,
+                  )
+                  .join(', ')}
+              </span>
+              <strong>{alliance.totalControlledCellCount}</strong>
+              <span className="sr-only">combined controlled cells</span>
+            </li>
+          ))}
+        </ol>
+      )}
+      <h3>Unaffiliated agents</h3>
+      <p>
+        {unaffiliated.length
+          ? unaffiliated.map(({ name }) => name).join(', ')
+          : 'None'}
+      </p>
+      <h3>Pending proposals</h3>
+      {snapshot.world.pendingAllianceProposals.length ? (
+        <ol>
+          {snapshot.world.pendingAllianceProposals.map((proposal) => (
+            <li key={proposal.id}>
+              {
+                snapshot.world.agents.find(
+                  ({ id }) => id === proposal.proposerAgentId,
+                )?.name
+              }{' '}
+              →{' '}
+              {
+                snapshot.world.agents.find(
+                  ({ id }) => id === proposal.recipientAgentId,
+                )?.name
+              }
+              ; expires after turn {proposal.expirationTurn}
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="muted">No pending alliance proposals.</p>
+      )}
+      <h3>Recent alliance changes</h3>
+      <AllianceEventList snapshot={snapshot} />
+    </section>
+  );
+}
+
+function AllianceEventList({
+  snapshot,
+  agentId,
+}: {
+  snapshot: SimulationSnapshot;
+  agentId?: AgentId;
+}) {
+  const events = snapshot.world.events
+    .filter(
+      (event): event is AllianceWorldEvent =>
+        event.type === 'alliance-proposed' ||
+        event.type === 'alliance-proposal-closed' ||
+        event.type === 'alliance-formed' ||
+        event.type === 'agent-joined-alliance' ||
+        event.type === 'agent-left-alliance' ||
+        event.type === 'alliance-dissolved',
+    )
+    .filter(
+      (event) => !agentId || allianceEventParticipants(event).includes(agentId),
+    );
+  if (!events.length) return <p className="muted">No alliance changes yet.</p>;
+  return (
+    <ol className="compact-history">
+      {events.slice(-8).map((event) => (
+        <li key={event.id}>{formatAllianceEvent(event, snapshot)}</li>
+      ))}
+    </ol>
+  );
+}
+
 function AgentInspector({
   agent,
+  snapshot,
   cellState,
   latestTurn,
   turns,
@@ -631,6 +836,7 @@ function AgentInspector({
   onExportAgent,
 }: {
   agent: SimulationSnapshot['world']['agents'][number];
+  snapshot: SimulationSnapshot;
   cellState: 'open' | 'infected';
   latestTurn?: AgentTurnRecord;
   turns: AgentTurnRecord[];
@@ -663,6 +869,16 @@ function AgentInspector({
 
   const draftPreset = matchingPersonalityPreset(draft);
   const activePreset = matchingPersonalityPreset(agent.personality);
+  const alliance = snapshot.world.alliances.find(({ memberAgentIds }) =>
+    memberAgentIds.includes(agent.id),
+  );
+  const allianceSummary = snapshot.experiment.currentAlliances.find(
+    ({ allianceId }) => allianceId === alliance?.id,
+  );
+  const pendingProposals = snapshot.world.pendingAllianceProposals.filter(
+    ({ proposerAgentId, recipientAgentId }) =>
+      proposerAgentId === agent.id || recipientAgentId === agent.id,
+  );
 
   const apply = async () => {
     const parsed = personalitySchema.safeParse(draft);
@@ -689,8 +905,26 @@ function AgentInspector({
           <dd>{agent.id}</dd>
         </div>
         <div>
-          <dt>Color</dt>
+          <dt>Base color</dt>
           <dd>{agent.color}</dd>
+        </div>
+        <div>
+          <dt>Effective color</dt>
+          <dd>{alliance?.color ?? agent.color}</dd>
+        </div>
+        <div>
+          <dt>Alliance membership</dt>
+          <dd>
+            {alliance
+              ? allianceSummary?.members.map(({ name }) => name).join(', ')
+              : 'Unaffiliated'}
+          </dd>
+        </div>
+        <div>
+          <dt>Alliance territory</dt>
+          <dd>
+            {allianceSummary?.totalControlledCellCount ?? 0} controlled cells
+          </dd>
         </div>
         <div>
           <dt>Cell</dt>
@@ -701,6 +935,31 @@ function AgentInspector({
           <dd>{cellState}</dd>
         </div>
       </dl>
+      <h3>Relevant pending proposals</h3>
+      {pendingProposals.length ? (
+        <ol>
+          {pendingProposals.map((proposal) => (
+            <li key={proposal.id}>
+              {
+                snapshot.world.agents.find(
+                  ({ id }) => id === proposal.proposerAgentId,
+                )?.name
+              }{' '}
+              →{' '}
+              {
+                snapshot.world.agents.find(
+                  ({ id }) => id === proposal.recipientAgentId,
+                )?.name
+              }
+              ; expires after turn {proposal.expirationTurn}
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="muted">No relevant pending proposals.</p>
+      )}
+      <h3>Recent alliance changes</h3>
+      <AllianceEventList snapshot={snapshot} agentId={agent.id} />
       <div className="agent-usage" aria-label="Selected agent usage">
         <strong>Experiment usage</strong>
         <span>{metrics?.totalTurns ?? 0} turns</span>
@@ -920,6 +1179,14 @@ function AgentInspector({
                   : latestTurn.communicationResult.accepted
                     ? `${latestTurn.communicationResult.event.channel} accepted`
                     : `${latestTurn.communicationResult.attempt.channel} rejected · ${latestTurn.communicationResult.reason}`}
+              </div>
+              <div className="component-result" aria-label="Diplomacy result">
+                <strong>Diplomacy:</strong>{' '}
+                {!latestTurn.diplomacyResult.requested
+                  ? 'none requested'
+                  : latestTurn.diplomacyResult.accepted
+                    ? `${latestTurn.diplomacyResult.intent.type} accepted`
+                    : `${latestTurn.diplomacyResult.attempt.type} rejected · ${latestTurn.diplomacyResult.reason}`}
               </div>
               <p className="provider-meta">
                 {latestTurn.provider.provider} · {latestTurn.provider.model} ·{' '}
@@ -1504,6 +1771,10 @@ function ExperimentExportPanel({
             <dd>{preview.matchingControlChangeCount} matched</dd>
           </div>
           <div>
+            <dt>Diplomacy/alliance events</dt>
+            <dd>{preview.matchingDiplomacyEventCount} matched</dd>
+          </div>
+          <div>
             <dt>Size</dt>
             <dd>{preview.serializedUtf8Bytes} bytes</dd>
           </div>
@@ -1599,7 +1870,7 @@ function EventLog({
         {turns.length === 0 ? (
           <li>
             <time>Initial</time>
-            <span>Development world loaded with six agents.</span>
+            <span>Development world loaded with eight agents.</span>
           </li>
         ) : (
           turns
@@ -1638,21 +1909,69 @@ function formatTurn(
     : turn.communicationResult.accepted
       ? ` + ${turn.communicationResult.event.channel} message accepted`
       : ` + ${turn.communicationResult.attempt.channel} message rejected (${turn.communicationResult.reason})`;
+  const diplomacy = !turn.diplomacyResult.requested
+    ? ''
+    : turn.diplomacyResult.accepted
+      ? ` + ${turn.diplomacyResult.intent.type} accepted`
+      : ` + ${turn.diplomacyResult.attempt.type} rejected (${turn.diplomacyResult.reason})`;
   if (!turn.worldActionResult.accepted)
-    return `Rejected ${formatAction(turn.worldAction)} · ${turn.worldActionResult.reason}${communication}`;
+    return `Rejected ${formatAction(turn.worldAction)} · ${turn.worldActionResult.reason}${communication}${diplomacy}`;
   const event = turn.worldActionResult.event;
   if (event.type === 'agent-moved')
-    return `Movement · ${event.toCell}${communication}`;
+    return `Movement · ${event.toCell}${communication}${diplomacy}`;
   if (event.type === 'hex-infected')
-    return `Infection · ${event.cell}${communication}`;
+    return `Infection · ${event.cell}${communication}${diplomacy}`;
   if (event.type === 'hex-captured') {
     const capturer = agents.find(({ id }) => id === event.controllerAgentId);
     const previous = agents.find(
       ({ id }) => id === event.previousControllerAgentId,
     );
-    return `${capturer?.name ?? event.controllerAgentId} captured ${event.cell} from ${previous?.name ?? event.previousControllerAgentId}.${communication}`;
+    return `${capturer?.name ?? event.controllerAgentId} captured ${event.cell} from ${previous?.name ?? event.previousControllerAgentId}.${communication}${diplomacy}`;
   }
-  return `Waited${communication}`;
+  return `Waited${communication}${diplomacy}`;
+}
+
+type AllianceWorldEvent = Extract<
+  SimulationSnapshot['world']['events'][number],
+  {
+    type:
+      | 'alliance-proposed'
+      | 'alliance-proposal-closed'
+      | 'alliance-formed'
+      | 'agent-joined-alliance'
+      | 'agent-left-alliance'
+      | 'alliance-dissolved';
+  }
+>;
+
+function allianceEventParticipants(event: AllianceWorldEvent): AgentId[] {
+  if (event.type === 'alliance-proposed')
+    return [event.agentId, event.recipientAgentId];
+  if (event.type === 'alliance-proposal-closed')
+    return [event.proposerAgentId, event.recipientAgentId];
+  if (event.type === 'alliance-formed') return event.memberAgentIds;
+  if (event.type === 'agent-joined-alliance') return event.memberAgentIds;
+  if (event.type === 'agent-left-alliance')
+    return [event.leftAgentId, ...event.remainingMemberAgentIds];
+  return event.formerMemberAgentIds;
+}
+
+function formatAllianceEvent(
+  event: AllianceWorldEvent,
+  snapshot: SimulationSnapshot,
+): string {
+  const name = (id: AgentId) =>
+    snapshot.world.agents.find((agent) => agent.id === id)?.name ?? id;
+  if (event.type === 'alliance-proposed')
+    return `${name(event.agentId)} proposed an alliance with ${name(event.recipientAgentId)}.`;
+  if (event.type === 'alliance-formed')
+    return `${event.memberAgentIds.map(name).join(' and ')} formed an alliance.`;
+  if (event.type === 'agent-joined-alliance')
+    return `${name(event.joinedAgentId)} joined the alliance.`;
+  if (event.type === 'agent-left-alliance')
+    return `${name(event.leftAgentId)} left the alliance.`;
+  if (event.type === 'alliance-dissolved') return 'The alliance dissolved.';
+  return `The proposal from ${name(event.proposerAgentId)} to ${name(event.recipientAgentId)} was ${event.reason}.`;
 }
 
 function formatTimestamp(timestamp: string): string {

@@ -7,12 +7,15 @@ import {
   type AgentId,
   type AgentObservation,
   type AgentTurnRecord,
+  type AllianceEvent,
   type ExperimentExportDocument,
   type ExperimentExportPreview,
   type ExperimentExportRequest,
   type ExperimentExportWorldState,
   type ExperimentId,
   type ExperimentMetrics,
+  type DiplomacyRejectionReason,
+  type DiplomacyResult,
   type ExportedCommunication,
   type ExportedControlChange,
   type PersonalityConfigurationEvent,
@@ -57,6 +60,12 @@ export class ExperimentMetricAccumulator {
     addToMutable(this.#records.get('aggregate')!, turn, true);
     const agent = this.#records.get(turn.agentId);
     if (agent) addToMutable(agent, turn);
+    for (const event of turn.allianceEvents)
+      for (const affectedId of allianceEventAgentIds(event)) {
+        if (affectedId === turn.agentId) continue;
+        const affected = this.#records.get(affectedId);
+        if (affected) addAllianceEventMetric(affected, event, affectedId);
+      }
     if (
       turn.outcome !== 'provider-error' &&
       turn.communicationResult.requested &&
@@ -90,6 +99,34 @@ export class ExperimentMetricAccumulator {
       })),
     });
   }
+}
+
+function addAllianceEventMetric(
+  metrics: MutableMetrics,
+  event: AllianceEvent,
+  agentId?: AgentId,
+): void {
+  if (agentId && !allianceEventAgentIds(event).includes(agentId)) return;
+  if (event.type === 'alliance-proposed') {
+    if (!agentId || event.agentId === agentId) {
+      metrics.proposalsCreated += 1;
+      metrics.proposalsSent += 1;
+    }
+    if (!agentId || event.recipientAgentId === agentId)
+      metrics.proposalsReceived += 1;
+  } else if (event.type === 'alliance-proposal-closed') {
+    if (event.reason === 'expired') metrics.proposalsExpired += 1;
+    else metrics.proposalsInvalidated += 1;
+  } else if (event.type === 'alliance-formed') {
+    metrics.alliancesFormed += 1;
+    metrics.alliancesJoined += agentId ? 1 : event.memberAgentIds.length;
+  } else if (event.type === 'agent-joined-alliance') {
+    if (!agentId || event.joinedAgentId === agentId)
+      metrics.alliancesJoined += 1;
+  } else if (event.type === 'agent-left-alliance') {
+    if (!agentId || event.leftAgentId === agentId) metrics.alliancesLeft += 1;
+  } else if (event.type === 'alliance-dissolved')
+    metrics.alliancesDissolved += 1;
 }
 
 const metricTokenFields = [
@@ -127,6 +164,33 @@ interface MutableMetrics {
   publicMessagesSent: number;
   directMessagesSent: number;
   directMessagesReceived: number;
+  diplomacyProposalsRequested: number;
+  diplomacyAcceptancesRequested: number;
+  diplomacyDeparturesRequested: number;
+  diplomacyProposalsAccepted: number;
+  diplomacyAcceptancesAccepted: number;
+  diplomacyDeparturesAccepted: number;
+  diplomacyRejected: number;
+  diplomacyRejections: Map<
+    string,
+    {
+      type:
+        'propose-alliance' | 'accept-alliance' | 'leave-alliance' | 'invalid';
+      reason: DiplomacyRejectionReason;
+      count: number;
+    }
+  >;
+  proposalsCreated: number;
+  proposalsSent: number;
+  proposalsReceived: number;
+  proposalsExpired: number;
+  proposalsInvalidated: number;
+  alliancesFormed: number;
+  alliancesJoined: number;
+  alliancesLeft: number;
+  alliancesDissolved: number;
+  alliedCaptureAttempts: number;
+  alliedCaptureRejections: number;
   latencyTotal: number;
   latencyCount: number;
   tokens: Record<(typeof metricTokenFields)[number], number>;
@@ -163,6 +227,25 @@ function mutableMetrics(): MutableMetrics {
     publicMessagesSent: 0,
     directMessagesSent: 0,
     directMessagesReceived: 0,
+    diplomacyProposalsRequested: 0,
+    diplomacyAcceptancesRequested: 0,
+    diplomacyDeparturesRequested: 0,
+    diplomacyProposalsAccepted: 0,
+    diplomacyAcceptancesAccepted: 0,
+    diplomacyDeparturesAccepted: 0,
+    diplomacyRejected: 0,
+    diplomacyRejections: new Map(),
+    proposalsCreated: 0,
+    proposalsSent: 0,
+    proposalsReceived: 0,
+    proposalsExpired: 0,
+    proposalsInvalidated: 0,
+    alliancesFormed: 0,
+    alliancesJoined: 0,
+    alliancesLeft: 0,
+    alliancesDissolved: 0,
+    alliedCaptureAttempts: 0,
+    alliedCaptureRejections: 0,
     latencyTotal: 0,
     latencyCount: 0,
     tokens: Object.fromEntries(
@@ -212,7 +295,44 @@ function addToMutable(
         metrics.publicMessagesRejected += 1;
       } else metrics.directMessagesRejected += 1;
     }
+    if (turn.diplomacyResult.requested) {
+      const type = turn.diplomacyResult.accepted
+        ? turn.diplomacyResult.intent.type
+        : turn.diplomacyResult.attempt.type;
+      if (type === 'propose-alliance') metrics.diplomacyProposalsRequested += 1;
+      if (type === 'accept-alliance')
+        metrics.diplomacyAcceptancesRequested += 1;
+      if (type === 'leave-alliance') metrics.diplomacyDeparturesRequested += 1;
+      if (!turn.diplomacyResult.accepted) {
+        metrics.diplomacyRejected += 1;
+        const key = `${type}:${turn.diplomacyResult.reason}`;
+        const existing = metrics.diplomacyRejections.get(key);
+        metrics.diplomacyRejections.set(key, {
+          type,
+          reason: turn.diplomacyResult.reason,
+          count: (existing?.count ?? 0) + 1,
+        });
+      } else if (type === 'propose-alliance')
+        metrics.diplomacyProposalsAccepted += 1;
+      else if (type === 'accept-alliance')
+        metrics.diplomacyAcceptancesAccepted += 1;
+      else metrics.diplomacyDeparturesAccepted += 1;
+    }
+    if (
+      turn.worldAction.type === 'capture' &&
+      !turn.worldActionResult.accepted &&
+      turn.worldActionResult.reason === 'allied-controller'
+    ) {
+      metrics.alliedCaptureAttempts += 1;
+      metrics.alliedCaptureRejections += 1;
+    }
   }
+  for (const event of turn.allianceEvents)
+    addAllianceEventMetric(
+      metrics,
+      event,
+      aggregate ? undefined : turn.agentId,
+    );
   if (
     turn.outcome === 'accepted' &&
     turn.worldActionResult.event.type === 'agent-moved'
@@ -290,6 +410,25 @@ function finalizeMutable(metrics: MutableMetrics) {
     publicMessagesSent: metrics.publicMessagesSent,
     directMessagesSent: metrics.directMessagesSent,
     directMessagesReceived: metrics.directMessagesReceived,
+    diplomacyProposalsRequested: metrics.diplomacyProposalsRequested,
+    diplomacyAcceptancesRequested: metrics.diplomacyAcceptancesRequested,
+    diplomacyDeparturesRequested: metrics.diplomacyDeparturesRequested,
+    diplomacyProposalsAccepted: metrics.diplomacyProposalsAccepted,
+    diplomacyAcceptancesAccepted: metrics.diplomacyAcceptancesAccepted,
+    diplomacyDeparturesAccepted: metrics.diplomacyDeparturesAccepted,
+    diplomacyRejected: metrics.diplomacyRejected,
+    diplomacyRejections: [...metrics.diplomacyRejections.values()],
+    proposalsCreated: metrics.proposalsCreated,
+    proposalsSent: metrics.proposalsSent,
+    proposalsReceived: metrics.proposalsReceived,
+    proposalsExpired: metrics.proposalsExpired,
+    proposalsInvalidated: metrics.proposalsInvalidated,
+    alliancesFormed: metrics.alliancesFormed,
+    alliancesJoined: metrics.alliancesJoined,
+    alliancesLeft: metrics.alliancesLeft,
+    alliancesDissolved: metrics.alliancesDissolved,
+    alliedCaptureAttempts: metrics.alliedCaptureAttempts,
+    alliedCaptureRejections: metrics.alliedCaptureRejections,
     uniqueVisitedCells: metrics.visited.size,
     ...(metrics.latencyCount > 0
       ? { averageLatencyMs: metrics.latencyTotal / metrics.latencyCount }
@@ -318,6 +457,7 @@ export function createExperimentExport(
   const filtered = filterTurns(source, request, selectedSet);
   const communications = filterCommunications(source, request, selectedSet);
   const controlChanges = filterControlChanges(source, request, selectedSet);
+  const allianceEvents = filterAllianceEvents(source, request, selectedSet);
   const firstRetainedTurn = source.turns[0]?.turnNumber;
   const lastRetainedTurn = source.turns.at(-1)?.turnNumber;
   const requestedRangeExtendsBeyondRetention = rangeExtendsBeyondRetention(
@@ -351,7 +491,7 @@ export function createExperimentExport(
           },
     );
   const document: ExperimentExportDocument = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     generatedAt,
     experiment: {
       id: source.id,
@@ -368,6 +508,7 @@ export function createExperimentExport(
       matchingTurnCount: filtered.length,
       matchingCommunicationCount: communications.length,
       matchingControlChangeCount: controlChanges.length,
+      matchingDiplomacyEventCount: allianceEvents.length,
       firstMatchingTurn: filtered[0]?.turnNumber,
       lastMatchingTurn: filtered.at(-1)?.turnNumber,
     },
@@ -386,8 +527,13 @@ export function createExperimentExport(
             selectedAgentIds,
             communications,
             controlChanges,
+            allianceEvents,
           ),
           currentTerritory: currentTerritory(
+            source.currentWorld,
+            source.currentAgents,
+          ),
+          currentAlliances: currentAlliances(
             source.currentWorld,
             source.currentAgents,
           ),
@@ -417,6 +563,7 @@ export function createExperimentExport(
     ...(include.controlChanges
       ? { controlChanges: structuredClone(controlChanges) }
       : {}),
+    allianceEvents: structuredClone(allianceEvents),
     turns: filtered.map((turn) => exportTurn(turn, request)),
   };
   return experimentExportDocumentSchema.parse(document);
@@ -427,6 +574,8 @@ function exportWorldState(world: WorldSnapshot): ExperimentExportWorldState {
     generatedAt: world.generatedAt,
     hexes: structuredClone(world.hexes),
     agents: structuredClone(world.agents),
+    alliances: structuredClone(world.alliances),
+    pendingAllianceProposals: structuredClone(world.pendingAllianceProposals),
   };
 }
 
@@ -439,12 +588,44 @@ function currentTerritory(world: WorldSnapshot, agents: readonly Agent[]) {
         (counts.get(hex.controllerAgentId) ?? 0) + 1,
       );
   }
-  return agents.map(({ id, name, color }) => ({
-    agentId: id,
-    name,
-    color,
-    controlledCellCount: counts.get(id) ?? 0,
-  }));
+  return agents.map(({ id, name, color }) => {
+    const alliance = world.alliances.find(({ memberAgentIds }) =>
+      memberAgentIds.includes(id),
+    );
+    return {
+      agentId: id,
+      name,
+      color,
+      allianceId: alliance?.id ?? null,
+      effectiveColor: alliance?.color ?? color,
+      controlledCellCount: counts.get(id) ?? 0,
+    };
+  });
+}
+
+function currentAlliances(world: WorldSnapshot, agents: readonly Agent[]) {
+  const territory = currentTerritory(world, agents);
+  return world.alliances.map((alliance) => {
+    const members = alliance.memberAgentIds.map((agentId) => {
+      const entry = territory.find(
+        (candidate) => candidate.agentId === agentId,
+      )!;
+      return {
+        agentId,
+        name: entry.name,
+        controlledCellCount: entry.controlledCellCount,
+      };
+    });
+    return {
+      allianceId: alliance.id,
+      color: alliance.color,
+      totalControlledCellCount: members.reduce(
+        (sum, member) => sum + member.controlledCellCount,
+        0,
+      ),
+      members,
+    };
+  });
 }
 
 export function createExperimentPreview(
@@ -472,12 +653,18 @@ export function createExperimentPreview(
       document.filters,
       new Set(document.selection.selectedAgentIds),
     ),
+    filterAllianceEvents(
+      source,
+      document.filters,
+      new Set(document.selection.selectedAgentIds),
+    ),
   );
   return experimentExportPreviewSchema.parse({
     experimentId: source.id,
     matchingTurnCount: document.selection.matchingTurnCount,
     matchingCommunicationCount: document.selection.matchingCommunicationCount,
     matchingControlChangeCount: document.selection.matchingControlChangeCount,
+    matchingDiplomacyEventCount: document.selection.matchingDiplomacyEventCount,
     selectedAgentCount: document.selection.selectedAgentIds.length,
     firstMatchingTurn: document.selection.firstMatchingTurn,
     lastMatchingTurn: document.selection.lastMatchingTurn,
@@ -630,6 +817,41 @@ function filterControlChanges(
   return controlChanges;
 }
 
+function filterAllianceEvents(
+  source: ExperimentSource,
+  request: ExperimentExportRequest,
+  selected: Set<AgentId>,
+): AllianceEvent[] {
+  let events = source.turns.flatMap(({ allianceEvents }) =>
+    allianceEvents.filter((event) =>
+      allianceEventAgentIds(event).some((id) => selected.has(id)),
+    ),
+  );
+  if (request.turns.mode === 'range') {
+    const range = request.turns;
+    events = events.filter(
+      ({ turnNumber }) =>
+        turnNumber >= range.fromTurn && turnNumber <= range.toTurn,
+    );
+  } else if (request.turns.mode === 'latest') {
+    const first = source.turns.at(-request.turns.count)?.turnNumber;
+    if (first) events = events.filter(({ turnNumber }) => turnNumber >= first);
+  }
+  return events.map((event) => structuredClone(event));
+}
+
+function allianceEventAgentIds(event: AllianceEvent): AgentId[] {
+  if (event.type === 'alliance-proposed')
+    return [event.agentId, event.recipientAgentId];
+  if (event.type === 'alliance-proposal-closed')
+    return [event.proposerAgentId, event.recipientAgentId];
+  if (event.type === 'alliance-formed') return event.memberAgentIds;
+  if (event.type === 'agent-joined-alliance') return event.memberAgentIds;
+  if (event.type === 'agent-left-alliance')
+    return [event.leftAgentId, ...event.remainingMemberAgentIds];
+  return event.formerMemberAgentIds;
+}
+
 function rangeExtendsBeyondRetention(
   request: ExperimentExportRequest,
   source: ExperimentSource,
@@ -732,6 +954,9 @@ function exportTurn(
           ...(turn.communication
             ? { communication: structuredClone(turn.communication) }
             : {}),
+          ...(turn.diplomacy
+            ? { diplomacy: structuredClone(turn.diplomacy) }
+            : {}),
           summary: turn.summary,
           worldActionSummary: turn.worldActionResult.accepted
             ? summarizeEvent(turn.worldActionResult.event)
@@ -749,6 +974,13 @@ function exportTurn(
                         : undefined,
                     )
                   : `Rejected: ${turn.communicationResult.reason}.`,
+              }
+            : {}),
+          ...(turn.diplomacyResult.requested
+            ? {
+                diplomacySummary: turn.diplomacyResult.accepted
+                  ? `Accepted: ${turn.diplomacyResult.intent.type}.`
+                  : `Rejected: ${turn.diplomacyResult.reason}.`,
               }
             : {}),
         }),
@@ -775,6 +1007,7 @@ function exportTurn(
   ) {
     base.worldActionResult = structuredClone(turn.worldActionResult);
     base.communicationResult = structuredClone(turn.communicationResult);
+    base.diplomacyResult = structuredClone(turn.diplomacyResult);
   }
   if (includeProvider && turn.provider)
     base.provider = full
@@ -812,6 +1045,7 @@ export function calculateExperimentMetrics(
   agentIds: readonly AgentId[],
   communications: readonly ExportedCommunication[] = [],
   controlChanges: readonly ExportedControlChange[] = [],
+  allianceEvents: readonly AllianceEvent[] = [],
 ): ExperimentMetrics {
   const metricFor = (
     records: readonly AgentTurnRecord[],
@@ -911,6 +1145,7 @@ export function calculateExperimentMetrics(
             agentIds.includes(previousControllerAgentId),
           ).length,
       ...communicationMetrics(relevantCommunications, agentIds, agentId),
+      ...diplomacyMetrics(records, allianceEvents, agentId),
       uniqueVisitedCells: visited.size,
       ...(latencies.length > 0
         ? {
@@ -938,6 +1173,138 @@ export function calculateExperimentMetrics(
       ),
     })),
   });
+}
+
+function diplomacyMetrics(
+  records: readonly AgentTurnRecord[],
+  events: readonly AllianceEvent[],
+  agentId?: AgentId,
+) {
+  const relevantEvents = agentId
+    ? events.filter((event) => allianceEventAgentIds(event).includes(agentId))
+    : events;
+  const completed = records.filter(
+    (
+      turn,
+    ): turn is Exclude<AgentTurnRecord, { outcome: 'provider-error' }> & {
+      diplomacyResult: Exclude<DiplomacyResult, { requested: false }>;
+    } => turn.outcome !== 'provider-error' && turn.diplomacyResult.requested,
+  );
+  const requested = (type: string) =>
+    completed.filter((turn) => {
+      const result = turn.diplomacyResult;
+      return (
+        result.requested &&
+        (result.accepted ? result.intent.type : result.attempt.type) === type
+      );
+    });
+  const accepted = (type: string) =>
+    requested(type).filter(
+      (turn) => turn.diplomacyResult.requested && turn.diplomacyResult.accepted,
+    ).length;
+  return {
+    diplomacyProposalsRequested: requested('propose-alliance').length,
+    diplomacyAcceptancesRequested: requested('accept-alliance').length,
+    diplomacyDeparturesRequested: requested('leave-alliance').length,
+    diplomacyProposalsAccepted: accepted('propose-alliance'),
+    diplomacyAcceptancesAccepted: accepted('accept-alliance'),
+    diplomacyDeparturesAccepted: accepted('leave-alliance'),
+    diplomacyRejected: completed.filter(
+      (turn) => !turn.diplomacyResult.accepted,
+    ).length,
+    diplomacyRejections: groupedDiplomacyRejections(completed),
+    proposalsCreated: relevantEvents.filter(
+      (event) =>
+        event.type === 'alliance-proposed' &&
+        (!agentId || event.agentId === agentId),
+    ).length,
+    proposalsSent: relevantEvents.filter(
+      (event) =>
+        event.type === 'alliance-proposed' &&
+        (!agentId || event.agentId === agentId),
+    ).length,
+    proposalsReceived: relevantEvents.filter(
+      (event) =>
+        event.type === 'alliance-proposed' &&
+        (!agentId || event.recipientAgentId === agentId),
+    ).length,
+    proposalsExpired: relevantEvents.filter(
+      (event) =>
+        event.type === 'alliance-proposal-closed' && event.reason === 'expired',
+    ).length,
+    proposalsInvalidated: relevantEvents.filter(
+      (event) =>
+        event.type === 'alliance-proposal-closed' &&
+        event.reason === 'invalidated',
+    ).length,
+    alliancesFormed: relevantEvents.filter(
+      (event) => event.type === 'alliance-formed',
+    ).length,
+    alliancesJoined: relevantEvents.reduce(
+      (count, event) =>
+        count +
+        (event.type === 'alliance-formed'
+          ? agentId
+            ? 1
+            : event.memberAgentIds.length
+          : event.type === 'agent-joined-alliance' &&
+              (!agentId || event.joinedAgentId === agentId)
+            ? 1
+            : 0),
+      0,
+    ),
+    alliancesLeft: relevantEvents.filter(
+      (event) =>
+        event.type === 'agent-left-alliance' &&
+        (!agentId || event.leftAgentId === agentId),
+    ).length,
+    alliancesDissolved: relevantEvents.filter(
+      (event) => event.type === 'alliance-dissolved',
+    ).length,
+    alliedCaptureAttempts: records.filter(
+      (turn) =>
+        turn.outcome !== 'provider-error' &&
+        turn.worldAction.type === 'capture' &&
+        !turn.worldActionResult.accepted &&
+        turn.worldActionResult.reason === 'allied-controller',
+    ).length,
+    alliedCaptureRejections: records.filter(
+      (turn) =>
+        turn.outcome !== 'provider-error' &&
+        turn.worldAction.type === 'capture' &&
+        !turn.worldActionResult.accepted &&
+        turn.worldActionResult.reason === 'allied-controller',
+    ).length,
+  };
+}
+
+function groupedDiplomacyRejections(records: readonly AgentTurnRecord[]) {
+  const grouped = new Map<
+    string,
+    {
+      type:
+        'propose-alliance' | 'accept-alliance' | 'leave-alliance' | 'invalid';
+      reason: DiplomacyRejectionReason;
+      count: number;
+    }
+  >();
+  for (const turn of records) {
+    if (
+      turn.outcome === 'provider-error' ||
+      !turn.diplomacyResult.requested ||
+      turn.diplomacyResult.accepted
+    )
+      continue;
+    const { type } = turn.diplomacyResult.attempt;
+    const { reason } = turn.diplomacyResult;
+    const key = `${type}:${reason}`;
+    grouped.set(key, {
+      type,
+      reason,
+      count: (grouped.get(key)?.count ?? 0) + 1,
+    });
+  }
+  return [...grouped.values()];
 }
 
 function communicationMetrics(

@@ -32,13 +32,13 @@ describe('game API simulation boundary', () => {
     const response = await app.request('/api/simulation');
     expect(response.status).toBe(200);
     const payload = simulationSnapshotSchema.parse(await response.json());
-    expect(payload.world.agents).toHaveLength(6);
+    expect(payload.world.agents).toHaveLength(8);
     expect(
       payload.world.hexes.every(
         (hex) => hex.state === 'open' && hex.controllerAgentId === null,
       ),
     ).toBe(true);
-    expect(payload.experiment.currentTerritory).toHaveLength(6);
+    expect(payload.experiment.currentTerritory).toHaveLength(8);
   });
 
   it('returns accepted and rejected single-turn records with valid response shapes', async () => {
@@ -403,7 +403,7 @@ describe('game API simulation boundary', () => {
       restored.snapshot.world.agents.find(({ name }) => name === 'Mingle')
         ?.personality,
     ).toBe(
-      'You are a social coalition-builder. Move toward visible agents, initiate and continue conversations, negotiate before taking their territory, and coordinate when useful. Infect open cells opportunistically, but value interaction over silent pursuit.',
+      'You are a social coalition-builder. Seek agents, initiate and continue conversations, propose alliances, answer offers, negotiate borders, and coordinate captures against dominant rivals. Prefer cooperation and public diplomacy over silent expansion, but protect your own territory and leave an alliance that repeatedly ignores or exploits you. Make concrete proposals rather than merely announcing actions.',
     );
   });
 

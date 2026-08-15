@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { cellToBoundary, cellToLatLng } from 'h3-js';
+import { DEVELOPMENT_WORLD_CONFIG } from '@agentborne/shared';
 import {
   AttributionControl,
   LngLatBounds,
@@ -19,6 +20,7 @@ import type {
   H3Cell,
   Hex,
   HexState,
+  Alliance,
 } from '@agentborne/shared';
 
 interface WorldMapProps {
@@ -26,6 +28,7 @@ interface WorldMapProps {
   longitude: number;
   hexes: Hex[];
   agents: AgentProfile[];
+  alliances: Alliance[];
   selectedCell: H3Cell;
   selectedAgentId: AgentId | null;
   onSelectCell: (cell: H3Cell) => void;
@@ -35,7 +38,7 @@ interface WorldMapProps {
 const sourceId = 'development-hexes';
 const fillLayerId = 'development-hex-fills';
 const lineLayerId = 'development-hex-lines';
-const expectedWorldCellCount = 61;
+const expectedWorldCellCount = DEVELOPMENT_WORLD_CONFIG.cellCount;
 
 setWorkerUrl('/maplibre-worker/maplibre-gl-worker.mjs');
 
@@ -58,11 +61,15 @@ const initialOverlayDiagnostics: OverlayDiagnostics = {
 function asGeoJson(
   hexes: WorldMapProps['hexes'],
   agents: AgentProfile[],
+  alliances: Alliance[],
   selectedCell: H3Cell,
 ) {
   const agentById = new globalThis.Map(
     agents.map((agent) => [agent.id, agent]),
   );
+  const effectiveColor = (agentId: AgentId) =>
+    alliances.find(({ memberAgentIds }) => memberAgentIds.includes(agentId))
+      ?.color ?? agentById.get(agentId)?.color;
   return {
     type: 'FeatureCollection' as const,
     features: hexes.map((hex) => ({
@@ -72,7 +79,7 @@ function asGeoJson(
         state: hex.state,
         controllerColor:
           hex.state === 'infected'
-            ? (agentById.get(hex.controllerAgentId)?.color ?? '#e44f45')
+            ? (effectiveColor(hex.controllerAgentId) ?? '#e44f45')
             : '#4a8178',
         controllerName:
           hex.state === 'infected'
@@ -100,6 +107,7 @@ export function WorldMap(props: WorldMapProps) {
     longitude,
     hexes,
     agents,
+    alliances,
     selectedCell,
     selectedAgentId,
     onSelectCell,
@@ -112,6 +120,7 @@ export function WorldMap(props: WorldMapProps) {
   const onSelectAgentRef = useRef(onSelectAgent);
   const initialHexes = useRef(hexes);
   const initialAgents = useRef(agents);
+  const initialAlliances = useRef(alliances);
   const initialSelectedCell = useRef(selectedCell);
   const currentHexesRef = useRef(hexes);
   const scheduleOverlayInspectionRef = useRef<(() => void) | null>(null);
@@ -257,6 +266,7 @@ export function WorldMap(props: WorldMapProps) {
           data: asGeoJson(
             initialHexes.current,
             initialAgents.current,
+            initialAlliances.current,
             initialSelectedCell.current,
           ),
         });
@@ -321,11 +331,11 @@ export function WorldMap(props: WorldMapProps) {
 
     map.on('sourcedata', inspectLoadedH3Source);
     map.on('render', inspectAfterRender);
-    map.on('load', initializeOverlay);
+    map.on('style.load', initializeOverlay);
 
     return () => {
       scheduleOverlayInspectionRef.current = null;
-      map.off('load', initializeOverlay);
+      map.off('style.load', initializeOverlay);
       map.off('sourcedata', inspectLoadedH3Source);
       map.off('render', inspectAfterRender);
       map.off('click', fillLayerId, selectRenderedCell);
@@ -342,9 +352,9 @@ export function WorldMap(props: WorldMapProps) {
     const source = mapRef.current?.getSource(sourceId) as
       GeoJSONSource | undefined;
     if (!source) return;
-    source.setData(asGeoJson(hexes, agents, selectedCell));
+    source.setData(asGeoJson(hexes, agents, alliances, selectedCell));
     scheduleOverlayInspectionRef.current?.();
-  }, [agents, hexes, selectedCell]);
+  }, [agents, alliances, hexes, selectedCell]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -372,7 +382,13 @@ export function WorldMap(props: WorldMapProps) {
       element.dataset.agentId = agent.id;
       element.setAttribute('aria-label', `Select agent ${agent.name}`);
       element.title = `${agent.name} · ${agent.currentCell}`;
-      element.style.setProperty('--agent-color', agent.color);
+      const effectiveColor =
+        alliances.find(({ memberAgentIds }) =>
+          memberAgentIds.includes(agent.id),
+        )?.color ?? agent.color;
+      element.style.setProperty('--agent-color', effectiveColor);
+      element.dataset.baseColor = agent.color;
+      element.dataset.effectiveColor = effectiveColor;
       element.textContent = agent.name.slice(0, 1);
       element.addEventListener('click', (event) => {
         event.stopPropagation();
@@ -387,7 +403,7 @@ export function WorldMap(props: WorldMapProps) {
         .addTo(map);
       markersRef.current.push(marker);
     }
-  }, [agents, mapReady, selectedAgentId]);
+  }, [agents, alliances, mapReady, selectedAgentId]);
 
   const overlayReady = overlayDiagnostics.status === 'ready';
   const overlayLabel = overlayReady
@@ -411,7 +427,11 @@ export function WorldMap(props: WorldMapProps) {
             const controller = agents.find(
               ({ id }) => id === hex.controllerAgentId,
             );
-            return [`${hex.cell}:${controller?.color ?? 'unknown'}`];
+            const effectiveColor =
+              alliances.find(({ memberAgentIds }) =>
+                memberAgentIds.includes(hex.controllerAgentId),
+              )?.color ?? controller?.color;
+            return [`${hex.cell}:${effectiveColor ?? 'unknown'}`];
           })
           .join(',')}
         data-testid="world-map"

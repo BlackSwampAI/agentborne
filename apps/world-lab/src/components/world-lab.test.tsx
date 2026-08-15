@@ -114,12 +114,15 @@ vi.mock('maplibre-gl', () => {
         features: Array<{ properties: { cell: string } }>;
       }) => void,
     ) {
-      if (event === 'load' && typeof layerOrCallback === 'function') {
+      if (event === 'style.load' && typeof layerOrCallback === 'function') {
         queueMicrotask(() => layerOrCallback());
       }
       if (event === 'click' && typeof callback === 'function') {
         mapLibreMock.mapClick = callback;
-      } else if (event !== 'load' && typeof layerOrCallback === 'function') {
+      } else if (
+        event !== 'style.load' &&
+        typeof layerOrCallback === 'function'
+      ) {
         const listeners =
           this.listeners.get(event) ?? new Set<(event?: unknown) => void>();
         listeners.add(layerOrCallback as (event?: unknown) => void);
@@ -174,6 +177,8 @@ const emptyTerritory = world.agents.map(({ id, name, color }) => ({
   agentId: id,
   name,
   color,
+  allianceId: null,
+  effectiveColor: color,
   controlledCellCount: 0,
 }));
 const initial = simulationSnapshotSchema.parse({
@@ -200,6 +205,7 @@ const initial = simulationSnapshotSchema.parse({
       })),
     },
     currentTerritory: emptyTerritory,
+    currentAlliances: [],
   },
 });
 
@@ -265,19 +271,33 @@ function afterInfection(): SimulationSnapshot {
         cell: agent.currentCell,
         state: 'open' as const,
         controllerAgentId: null,
+        controllerAllianceId: null,
+        effectiveColor: null,
       },
       captureEligibility: {
         eligible: false as const,
         blockedReason: 'capture-open-cell' as const,
       },
       adjacentCells: [
-        { cell: adjacent, state: 'open' as const, controllerAgentId: null },
+        {
+          cell: adjacent,
+          state: 'open' as const,
+          controllerAgentId: null,
+          controllerAllianceId: null,
+          effectiveColor: null,
+        },
       ],
       nearbyAgents: [],
       recentEvents: [],
       recentPublicMessages: [],
       recentDirectMessages: [],
       territoryScoreboard: emptyTerritory,
+      actingAllianceId: null,
+      actingAlliance: null,
+      activeAlliances: [],
+      inboundAllianceProposals: [],
+      outboundAllianceProposals: [],
+      recentAllianceEvents: [],
       recentControlChanges: [],
     },
     outcome: 'accepted' as const,
@@ -285,6 +305,7 @@ function afterInfection(): SimulationSnapshot {
     summary: 'Infecting this open cell.',
     worldActionResult: { accepted: true as const, event },
     communicationResult: { requested: false as const },
+    diplomacyResult: { requested: false as const },
     provider: {
       provider: 'scripted-test' as const,
       model: 'test',
@@ -389,6 +410,8 @@ function afterMessage(): SimulationSnapshot {
         cell: sender.currentCell,
         state: 'open' as const,
         controllerAgentId: null,
+        controllerAllianceId: null,
+        effectiveColor: null,
       },
       captureEligibility: {
         eligible: false as const,
@@ -399,6 +422,8 @@ function afterMessage(): SimulationSnapshot {
           cell: world.hexes[1]!.cell,
           state: 'open' as const,
           controllerAgentId: null,
+          controllerAllianceId: null,
+          effectiveColor: null,
         },
       ],
       nearbyAgents: [
@@ -407,12 +432,19 @@ function afterMessage(): SimulationSnapshot {
           name: recipient.name,
           currentCell: recipient.currentCell,
           distance: 2,
+          allianceId: null,
         },
       ],
       recentEvents: [],
       recentPublicMessages: [],
       recentDirectMessages: [],
       territoryScoreboard: emptyTerritory,
+      actingAllianceId: null,
+      actingAlliance: null,
+      activeAlliances: [],
+      inboundAllianceProposals: [],
+      outboundAllianceProposals: [],
+      recentAllianceEvents: [],
       recentControlChanges: [],
     },
     outcome: 'accepted' as const,
@@ -429,6 +461,7 @@ function afterMessage(): SimulationSnapshot {
       accepted: true as const,
       event,
     },
+    diplomacyResult: { requested: false as const },
     provider: {
       provider: 'scripted-test' as const,
       model: 'test',
@@ -551,11 +584,15 @@ function afterCapture(): SimulationSnapshot {
         cell,
         state: 'infected' as const,
         controllerAgentId: previous.id,
+        controllerAllianceId: null,
+        effectiveColor: previous.color,
       },
       captureEligibility: { eligible: true as const },
       adjacentCells: [
         {
           ...world.hexes[1]!,
+          controllerAllianceId: null,
+          effectiveColor: null,
         },
       ],
       nearbyAgents: [
@@ -564,6 +601,7 @@ function afterCapture(): SimulationSnapshot {
           name: previous.name,
           currentCell: controllerDepartureCell,
           distance: 1,
+          allianceId: null,
         },
       ],
       recentEvents: [],
@@ -573,6 +611,12 @@ function afterCapture(): SimulationSnapshot {
         ...entry,
         controlledCellCount: index === 0 ? 1 : 0,
       })),
+      actingAllianceId: null,
+      actingAlliance: null,
+      activeAlliances: [],
+      inboundAllianceProposals: [],
+      outboundAllianceProposals: [],
+      recentAllianceEvents: [],
       recentControlChanges: [],
     },
     outcome: 'accepted' as const,
@@ -580,6 +624,7 @@ function afterCapture(): SimulationSnapshot {
     summary: 'Capturing this contested hex.',
     worldActionResult: { accepted: true as const, event: captureEvent },
     communicationResult: { requested: false as const },
+    diplomacyResult: { requested: false as const },
     provider: {
       provider: 'scripted-test' as const,
       model: 'test',
@@ -702,16 +747,16 @@ afterEach(() => {
 });
 
 describe('WorldLab', () => {
-  it('renders all controls, status, H3 readiness, and six visible markers', async () => {
+  it('renders all controls, status, H3 readiness, and eight visible markers', async () => {
     render(<WorldLab />);
     expect(
       await screen.findByText(
-        /H3 overlay ready · 61\/61 rendered cells · 6 agents/,
+        /H3 overlay ready · 127\/127 rendered cells · 8 agents/,
       ),
     ).toBeInTheDocument();
     expect(screen.getByTestId('world-map')).toHaveAttribute(
       'data-rendered-h3-cell-count',
-      '61',
+      '127',
     );
     expect(mapLibreMock.queryRenderedFeatures).toHaveBeenCalledWith({
       layers: ['development-hex-fills'],
@@ -728,19 +773,173 @@ describe('WorldLab', () => {
     expect(screen.getByLabelText('Playback speed')).toBeInTheDocument();
     expect(
       await screen.findAllByRole('button', { name: /Select agent/ }),
-    ).toHaveLength(6);
+    ).toHaveLength(8);
     expect(screen.getByText('Automated-test provider')).toBeInTheDocument();
+  });
+
+  it('runs exactly 194 additional turns from turn 6 and never schedules turn 201', async () => {
+    vi.useFakeTimers();
+    const turnTemplate = afterInfection().turns[0]!;
+    const at6 = simulationSnapshotSchema.parse({
+      ...initial,
+      turnNumber: 6,
+      nextAgentId: world.agents[6]!.id,
+      experiment: {
+        ...initial.experiment,
+        totalCompletedTurns: 6,
+        droppedRecords: 6,
+        complete: false,
+      },
+    });
+    let turnRequests = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        if (turnRequests === 0) {
+          turnRequests += 1;
+          return jsonResponse(at6);
+        }
+        const turnNumber = 6 + turnRequests;
+        turnRequests += 1;
+        if (turnNumber > 200)
+          return Promise.reject(new Error('turn 201 must not be requested'));
+        const turn = { ...turnTemplate, turnNumber };
+        const next = simulationSnapshotSchema.parse({
+          ...at6,
+          turnNumber,
+          nextAgentId: world.agents[turnNumber % world.agents.length]!.id,
+          turns: [turn],
+          experiment: {
+            ...at6.experiment,
+            totalCompletedTurns: turnNumber,
+            retainedTurns: 1,
+            firstRetainedTurn: turnNumber,
+            lastRetainedTurn: turnNumber,
+            droppedRecords: turnNumber - 1,
+          },
+        });
+        return jsonResponse({ snapshot: next, turn });
+      }),
+    );
+
+    try {
+      render(<WorldLab />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(
+        screen.getByText(/Experiment progress: 6\/200/),
+      ).toBeInTheDocument();
+
+      await act(async () => {
+        screen.getByRole('button', { name: 'Run to turn 200' }).click();
+      });
+      for (let expectedTurn = 7; expectedTurn <= 200; expectedTurn += 1) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1_000);
+        });
+      }
+
+      expect(
+        screen.getByText(/Experiment progress: 200\/200/),
+      ).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
+      expect(turnRequests - 1).toBe(194);
+      expect(fetch).toHaveBeenCalledTimes(195);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(turnRequests - 1).toBe(194);
+      expect(fetch).toHaveBeenCalledTimes(195);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it('derives allied marker and existing-territory colors while retaining individual ownership labels', async () => {
+    const progressed = afterInfection();
+    const [ember, rook] = progressed.world.agents;
+    const allianceId = 'a1111111-1111-4111-8111-111111111111';
+    const allianceColor = '#0072B2' as const;
+    const formedEvent = {
+      id: 'd4444444-4444-4444-8444-444444444444',
+      agentId: rook!.id,
+      occurredAt: '2026-08-13T12:00:02.000Z',
+      turnNumber: 2,
+      type: 'alliance-formed' as const,
+      allianceId,
+      allianceColor,
+      memberAgentIds: [ember!.id, rook!.id],
+    };
+    const allied = simulationSnapshotSchema.parse({
+      ...progressed,
+      world: {
+        ...progressed.world,
+        alliances: [
+          {
+            id: allianceId,
+            color: allianceColor,
+            memberAgentIds: [ember!.id, rook!.id],
+          },
+        ],
+        events: [...progressed.world.events, formedEvent],
+      },
+      experiment: {
+        ...progressed.experiment,
+        currentTerritory: progressed.experiment.currentTerritory.map((entry) =>
+          entry.agentId === ember!.id || entry.agentId === rook!.id
+            ? { ...entry, allianceId, effectiveColor: allianceColor }
+            : entry,
+        ),
+        currentAlliances: [
+          {
+            allianceId,
+            color: allianceColor,
+            totalControlledCellCount: 1,
+            members: [
+              { agentId: ember!.id, name: ember!.name, controlledCellCount: 1 },
+              { agentId: rook!.id, name: rook!.name, controlledCellCount: 0 },
+            ],
+          },
+        ],
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(allied)),
+    );
+    render(<WorldLab />);
+    const markers = await screen.findAllByRole('button', {
+      name: /Select agent (Ember|Rook)/,
+    });
+    expect(markers).toHaveLength(2);
+    expect(
+      markers.every(
+        (marker) => marker.dataset.effectiveColor === allianceColor,
+      ),
+    ).toBe(true);
+    expect(
+      screen.getByTestId('world-map').getAttribute('data-controller-colors'),
+    ).toContain(allianceColor);
+    expect(
+      screen.getByLabelText('Alliance and territory panel'),
+    ).toHaveTextContent('Ember (1), Rook (0)');
+    expect(
+      screen.getAllByText('Ember and Rook formed an alliance.'),
+    ).toHaveLength(2);
   });
 
   it('deduplicates rendered H3 features before reporting readiness', async () => {
     mapLibreMock.duplicateFeatures = true;
     render(<WorldLab />);
     expect(
-      await screen.findByText(/H3 overlay ready · 61\/61 rendered cells/),
+      await screen.findByText(/H3 overlay ready · 127\/127 rendered cells/),
     ).toBeInTheDocument();
     expect(screen.getByTestId('world-map')).toHaveAttribute(
       'data-rendered-h3-cell-count',
-      '61',
+      '127',
     );
   });
 
@@ -759,7 +958,7 @@ describe('WorldLab', () => {
     });
 
     expect(
-      await screen.findByText(/H3 overlay ready · 61\/61 rendered cells/),
+      await screen.findByText(/H3 overlay ready · 127\/127 rendered cells/),
     ).toBeInTheDocument();
   });
 
@@ -768,7 +967,7 @@ describe('WorldLab', () => {
       scenario: 'incomplete rendering',
       configure: () => (mapLibreMock.renderMode = 'incomplete'),
       expectedStatus: 'incomplete',
-      expectedCount: '60',
+      expectedCount: '126',
     },
     {
       scenario: 'rejected layers',
@@ -955,15 +1154,15 @@ describe('WorldLab', () => {
     const scoreboard = screen.getByLabelText('Territory scoreboard');
     expect(scoreboard).toHaveTextContent('Ember0');
     expect(scoreboard).toHaveTextContent('Rook1');
-    expect(screen.getByText('Rook', { selector: 'dd' })).toBeInTheDocument();
     expect(screen.getByText(/Rook captured .* from Ember/)).toBeInTheDocument();
     expect(screen.getByLabelText('Recent territory changes')).toHaveTextContent(
       'Lost',
     );
-    expect(screen.getByText('0 controlled cells')).toBeInTheDocument();
+    expect(screen.getAllByText('0 controlled cells').length).toBeGreaterThan(0);
     await user.click(
       await screen.findByRole('button', { name: 'Select agent Rook' }),
     );
+    expect(screen.getByText('Rook', { selector: 'dd' })).toBeInTheDocument();
     expect(screen.getByLabelText('Recent territory changes')).toHaveTextContent(
       'Gained',
     );
@@ -1024,7 +1223,7 @@ describe('WorldLab', () => {
     );
     await waitFor(() =>
       expect(
-        screen.getByText('Development world loaded with six agents.'),
+        screen.getByText('Development world loaded with eight agents.'),
       ).toBeInTheDocument(),
     );
     expect(screen.getByText('Turn 0')).toBeInTheDocument();
@@ -1340,6 +1539,7 @@ describe('WorldLab', () => {
         matchingTurnCount: 0,
         matchingCommunicationCount: 0,
         matchingControlChangeCount: 0,
+        matchingDiplomacyEventCount: 0,
         selectedAgentCount: 2,
         retention: {
           limit: 5000,
@@ -1498,7 +1698,7 @@ describe('WorldLab', () => {
         currentTerritory: initial.experiment.currentTerritory.map(
           (entry, index) => ({
             ...entry,
-            controlledCellCount: index === 0 ? 61 : 0,
+            controlledCellCount: index === 0 ? 127 : 0,
           }),
         ),
       },
@@ -1521,7 +1721,7 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
   const turn = snapshot.turns[0]!;
   const agent = snapshot.world.agents[0]!;
   return {
-    schemaVersion: 4 as const,
+    schemaVersion: 5 as const,
     generatedAt: '2026-08-13T12:00:02.000Z',
     experiment: {
       id: snapshot.experiment.id,
@@ -1551,6 +1751,7 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
       matchingTurnCount: 1,
       matchingCommunicationCount: 0,
       matchingControlChangeCount: 0,
+      matchingDiplomacyEventCount: 0,
       firstMatchingTurn: 1,
       lastMatchingTurn: 1,
     },
@@ -1560,8 +1761,10 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
       byAgent: [snapshot.experiment.metrics.byAgent[0]!],
     },
     currentTerritory: snapshot.experiment.currentTerritory,
+    currentAlliances: snapshot.experiment.currentAlliances,
     communications: [],
     controlChanges: [],
+    allianceEvents: [],
     turns: [
       {
         turnNumber: turn.turnNumber,
