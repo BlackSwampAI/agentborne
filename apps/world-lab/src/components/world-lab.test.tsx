@@ -737,6 +737,10 @@ const compatibleCatalog = modelCatalogResponseSchema.parse({
       supportedParameters: ['max_tokens'],
       createdAt: '2026-08-01T00:00:00.000Z',
       isFree: false,
+      reasoning: {
+        mandatory: false,
+        supportedEfforts: ['xhigh', 'low', 'medium'],
+      },
     },
     {
       id: 'sample/beta',
@@ -767,17 +771,24 @@ const compatibleCatalog = modelCatalogResponseSchema.parse({
 function openRouterSnapshot(
   globalModelId: string | null = 'example/alpha',
   overrides: SimulationSnapshot['modelConfiguration']['overrides'] = [],
+  globalReasoningProfile: SimulationSnapshot['modelConfiguration']['globalReasoningProfile'] = 'provider-default',
 ): SimulationSnapshot {
   return simulationSnapshotSchema.parse({
     ...initial,
     providerMode: 'openrouter',
-    modelConfiguration: { globalModelId, overrides, locked: false },
+    modelConfiguration: {
+      globalModelId,
+      globalReasoningProfile,
+      overrides,
+      locked: false,
+    },
     resolvedModels: world.agents.map(({ id }) => {
       const override = overrides.find(({ agentId }) => agentId === id);
       const modelId = override?.modelId ?? globalModelId;
       return {
         agentId: id,
         modelId,
+        reasoningProfile: override?.reasoningProfile ?? globalReasoningProfile,
         source: override ? 'override' : modelId ? 'global' : 'missing',
         available: Boolean(modelId),
         ...(modelId ? {} : { issue: 'missing' }),
@@ -1363,7 +1374,11 @@ describe('WorldLab', () => {
   it('renders catalog facts and preserves overrides until Apply to all is explicit', async () => {
     const emberId = world.agents[0]!.id;
     let current = openRouterSnapshot('example/alpha', [
-      { agentId: emberId, modelId: 'sample/beta' },
+      {
+        agentId: emberId,
+        modelId: 'sample/beta',
+        reasoningProfile: 'provider-default',
+      },
     ]);
     vi.stubGlobal(
       'fetch',
@@ -1372,9 +1387,14 @@ describe('WorldLab', () => {
         if (url.endsWith('/experiment/models')) {
           const body = JSON.parse(String(init?.body)) as {
             globalModelId: string | null;
+            globalReasoningProfile: SimulationSnapshot['modelConfiguration']['globalReasoningProfile'];
             overrides: SimulationSnapshot['modelConfiguration']['overrides'];
           };
-          current = openRouterSnapshot(body.globalModelId, body.overrides);
+          current = openRouterSnapshot(
+            body.globalModelId,
+            body.overrides,
+            body.globalReasoningProfile,
+          );
           return jsonResponse({ snapshot: current });
         }
         if (url.endsWith('/models')) return jsonResponse(compatibleCatalog);
@@ -1385,7 +1405,7 @@ describe('WorldLab', () => {
     render(<WorldLab />);
     const summary = await screen.findByText('Model: Alpha');
     await user.click(summary);
-    const modelConsole = within(summary.closest('details')!);
+    const modelConsole = within(summary.closest('.model-console')!);
     expect(screen.getByText(/12 filtered out/)).toBeInTheDocument();
     expect(screen.getByText('$1/M')).toBeInTheDocument();
     expect(screen.getByText('$2/M')).toBeInTheDocument();
@@ -1393,6 +1413,15 @@ describe('WorldLab', () => {
     expect(
       screen.getByText(/Catalog compatible: text and context requirements met/),
     ).toBeInTheDocument();
+    expect(
+      within(modelConsole.getByLabelText('Global reasoning'))
+        .getAllByRole('option')
+        .map(({ textContent }) => textContent),
+    ).toEqual(['Provider default', 'Off', 'Low', 'Medium', 'XHigh']);
+    await user.selectOptions(
+      modelConsole.getByLabelText('Global reasoning'),
+      'xhigh',
+    );
 
     await user.selectOptions(
       modelConsole.getByLabelText('Global model'),
@@ -1403,8 +1432,15 @@ describe('WorldLab', () => {
     const firstUpdate = vi
       .mocked(fetch)
       .mock.calls.find(([url]) => String(url).endsWith('/experiment/models'));
+    expect(
+      JSON.parse(String(firstUpdate?.[1]?.body)).globalReasoningProfile,
+    ).toBe('xhigh');
     expect(JSON.parse(String(firstUpdate?.[1]?.body)).overrides).toEqual([
-      { agentId: emberId, modelId: 'sample/beta' },
+      {
+        agentId: emberId,
+        modelId: 'sample/beta',
+        reasoningProfile: 'provider-default',
+      },
     ]);
 
     await user.click(
@@ -1417,17 +1453,64 @@ describe('WorldLab', () => {
       .mocked(fetch)
       .mock.calls.filter(([url]) => String(url).endsWith('/experiment/models'));
     expect(JSON.parse(String(updates.at(-1)?.[1]?.body)).overrides).toEqual([]);
+
+    await user.selectOptions(
+      modelConsole.getByLabelText('Ember'),
+      'example/alpha',
+    );
+    expect(
+      within(modelConsole.getByLabelText('Ember reasoning'))
+        .getAllByRole('option')
+        .map(({ textContent }) => textContent),
+    ).toEqual(['Provider default', 'Off', 'Low', 'Medium', 'XHigh']);
+    await user.selectOptions(
+      modelConsole.getByLabelText('Ember reasoning'),
+      'low',
+    );
+    const finalUpdate = vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).endsWith('/experiment/models'))
+      .at(-1);
+    expect(JSON.parse(String(finalUpdate?.[1]?.body)).overrides).toEqual([
+      {
+        agentId: emberId,
+        modelId: 'example/alpha',
+        reasoningProfile: 'low',
+      },
+    ]);
+    await user.click(
+      screen.getByRole('button', { name: 'Close model selection' }),
+    );
+    expect(
+      screen.queryByRole('dialog', { name: 'Model selection' }),
+    ).toBeNull();
+    expect(screen.getByText('Model: Beta Free')).toHaveFocus();
+    await user.click(screen.getByText('Model: Beta Free'));
+    fireEvent.mouseDown(
+      screen.getByRole('dialog', { name: 'Model selection' }),
+    );
+    expect(
+      screen.getByRole('dialog', { name: 'Model selection' }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(
+      screen.queryByRole('dialog', { name: 'Model selection' }),
+    ).toBeNull();
   });
 
   it('recovers from a failed compatibility probe without changing the world', async () => {
     const current = openRouterSnapshot('example/alpha');
     let probeCalls = 0;
+    const probeProfiles: string[] = [];
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: RequestInfo | URL) => {
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.endsWith('/models/verify')) {
           probeCalls += 1;
+          probeProfiles.push(
+            JSON.parse(String(init?.body)).reasoningProfile as string,
+          );
           return jsonResponse({
             verification: {
               modelId: 'example/alpha',
@@ -1471,6 +1554,7 @@ describe('WorldLab', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/may incur a small charge/)).toBeInTheDocument();
     expect(screen.getByText('Turn 0')).toBeInTheDocument();
+    expect(probeProfiles).toEqual(['provider-default', 'provider-default']);
   });
 
   it('shows stale catalog and unavailable saved-model states without substitution', async () => {
@@ -1512,6 +1596,12 @@ describe('WorldLab', () => {
     try {
       const current = openRouterSnapshot('example/alpha');
       const template = afterInfection().turns[0]!;
+      const failure = {
+        code: 'timeout' as const,
+        message: 'The model request timed out.',
+        retryable: true,
+        model: 'example/alpha',
+      };
       const failedTurn = agentTurnRecordSchema.parse({
         turnNumber: 1,
         agentId: template.agentId,
@@ -1520,24 +1610,26 @@ describe('WorldLab', () => {
         observation: template.observation,
         allianceEvents: [],
         outcome: 'provider-error',
-        failure: {
-          code: 'timeout',
-          message: 'The model request timed out.',
-          retryable: true,
-          model: 'example/alpha',
-        },
+        failure,
       });
       const failed = simulationSnapshotSchema.parse({
         ...current,
         status: 'provider-error',
-        turnNumber: 1,
-        turns: [failedTurn],
-        experiment: {
-          ...current.experiment,
-          totalCompletedTurns: 1,
-          retainedTurns: 1,
-          firstRetainedTurn: 1,
-          lastRetainedTurn: 1,
+        pendingFailedTurn: {
+          turnNumber: 1,
+          agentId: failedTurn.agentId,
+          failure,
+          attempts: [
+            {
+              attemptNumber: 1,
+              kind: 'initial',
+              startedAt: failedTurn.startedAt,
+              completedAt: failedTurn.completedAt,
+              modelId: 'example/alpha',
+              reasoningProfile: 'provider-default',
+              failure,
+            },
+          ],
         },
       });
       let turnRequests = 0;
@@ -1564,6 +1656,11 @@ describe('WorldLab', () => {
       expect(screen.getByText(/Turn stopped/)).toHaveTextContent(
         'example/alpha',
       );
+      expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Skip turn' })).toBeEnabled();
+      expect(
+        document.querySelector('.cancel-request-slot button'),
+      ).toBeDisabled();
       fireEvent.click(screen.getByText('Model: Alpha'));
       expect(screen.getByLabelText('Global model')).toBeEnabled();
       await act(async () => void (await vi.advanceTimersByTimeAsync(10_000)));
@@ -1944,10 +2041,39 @@ describe('WorldLab', () => {
       ).toBeChecked();
   });
 
+  it('keeps export out of the details panel and dismisses its modal without losing settings', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    const exportButton = await screen.findByRole('button', { name: 'Export' });
+    expect(
+      screen.queryByRole('dialog', { name: 'Experiment export' }),
+    ).toBeNull();
+    await user.click(exportButton);
+    const dialog = screen.getByRole('dialog', { name: 'Experiment export' });
+    await user.selectOptions(screen.getByLabelText('Export level'), 'standard');
+    await user.click(screen.getByRole('button', { name: 'Close export' }));
+    expect(
+      screen.queryByRole('dialog', { name: 'Experiment export' }),
+    ).toBeNull();
+    expect(exportButton).toHaveFocus();
+    await user.click(exportButton);
+    expect(screen.getByLabelText('Export level')).toHaveValue('standard');
+    fireEvent.mouseDown(
+      screen.getByRole('dialog', { name: 'Experiment export' }),
+    );
+    expect(
+      screen.getByRole('dialog', { name: 'Experiment export' }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(
+      screen.queryByRole('dialog', { name: 'Experiment export' }),
+    ).toBeNull();
+  });
+
   it('offers every tier, turn selector, outcome/action filters, and dependent Custom switches', async () => {
     const user = userEvent.setup();
     render(<WorldLab />);
-    await user.click(await screen.findByText('Experiment Export'));
+    await user.click(await screen.findByRole('button', { name: 'Export' }));
     const level = screen.getByLabelText('Export level');
     expect(level).toHaveTextContent('Minimal');
     expect(level).toHaveTextContent('Standard');
@@ -2004,6 +2130,9 @@ describe('WorldLab', () => {
     await user.click(screen.getByRole('checkbox', { name: 'accepted' }));
     await user.click(screen.getByRole('checkbox', { name: 'rejected' }));
     await user.click(screen.getByRole('checkbox', { name: 'provider error' }));
+    await user.click(
+      screen.getByRole('checkbox', { name: 'operator skipped' }),
+    );
     expect(
       screen.getByRole('button', { name: 'Preview export' }),
     ).toBeDisabled();
@@ -2087,7 +2216,7 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
   const turn = snapshot.turns[0]!;
   const agent = snapshot.world.agents[0]!;
   return {
-    schemaVersion: 6 as const,
+    schemaVersion: 7 as const,
     generatedAt: '2026-08-13T12:00:02.000Z',
     experiment: {
       id: snapshot.experiment.id,

@@ -154,11 +154,14 @@ describe('game API simulation boundary', () => {
 
   it('caches an explicit model probe without advancing the world', async () => {
     let calls = 0;
+    const profiles: string[] = [];
     const provider: AgentProvider = {
       mode: 'openrouter',
       configured: true,
-      async decide(_observation, model) {
+      async decide(_observation, model, options) {
         calls += 1;
+        expect(options?.reasoningProfile).toBeDefined();
+        profiles.push(options?.reasoningProfile ?? 'provider-default');
         return {
           decision: { worldAction: { type: 'wait' }, summary: 'Probe.' },
           metadata: { provider: 'openrouter', model, latencyMs: 1 },
@@ -176,6 +179,10 @@ describe('game API simulation boundary', () => {
           outputPricePerToken: '0',
           supportedParameters: ['max_tokens'],
           isFree: true,
+          reasoning: {
+            mandatory: false,
+            supportedEfforts: ['low', 'medium', 'xhigh'],
+          },
         },
       ],
       filteredOutCount: 0,
@@ -204,17 +211,36 @@ describe('game API simulation boundary', () => {
       const response = await app.request('/api/simulation/models/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelId: 'example/probe-model' }),
+        body: JSON.stringify({
+          modelId: 'example/probe-model',
+          reasoningProfile: 'low',
+        }),
       });
       expect(
         verifyModelResponseSchema.parse(await response.json()).verification
           .status,
       ).toBe('verified');
     }
+    const differentProfile = await app.request(
+      '/api/simulation/models/verify',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          modelId: 'example/probe-model',
+          reasoningProfile: 'medium',
+        }),
+      },
+    );
+    expect(
+      verifyModelResponseSchema.parse(await differentProfile.json())
+        .verification.reasoningProfile,
+    ).toBe('medium');
     const after = simulationSnapshotSchema.parse(
       await (await app.request('/api/simulation')).json(),
     );
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
+    expect(profiles).toEqual(['low', 'medium']);
     expect(after.world).toEqual(before.world);
     expect(after.turnNumber).toBe(0);
   });
@@ -377,7 +403,55 @@ describe('game API simulation boundary', () => {
     });
   });
 
-  it('returns internal errors for post-provider validation failures without advancing', async () => {
+  it('exposes explicit retry and skip operations for one pending logical turn', async () => {
+    let calls = 0;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'manual-control-test',
+      configured: true,
+      async decide() {
+        calls += 1;
+        throw new AgentProviderError({
+          code: 'timeout',
+          message: 'Timed out.',
+          retryable: true,
+        });
+      },
+    };
+    const app = createApp({ provider });
+    const failed = singleTurnResponseSchema.parse(
+      await (
+        await app.request('/api/simulation/turn', { method: 'POST' })
+      ).json(),
+    );
+    expect(failed.snapshot).toMatchObject({
+      turnNumber: 0,
+      pendingFailedTurn: { turnNumber: 1 },
+    });
+    const retried = singleTurnResponseSchema.parse(
+      await (
+        await app.request('/api/simulation/turn/retry', { method: 'POST' })
+      ).json(),
+    );
+    expect(calls).toBe(2);
+    expect(retried.snapshot.pendingFailedTurn?.attempts).toHaveLength(2);
+    const skipped = singleTurnResponseSchema.parse(
+      await (
+        await app.request('/api/simulation/turn/skip', { method: 'POST' })
+      ).json(),
+    );
+    expect(skipped.turn).toMatchObject({
+      turnNumber: 1,
+      outcome: 'operator-skipped',
+    });
+    expect(skipped.snapshot).toMatchObject({
+      turnNumber: 1,
+      status: 'paused',
+      pendingFailedTurn: null,
+    });
+  });
+
+  it('returns recoverable post-provider validation failures without advancing', async () => {
     let calls = 0;
     const provider: AgentProvider = {
       mode: 'scripted-test',
@@ -403,12 +477,11 @@ describe('game API simulation boundary', () => {
     const failed = await app.request('/api/simulation/turn', {
       method: 'POST',
     });
-    expect(failed.status).toBe(500);
-    await expect(failed.json()).resolves.toEqual({
-      error: {
-        code: 'internal_error',
-        message: 'An unexpected error occurred.',
-      },
+    expect(failed.status).toBe(200);
+    const failedTurn = singleTurnResponseSchema.parse(await failed.json());
+    expect(failedTurn.turn).toMatchObject({
+      outcome: 'provider-error',
+      failure: { code: 'simulation-validation' },
     });
 
     const afterFailure = simulationSnapshotSchema.parse(
@@ -419,13 +492,14 @@ describe('game API simulation boundary', () => {
       turns: [],
       nextAgentId: initial.nextAgentId,
       activeAgentId: null,
-      status: 'paused',
+      status: 'provider-error',
+      pendingFailedTurn: { turnNumber: 1 },
     });
     expect(afterFailure.world).toEqual(initial.world);
 
     const recovered = singleTurnResponseSchema.parse(
       await (
-        await app.request('/api/simulation/turn', { method: 'POST' })
+        await app.request('/api/simulation/turn/retry', { method: 'POST' })
       ).json(),
     );
     expect(recovered.turn).toMatchObject({

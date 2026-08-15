@@ -210,11 +210,25 @@ describe('OpenRouterAgentProvider', () => {
     ).toBe('custom/provider-model');
   });
 
-  it('never sends reasoning controls', () => {
+  it('omits reasoning for the provider-default profile', () => {
     const request = buildOpenRouterRequest(observation, TEST_MODEL);
     expect(request).not.toHaveProperty('reasoning');
     expect(request).not.toHaveProperty('reasoning_effort');
     expect(request).not.toHaveProperty('include_reasoning');
+  });
+
+  it('constructs only the selected normalized reasoning control', () => {
+    expect(
+      buildOpenRouterRequest(observation, TEST_MODEL, 'off'),
+    ).toHaveProperty('reasoning', { enabled: false, exclude: true });
+    expect(
+      buildOpenRouterRequest(observation, TEST_MODEL, 'xhigh'),
+    ).toHaveProperty('reasoning', {
+      enabled: true,
+      effort: 'xhigh',
+      exclude: true,
+    });
+    expect(OPENROUTER_PROVIDER_TIMEOUT_MS).toBe(75_000);
   });
 
   it('rejects missing text output', async () => {
@@ -753,16 +767,22 @@ describe('OpenRouterAgentProvider', () => {
       }),
     });
     for (const provider of [httpProvider, networkProvider]) {
+      const selectedModel =
+        provider === httpProvider ? 'openai/gpt-5.6-luna' : TEST_MODEL;
       try {
         await provider.decide(
           provider === httpProvider ? sensitiveObservation : observation,
-          TEST_MODEL,
+          selectedModel,
         );
       } catch (error) {
         expect(error).toBeInstanceOf(AgentProviderError);
         expect(String(error)).not.toContain(key);
         expect(JSON.stringify(error)).not.toContain(key);
         expect(JSON.stringify(error)).not.toContain(injectedSensitiveString);
+        if (provider === httpProvider)
+          expect((error as AgentProviderError).diagnostics?.model).toBe(
+            selectedModel,
+          );
       }
     }
   });

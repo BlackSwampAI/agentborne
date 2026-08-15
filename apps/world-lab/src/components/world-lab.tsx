@@ -1,6 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import {
   PERSONALITY_MAX_LENGTH,
   cancelSimulationResponseSchema,
@@ -12,6 +19,7 @@ import {
   modelCatalogResponseSchema,
   personalitySchema,
   resetSimulationResponseSchema,
+  reasoningProfilesForModel,
   restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
   singleTurnResponseSchema,
@@ -29,6 +37,7 @@ import {
   type CompatibleModel,
   type ModelCatalogResponse,
   type ModelVerification,
+  type ReasoningProfile,
   type ExperimentModelConfiguration,
   type SimulationSnapshot,
 } from '@agentborne/shared';
@@ -71,6 +80,7 @@ export function WorldLab() {
   const inFlightRef = useRef(false);
   const runToTurn200Ref = useRef(false);
   const completedTurnsRef = useRef(0);
+  const exportInitializedRef = useRef(false);
 
   useEffect(() => {
     runToTurn200Ref.current = runToTurn200;
@@ -191,14 +201,18 @@ export function WorldLab() {
     }
   };
 
-  const verifyModel = async (modelId: string, force = false) => {
+  const verifyModel = async (
+    modelId: string,
+    reasoningProfile: ReasoningProfile,
+    force = false,
+  ) => {
     setVerifyingModelId(modelId);
     setUiError(null);
     try {
       const response = await fetch(`${apiBase}/models/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelId, force }),
+        body: JSON.stringify({ modelId, reasoningProfile, force }),
       });
       const body = await response.json();
       if (!response.ok) {
@@ -209,7 +223,8 @@ export function WorldLab() {
       const { verification } = verifyModelResponseSchema.parse(body);
       setModelVerifications((current) => ({
         ...current,
-        [verification.modelId]: verification,
+        [`${verification.modelId}:${verification.reasoningProfile}`]:
+          verification,
       }));
     } catch {
       setUiError('The compatibility test could not be completed.');
@@ -246,57 +261,81 @@ export function WorldLab() {
     }
   };
 
-  const executeTurn = useCallback(async () => {
+  const executeTurn = useCallback(
+    async (operation: 'turn' | 'retry' = 'turn') => {
+      if (inFlightRef.current) return;
+      if (runToTurn200Ref.current && completedTurnsRef.current >= 200) {
+        setRunning(false);
+        setRunToTurn200(false);
+        runToTurn200Ref.current = false;
+        return;
+      }
+      inFlightRef.current = true;
+      setInFlight(true);
+      setUiError(null);
+      try {
+        const response = await fetch(
+          `${apiBase}/turn${operation === 'retry' ? '/retry' : ''}`,
+          { method: 'POST' },
+        );
+        if (response.status === 409) {
+          setUiError('Another turn is already in progress.');
+          setRunning(false);
+          setRunToTurn200(false);
+          runToTurn200Ref.current = false;
+          return;
+        }
+        if (!response.ok) throw new Error('turn request failed');
+        const body: unknown = await response.json();
+        const cancellation = cancelledTurnResponseSchema.safeParse(body);
+        if (cancellation.success) {
+          applySnapshot(cancellation.data.snapshot);
+          setUiError('The request was cancelled without consuming a turn.');
+          return;
+        }
+        const payload = singleTurnResponseSchema.parse(body);
+        applySnapshot(payload.snapshot);
+        if (payload.turn.outcome === 'provider-error') {
+          setRunning(false);
+          setRunToTurn200(false);
+          runToTurn200Ref.current = false;
+          const failedAgent = payload.snapshot.world.agents.find(
+            ({ id }) => id === payload.turn.agentId,
+          );
+          setUiError(
+            `Turn stopped (${payload.turn.failure.code}): ${payload.turn.failure.message} Agent ${failedAgent?.name ?? payload.turn.agentId} · model ${payload.turn.failure.model ?? payload.turn.provider?.model ?? 'unavailable'}.`,
+          );
+        }
+      } catch {
+        setUiError('The turn failed safely. Check the Game API and try again.');
+        setRunning(false);
+        setRunToTurn200(false);
+        runToTurn200Ref.current = false;
+      } finally {
+        inFlightRef.current = false;
+        setInFlight(false);
+      }
+    },
+    [applySnapshot],
+  );
+
+  const skipFailedTurn = async () => {
     if (inFlightRef.current) return;
-    if (runToTurn200Ref.current && completedTurnsRef.current >= 200) {
-      setRunning(false);
-      setRunToTurn200(false);
-      runToTurn200Ref.current = false;
-      return;
-    }
-    inFlightRef.current = true;
     setInFlight(true);
+    inFlightRef.current = true;
     setUiError(null);
     try {
-      const response = await fetch(`${apiBase}/turn`, { method: 'POST' });
-      if (response.status === 409) {
-        setUiError('Another turn is already in progress.');
-        setRunning(false);
-        setRunToTurn200(false);
-        runToTurn200Ref.current = false;
-        return;
-      }
-      if (!response.ok) throw new Error('turn request failed');
-      const body: unknown = await response.json();
-      const cancellation = cancelledTurnResponseSchema.safeParse(body);
-      if (cancellation.success) {
-        applySnapshot(cancellation.data.snapshot);
-        setUiError('The request was cancelled without consuming a turn.');
-        return;
-      }
-      const payload = singleTurnResponseSchema.parse(body);
+      const response = await fetch(`${apiBase}/turn/skip`, { method: 'POST' });
+      if (!response.ok) throw new Error('skip request failed');
+      const payload = singleTurnResponseSchema.parse(await response.json());
       applySnapshot(payload.snapshot);
-      if (payload.turn.outcome === 'provider-error') {
-        setRunning(false);
-        setRunToTurn200(false);
-        runToTurn200Ref.current = false;
-        const failedAgent = payload.snapshot.world.agents.find(
-          ({ id }) => id === payload.turn.agentId,
-        );
-        setUiError(
-          `Turn stopped (${payload.turn.failure.code}): ${payload.turn.failure.message} Agent ${failedAgent?.name ?? payload.turn.agentId} · model ${payload.turn.failure.model ?? payload.turn.provider?.model ?? 'unavailable'}.`,
-        );
-      }
     } catch {
-      setUiError('The turn failed safely. Check the Game API and try again.');
-      setRunning(false);
-      setRunToTurn200(false);
-      runToTurn200Ref.current = false;
+      setUiError('The failed turn could not be skipped safely.');
     } finally {
       inFlightRef.current = false;
       setInFlight(false);
     }
-  }, [applySnapshot]);
+  };
 
   const cancelCurrentRequest = async () => {
     setCancelling(true);
@@ -519,6 +558,9 @@ export function WorldLab() {
   const modelsReady = snapshot.resolvedModels.every(
     ({ available }) => available,
   );
+  const reasoningUnavailable = snapshot.resolvedModels.some(
+    ({ issue }) => issue === 'reasoning-unavailable',
+  );
   const publicMessages = snapshot.world.events.filter(
     (
       event,
@@ -576,7 +618,8 @@ export function WorldLab() {
                 personalityPending ||
                 fullyInfected ||
                 !snapshot.providerConfigured ||
-                !modelsReady
+                !modelsReady ||
+                snapshot.pendingFailedTurn !== null
               }
               type="button"
               onClick={() => setRunning(true)}
@@ -590,7 +633,8 @@ export function WorldLab() {
               running ||
               personalityPending ||
               !snapshot.providerConfigured ||
-              !modelsReady
+              !modelsReady ||
+              snapshot.pendingFailedTurn !== null
             }
             type="button"
             onClick={() => void executeTurn()}
@@ -613,6 +657,7 @@ export function WorldLab() {
               !snapshot.providerConfigured ||
               !modelsReady ||
               fullyInfected ||
+              snapshot.pendingFailedTurn !== null ||
               snapshot.experiment.totalCompletedTurns >= 200
             }
             type="button"
@@ -648,6 +693,47 @@ export function WorldLab() {
                 : 'Cancel'}
             </button>
           </span>
+          <span
+            className={`failed-turn-controls${snapshot.pendingFailedTurn && !inFlight ? '' : ' inactive'}`}
+          >
+            <button
+              className="secondary-action"
+              disabled={!snapshot.pendingFailedTurn || inFlight}
+              aria-hidden={!snapshot.pendingFailedTurn || inFlight}
+              tabIndex={
+                snapshot.pendingFailedTurn && !inFlight ? undefined : -1
+              }
+              type="button"
+              onClick={() => void executeTurn('retry')}
+            >
+              Retry
+            </button>
+            <button
+              className="secondary-action"
+              disabled={!snapshot.pendingFailedTurn || inFlight}
+              aria-hidden={!snapshot.pendingFailedTurn || inFlight}
+              tabIndex={
+                snapshot.pendingFailedTurn && !inFlight ? undefined : -1
+              }
+              type="button"
+              onClick={() => void skipFailedTurn()}
+            >
+              Skip turn
+            </button>
+          </span>
+          <button
+            data-export-trigger
+            type="button"
+            onClick={() => {
+              if (!exportInitializedRef.current) {
+                setExportAgentIds(snapshot.world.agents.map(({ id }) => id));
+                exportInitializedRef.current = true;
+              }
+              setExportOpen(true);
+            }}
+          >
+            Export
+          </button>
         </div>
         {snapshot.providerMode === 'openrouter' ? (
           <ModelConsole
@@ -713,7 +799,9 @@ export function WorldLab() {
               (fullyInfected
                 ? 'Development world fully infected. Automatic playback is paused; Single turn remains a manual cost-incurring diagnostic action.'
                 : (personalityNotice ??
-                  'Select an available compatible model for every agent before starting.'))}
+                  (reasoningUnavailable
+                    ? 'A saved reasoning profile is no longer advertised by its model. Select an available profile before starting.'
+                    : 'Select an available compatible model for every agent before starting.')))}
           </div>
         )}
         {!snapshot.providerConfigured && (
@@ -723,6 +811,15 @@ export function WorldLab() {
           </div>
         )}
       </div>
+
+      <ExperimentExportPanel
+        agents={snapshot.world.agents}
+        disabled={exportMutationPending}
+        open={exportOpen}
+        selectedAgentIds={exportAgentIds}
+        onOpenChange={setExportOpen}
+        onSelectionChange={setExportAgentIds}
+      />
 
       <div className="workspace">
         <AgentRoster
@@ -813,20 +910,12 @@ export function WorldLab() {
               )}
               onExportAgent={(agentId) => {
                 setRunning(false);
+                exportInitializedRef.current = true;
                 setExportAgentIds([agentId]);
                 setExportOpen(true);
               }}
             />
           )}
-
-          <ExperimentExportPanel
-            agents={snapshot.world.agents}
-            disabled={exportMutationPending}
-            open={exportOpen}
-            selectedAgentIds={exportAgentIds}
-            onOpenChange={setExportOpen}
-            onSelectionChange={setExportAgentIds}
-          />
 
           <TerritoryScoreboard entries={snapshot.experiment.currentTerritory} />
           <AlliancePanel snapshot={snapshot} />
@@ -939,9 +1028,16 @@ function ModelConsole({
   onUpdate: (
     configuration: Omit<ExperimentModelConfiguration, 'locked'>,
   ) => Promise<boolean>;
-  onVerify: (modelId: string, force?: boolean) => Promise<void>;
+  onVerify: (
+    modelId: string,
+    reasoningProfile: ReasoningProfile,
+    force?: boolean,
+  ) => Promise<void>;
   onImport: (file: File) => Promise<void>;
 }) {
+  const [open, setOpen] = useState(false);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<'name' | 'price' | 'context' | 'newest'>(
     'name',
@@ -975,218 +1071,363 @@ function ModelConsole({
   );
   const locked = disabled;
   const verification = configuration.globalModelId
-    ? verifications[configuration.globalModelId]
+    ? verifications[
+        `${configuration.globalModelId}:${configuration.globalReasoningProfile}`
+      ]
     : undefined;
+  const globalReasoningProfiles = reasoningProfilesForModel(selected);
 
   const save = (next: Omit<ExperimentModelConfiguration, 'locked'>) =>
     void onUpdate(next);
 
+  useEffect(() => {
+    if (!open) return;
+    dialogRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+        window.setTimeout(() => toggleRef.current?.focus(), 0);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open]);
+
+  const close = () => {
+    setOpen(false);
+    window.setTimeout(() => toggleRef.current?.focus(), 0);
+  };
+
   return (
-    <details className="model-console">
-      <summary>
+    <div className="model-console">
+      <button
+        ref={toggleRef}
+        type="button"
+        onClick={() => (open ? close() : setOpen(true))}
+      >
         Model: {selected?.name ?? configuration.globalModelId ?? 'not selected'}
-      </summary>
-      <div className="model-console-popover">
-        <div className="model-console-heading">
-          <div>
-            <strong>Compatible OpenRouter models</strong>
-            <p>
-              {catalog?.models.length ?? 0} catalog compatible ·{' '}
-              {catalog?.filteredOutCount ?? 0} filtered out
-            </p>
-          </div>
-          <button
-            disabled={loading}
-            type="button"
-            onClick={() => void onRefresh()}
-          >
-            {loading ? 'Refreshing…' : 'Refresh'}
-          </button>
-        </div>
-        {catalog?.stale && (
-          <p className="catalog-state warning">
-            Showing the last successful catalog. {catalog.error?.message}
-          </p>
-        )}
-        {loading && !catalog && (
-          <p className="catalog-state">Loading compatible models…</p>
-        )}
-        {!catalog?.stale && catalog?.error && (
-          <p className="catalog-state error">{catalog.error.message}</p>
-        )}
-        {!loading && catalog && catalog.models.length === 0 && (
-          <p className="catalog-state">
-            No compatible models are currently available.
-          </p>
-        )}
-        <div className="model-filters">
-          <label>
-            Search
-            <input
-              type="search"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Name, slug, or author"
-            />
-          </label>
-          <label>
-            Sort
-            <select
-              value={sort}
-              onChange={(event) => setSort(event.target.value as typeof sort)}
-            >
-              <option value="name">Name</option>
-              <option value="price">Lowest input price</option>
-              <option value="context">Largest context</option>
-              <option value="newest">Newest</option>
-            </select>
-          </label>
-        </div>
-        <label className="model-select-label">
-          Global model
-          <select
-            disabled={locked}
-            value={configuration.globalModelId ?? ''}
-            onChange={(event) =>
-              save({
-                globalModelId: event.target.value || null,
-                overrides: configuration.overrides,
-              })
-            }
-          >
-            <option value="">Select a model…</option>
-            {configuration.globalModelId && !selected && (
-              <option value={configuration.globalModelId}>
-                {configuration.globalModelId} — unavailable
-              </option>
-            )}
-            {models.map((model) => (
-              <option value={model.id} key={model.id}>
-                {model.name} · {formatPerMillion(model.inputPricePerToken)} in /{' '}
-                {formatPerMillion(model.outputPricePerToken)} out
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          disabled={locked || !configuration.globalModelId}
-          type="button"
-          onClick={() =>
-            save({ globalModelId: configuration.globalModelId, overrides: [] })
-          }
+      </button>
+      {open && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) close();
+          }}
         >
-          Apply global model to all agents
-        </button>
-        <div className="model-verification">
-          <span>
-            Catalog compatible:{' '}
-            {selected ? 'yes — required metadata advertised' : 'not selected'}
-          </span>
-          <span>
-            Runtime verified:{' '}
-            {verification?.status === 'verified'
-              ? 'yes'
-              : verification?.status === 'failed'
-                ? 'failed'
-                : 'not tested'}
-          </span>
-          {verification?.failure && (
-            <p className="catalog-state error" role="status">
-              {verification.failure.message}
-            </p>
-          )}
-          <button
-            disabled={
-              locked ||
-              !configuration.globalModelId ||
-              verifyingModelId === configuration.globalModelId
-            }
-            type="button"
-            onClick={() =>
-              configuration.globalModelId &&
-              void onVerify(
-                configuration.globalModelId,
-                verification?.status === 'failed',
-              )
-            }
+          <div
+            className="model-console-popover modal-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Model selection"
+            ref={dialogRef}
+            tabIndex={-1}
+            onKeyDown={trapModalFocus}
           >
-            {verifyingModelId === configuration.globalModelId
-              ? 'Testing model…'
-              : verification?.status === 'failed'
-                ? 'Retry model test'
-                : 'Test selected model'}
-          </button>
-          <small>
-            Sends one genuine, non-mutating OpenRouter request using the
-            production decision contract and may incur a small charge.
-          </small>
-        </div>
-        {selected && <ModelFacts model={selected} />}
-        <div className="agent-model-overrides">
-          <strong>Agent overrides</strong>
-          {snapshot.world.agents.map((agent) => {
-            const override = configuration.overrides.find(
-              ({ agentId }) => agentId === agent.id,
-            );
-            return (
-              <label key={agent.id}>
-                {agent.name}
+            <div className="model-console-heading">
+              <div>
+                <strong>Compatible OpenRouter models</strong>
+                <p>
+                  {catalog?.models.length ?? 0} catalog compatible ·{' '}
+                  {catalog?.filteredOutCount ?? 0} filtered out
+                </p>
+              </div>
+              <button
+                disabled={loading}
+                type="button"
+                onClick={() => void onRefresh()}
+              >
+                {loading ? 'Refreshing…' : 'Refresh'}
+              </button>
+              <button
+                type="button"
+                aria-label="Close model selection"
+                onClick={close}
+              >
+                Close
+              </button>
+            </div>
+            {catalog?.stale && (
+              <p className="catalog-state warning">
+                Showing the last successful catalog. {catalog.error?.message}
+              </p>
+            )}
+            {loading && !catalog && (
+              <p className="catalog-state">Loading compatible models…</p>
+            )}
+            {!catalog?.stale && catalog?.error && (
+              <p className="catalog-state error">{catalog.error.message}</p>
+            )}
+            {!loading && catalog && catalog.models.length === 0 && (
+              <p className="catalog-state">
+                No compatible models are currently available.
+              </p>
+            )}
+            <div className="model-filters">
+              <label>
+                Search
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Name, slug, or author"
+                />
+              </label>
+              <label>
+                Sort
                 <select
-                  disabled={locked}
-                  value={override?.modelId ?? ''}
-                  onChange={(event) => {
-                    const withoutAgent = configuration.overrides.filter(
-                      ({ agentId }) => agentId !== agent.id,
-                    );
-                    save({
-                      globalModelId: configuration.globalModelId,
-                      overrides: event.target.value
-                        ? [
-                            ...withoutAgent,
-                            { agentId: agent.id, modelId: event.target.value },
-                          ]
-                        : withoutAgent,
-                    });
-                  }}
+                  value={sort}
+                  onChange={(event) =>
+                    setSort(event.target.value as typeof sort)
+                  }
                 >
-                  <option value="">Inherit global</option>
-                  {override &&
-                    !catalog?.models.some(
-                      ({ id }) => id === override.modelId,
-                    ) && (
-                      <option value={override.modelId}>
-                        {override.modelId} — unavailable
-                      </option>
-                    )}
-                  {(catalog?.models ?? []).map((model) => (
-                    <option value={model.id} key={model.id}>
-                      {model.name}
-                    </option>
-                  ))}
+                  <option value="name">Name</option>
+                  <option value="price">Lowest input price</option>
+                  <option value="context">Largest context</option>
+                  <option value="newest">Newest</option>
                 </select>
               </label>
-            );
-          })}
+            </div>
+            <label className="model-select-label">
+              Global model
+              <select
+                disabled={locked}
+                value={configuration.globalModelId ?? ''}
+                onChange={(event) =>
+                  save({
+                    globalModelId: event.target.value || null,
+                    globalReasoningProfile: 'provider-default',
+                    overrides: configuration.overrides,
+                  })
+                }
+              >
+                <option value="">Select a model…</option>
+                {configuration.globalModelId && !selected && (
+                  <option value={configuration.globalModelId}>
+                    {configuration.globalModelId} — unavailable
+                  </option>
+                )}
+                {models.map((model) => (
+                  <option value={model.id} key={model.id}>
+                    {model.name} · {formatPerMillion(model.inputPricePerToken)}{' '}
+                    in / {formatPerMillion(model.outputPricePerToken)} out
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="model-select-label">
+              Global reasoning
+              <select
+                disabled={locked || !selected}
+                value={configuration.globalReasoningProfile}
+                onChange={(event) =>
+                  save({
+                    globalModelId: configuration.globalModelId,
+                    globalReasoningProfile: event.target
+                      .value as ReasoningProfile,
+                    overrides: configuration.overrides,
+                  })
+                }
+              >
+                {!globalReasoningProfiles.includes(
+                  configuration.globalReasoningProfile,
+                ) && (
+                  <option value={configuration.globalReasoningProfile}>
+                    {formatReasoningProfile(
+                      configuration.globalReasoningProfile,
+                    )}{' '}
+                    — unavailable
+                  </option>
+                )}
+                {globalReasoningProfiles.map((profile) => (
+                  <option value={profile} key={profile}>
+                    {formatReasoningProfile(profile)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              disabled={locked || !configuration.globalModelId}
+              type="button"
+              onClick={() =>
+                save({
+                  globalModelId: configuration.globalModelId,
+                  globalReasoningProfile: configuration.globalReasoningProfile,
+                  overrides: [],
+                })
+              }
+            >
+              Apply global model to all agents
+            </button>
+            <div className="model-verification">
+              <span>
+                Catalog compatible:{' '}
+                {selected
+                  ? 'yes — required metadata advertised'
+                  : 'not selected'}
+              </span>
+              <span>
+                Runtime verified:{' '}
+                {verification?.status === 'verified'
+                  ? 'yes'
+                  : verification?.status === 'failed'
+                    ? 'failed'
+                    : 'not tested'}
+              </span>
+              {verification?.failure && (
+                <p className="catalog-state error" role="status">
+                  {verification.failure.message}
+                </p>
+              )}
+              <button
+                disabled={
+                  locked ||
+                  !configuration.globalModelId ||
+                  verifyingModelId === configuration.globalModelId
+                }
+                type="button"
+                onClick={() =>
+                  configuration.globalModelId &&
+                  void onVerify(
+                    configuration.globalModelId,
+                    configuration.globalReasoningProfile,
+                    verification?.status === 'failed',
+                  )
+                }
+              >
+                {verifyingModelId === configuration.globalModelId
+                  ? 'Testing model…'
+                  : verification?.status === 'failed'
+                    ? 'Retry model test'
+                    : 'Test selected model'}
+              </button>
+              <small>
+                Sends one genuine, non-mutating OpenRouter request using the
+                production decision contract and may incur a small charge.
+              </small>
+            </div>
+            {selected && <ModelFacts model={selected} />}
+            <div className="agent-model-overrides">
+              <strong>Agent overrides</strong>
+              {snapshot.world.agents.map((agent) => {
+                const override = configuration.overrides.find(
+                  ({ agentId }) => agentId === agent.id,
+                );
+                const overrideModel = catalog?.models.find(
+                  ({ id }) => id === override?.modelId,
+                );
+                const reasoningProfiles =
+                  reasoningProfilesForModel(overrideModel);
+                return (
+                  <div className="agent-model-override" key={agent.id}>
+                    <label>
+                      {agent.name}
+                      <select
+                        disabled={locked}
+                        value={override?.modelId ?? ''}
+                        onChange={(event) => {
+                          const withoutAgent = configuration.overrides.filter(
+                            ({ agentId }) => agentId !== agent.id,
+                          );
+                          save({
+                            globalModelId: configuration.globalModelId,
+                            globalReasoningProfile:
+                              configuration.globalReasoningProfile,
+                            overrides: event.target.value
+                              ? [
+                                  ...withoutAgent,
+                                  {
+                                    agentId: agent.id,
+                                    modelId: event.target.value,
+                                    reasoningProfile: 'provider-default',
+                                  },
+                                ]
+                              : withoutAgent,
+                          });
+                        }}
+                      >
+                        <option value="">Inherit global</option>
+                        {override &&
+                          !catalog?.models.some(
+                            ({ id }) => id === override.modelId,
+                          ) && (
+                            <option value={override.modelId}>
+                              {override.modelId} — unavailable
+                            </option>
+                          )}
+                        {(catalog?.models ?? []).map((model) => (
+                          <option value={model.id} key={model.id}>
+                            {model.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      {agent.name} reasoning
+                      <select
+                        disabled={locked || !overrideModel}
+                        value={override?.reasoningProfile ?? 'provider-default'}
+                        onChange={(event) => {
+                          if (!override) return;
+                          save({
+                            globalModelId: configuration.globalModelId,
+                            globalReasoningProfile:
+                              configuration.globalReasoningProfile,
+                            overrides: configuration.overrides.map(
+                              (candidate) =>
+                                candidate.agentId === agent.id
+                                  ? {
+                                      ...candidate,
+                                      reasoningProfile: event.target
+                                        .value as ReasoningProfile,
+                                    }
+                                  : candidate,
+                            ),
+                          });
+                        }}
+                      >
+                        {override &&
+                          !reasoningProfiles.includes(
+                            override.reasoningProfile,
+                          ) && (
+                            <option value={override.reasoningProfile}>
+                              {formatReasoningProfile(
+                                override.reasoningProfile,
+                              )}{' '}
+                              — unavailable
+                            </option>
+                          )}
+                        {reasoningProfiles.map((profile) => (
+                          <option value={profile} key={profile}>
+                            {formatReasoningProfile(profile)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="catalog-state">
+              Model changes are available between provider requests and are
+              recorded at the next turn boundary.
+            </p>
+            <label className="model-import-label">
+              Import saved experiment model assignments
+              <input
+                disabled={disabled}
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void onImport(file);
+                  event.currentTarget.value = '';
+                }}
+              />
+            </label>
+          </div>
         </div>
-        <p className="catalog-state">
-          Model changes are available between provider requests and are recorded
-          at the next turn boundary.
-        </p>
-        <label className="model-import-label">
-          Import saved experiment model assignments
-          <input
-            disabled={disabled}
-            type="file"
-            accept="application/json,.json"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) void onImport(file);
-              event.currentTarget.value = '';
-            }}
-          />
-        </label>
-      </div>
-    </details>
+      )}
+    </div>
   );
 }
 
@@ -1266,7 +1507,8 @@ function AgentRoster({
               </small>
               <small className={resolved.available ? '' : 'unavailable'}>
                 {resolved.source === 'override' ? 'Override' : 'Global'} ·{' '}
-                {resolved.modelId ?? 'model required'}
+                {resolved.modelId ?? 'model required'} ·{' '}
+                {formatReasoningProfile(resolved.reasoningProfile)}
               </small>
             </span>
           </button>
@@ -1374,6 +1616,7 @@ function PublicWorldChat({
                 const turnNumber = turns.find(
                   (turn) =>
                     turn.outcome !== 'provider-error' &&
+                    turn.outcome !== 'operator-skipped' &&
                     turn.communicationResult.requested &&
                     turn.communicationResult.accepted &&
                     turn.communicationResult.event.id === event.id,
@@ -1749,6 +1992,7 @@ function AgentInspector({
             const turnNumber = turns.find(
               (turn) =>
                 turn.outcome !== 'provider-error' &&
+                turn.outcome !== 'operator-skipped' &&
                 turn.communicationResult.requested &&
                 turn.communicationResult.accepted &&
                 turn.communicationResult.event.id === communication.id,
@@ -1879,7 +2123,8 @@ function AgentInspector({
           <p className={`outcome ${latestTurn.outcome}`}>
             {latestTurn.outcome}
           </p>
-          {latestTurn.outcome !== 'provider-error' ? (
+          {latestTurn.outcome !== 'provider-error' &&
+          latestTurn.outcome !== 'operator-skipped' ? (
             <>
               <p>
                 <strong>World action:</strong>{' '}
@@ -2132,8 +2377,8 @@ function ExperimentExportPanel({
   const [fromTurn, setFromTurn] = useState(1);
   const [toTurn, setToTurn] = useState(120);
   const [outcomes, setOutcomes] = useState<
-    Array<'accepted' | 'rejected' | 'provider-error'>
-  >(['accepted', 'rejected', 'provider-error']);
+    Array<'accepted' | 'rejected' | 'provider-error' | 'operator-skipped'>
+  >(['accepted', 'rejected', 'provider-error', 'operator-skipped']);
   const [actions, setActions] = useState<
     Array<'move' | 'infect' | 'capture' | 'wait'>
   >(['move', 'infect', 'capture', 'wait']);
@@ -2153,11 +2398,37 @@ function ExperimentExportPanel({
   >(null);
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (open && detailsRef.current) detailsRef.current.open = true;
-  }, [open]);
+    if (!open) return;
+    dialogRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onOpenChange(false);
+        window.setTimeout(
+          () =>
+            window.document
+              .querySelector<HTMLButtonElement>('[data-export-trigger]')
+              ?.focus(),
+          0,
+        );
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onOpenChange, open]);
+
+  const close = () => {
+    onOpenChange(false);
+    window.setTimeout(
+      () =>
+        window.document
+          .querySelector<HTMLButtonElement>('[data-export-trigger]')
+          ?.focus(),
+      0,
+    );
+  };
 
   const requestInput = {
     agents:
@@ -2273,300 +2544,340 @@ function ExperimentExportPanel({
       ? values.filter((candidate) => candidate !== value)
       : [...values, value];
 
+  if (!open) return null;
   return (
-    <details
-      className="panel export-panel"
-      ref={detailsRef}
-      onToggle={(event) => {
-        const nextOpen = event.currentTarget.open;
-        onOpenChange(nextOpen);
-        if (nextOpen && selectedAgentIds.length === 0)
-          onSelectionChange(agents.map(({ id }) => id));
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) close();
       }}
     >
-      <summary>Experiment Export</summary>
-      <p className="muted">
-        Server-owned retained telemetry; exports never change prompts or model
-        usage.
-      </p>
-      <fieldset>
-        <legend>Agents</legend>
-        <div className="selection-actions">
-          <button
-            type="button"
-            onClick={() => onSelectionChange(agents.map(({ id }) => id))}
-          >
-            Select all
-          </button>
-          <button type="button" onClick={() => onSelectionChange([])}>
-            Clear
+      <div
+        className="panel export-panel modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Experiment export"
+        ref={dialogRef}
+        tabIndex={-1}
+        onKeyDown={trapModalFocus}
+      >
+        <div className="modal-heading">
+          <h2>Experiment Export</h2>
+          <button type="button" aria-label="Close export" onClick={close}>
+            Close
           </button>
         </div>
-        {agents.map((agent) => (
-          <label className="checkbox-row" key={agent.id}>
-            <input
-              checked={selectedAgentIds.includes(agent.id)}
-              type="checkbox"
-              onChange={() =>
-                onSelectionChange(toggle(selectedAgentIds, agent.id))
+        <p className="muted">
+          Server-owned retained telemetry; exports never change prompts or model
+          usage.
+        </p>
+        <fieldset>
+          <legend>Agents</legend>
+          <div className="selection-actions">
+            <button
+              type="button"
+              onClick={() => onSelectionChange(agents.map(({ id }) => id))}
+            >
+              Select all
+            </button>
+            <button type="button" onClick={() => onSelectionChange([])}>
+              Clear
+            </button>
+          </div>
+          {agents.map((agent) => (
+            <label className="checkbox-row" key={agent.id}>
+              <input
+                checked={selectedAgentIds.includes(agent.id)}
+                type="checkbox"
+                onChange={() =>
+                  onSelectionChange(toggle(selectedAgentIds, agent.id))
+                }
+              />
+              <span
+                className="agent-swatch"
+                style={{ background: agent.color }}
+              />
+              {agent.name}
+            </label>
+          ))}
+        </fieldset>
+        <label>
+          Export level
+          <select
+            value={level}
+            onChange={(event) =>
+              setLevel(event.target.value as ExperimentExportRequest['level'])
+            }
+          >
+            <option value="minimal">Minimal</option>
+            <option value="standard">Standard</option>
+            <option value="full-safe">Full safe</option>
+            <option value="custom">Custom export</option>
+          </select>
+        </label>
+        <fieldset>
+          <legend>Advanced JSON options</legend>
+          <label>
+            JSON serialization
+            <select
+              value={serialization}
+              onChange={(event) =>
+                setSerialization(
+                  event.target
+                    .value as ExperimentExportRequest['serialization'],
+                )
               }
-            />
-            <span
-              className="agent-swatch"
-              style={{ background: agent.color }}
-            />
-            {agent.name}
+            >
+              <option value="compact">Compact · AI sharing default</option>
+              <option value="pretty">Pretty · human review</option>
+            </select>
           </label>
-        ))}
-      </fieldset>
-      <label>
-        Export level
-        <select
-          value={level}
-          onChange={(event) =>
-            setLevel(event.target.value as ExperimentExportRequest['level'])
-          }
-        >
-          <option value="minimal">Minimal</option>
-          <option value="standard">Standard</option>
-          <option value="full-safe">Full safe</option>
-          <option value="custom">Custom export</option>
-        </select>
-      </label>
-      <fieldset>
-        <legend>Advanced JSON options</legend>
+        </fieldset>
         <label>
-          JSON serialization
+          Turn range
           <select
-            value={serialization}
+            value={turnMode}
             onChange={(event) =>
-              setSerialization(
-                event.target.value as ExperimentExportRequest['serialization'],
-              )
+              setTurnMode(event.target.value as typeof turnMode)
             }
           >
-            <option value="compact">Compact · AI sharing default</option>
-            <option value="pretty">Pretty · human review</option>
+            <option value="entire-retained">Entire retained experiment</option>
+            <option value="latest">Latest matching records</option>
+            <option value="range">Custom absolute range</option>
           </select>
         </label>
-      </fieldset>
-      <label>
-        Turn range
-        <select
-          value={turnMode}
-          onChange={(event) =>
-            setTurnMode(event.target.value as typeof turnMode)
-          }
-        >
-          <option value="entire-retained">Entire retained experiment</option>
-          <option value="latest">Latest matching records</option>
-          <option value="range">Custom absolute range</option>
-        </select>
-      </label>
-      {turnMode === 'latest' && (
-        <label>
-          Latest count
-          <select
-            value={latestCount}
-            onChange={(event) =>
-              setLatestCount(Number(event.target.value) as typeof latestCount)
-            }
-          >
-            {[10, 25, 50, 120].map((count) => (
-              <option key={count} value={count}>
-                {count}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {turnMode === 'range' && (
+        {turnMode === 'latest' && (
+          <label>
+            Latest count
+            <select
+              value={latestCount}
+              onChange={(event) =>
+                setLatestCount(Number(event.target.value) as typeof latestCount)
+              }
+            >
+              {[10, 25, 50, 120].map((count) => (
+                <option key={count} value={count}>
+                  {count}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {turnMode === 'range' && (
+          <div className="range-row">
+            <label>
+              From turn
+              <input
+                min="1"
+                type="number"
+                value={fromTurn}
+                onChange={(event) => setFromTurn(Number(event.target.value))}
+              />
+            </label>
+            <label>
+              To turn
+              <input
+                min="1"
+                type="number"
+                value={toTurn}
+                onChange={(event) => setToTurn(Number(event.target.value))}
+              />
+            </label>
+          </div>
+        )}
+        <FilterChecks
+          label="Outcomes"
+          options={[
+            'accepted',
+            'rejected',
+            'provider-error',
+            'operator-skipped',
+          ]}
+          selected={outcomes}
+          onToggle={(value) => setOutcomes(toggle(outcomes, value))}
+        />
+        <FilterChecks
+          label="Actions"
+          options={['move', 'infect', 'capture', 'wait']}
+          selected={actions}
+          onToggle={(value) => setActions(toggle(actions, value))}
+        />
         <div className="range-row">
           <label>
-            From turn
-            <input
-              min="1"
-              type="number"
-              value={fromTurn}
-              onChange={(event) => setFromTurn(Number(event.target.value))}
-            />
+            Communication channel
+            <select
+              value={communicationChannel}
+              onChange={(event) =>
+                setCommunicationChannel(
+                  event.target.value as typeof communicationChannel,
+                )
+              }
+            >
+              <option value="all">All</option>
+              <option value="public">Public</option>
+              <option value="direct">Direct</option>
+            </select>
           </label>
           <label>
-            To turn
-            <input
-              min="1"
-              type="number"
-              value={toTurn}
-              onChange={(event) => setToTurn(Number(event.target.value))}
-            />
+            Communication result
+            <select
+              value={communicationStatus}
+              onChange={(event) =>
+                setCommunicationStatus(
+                  event.target.value as typeof communicationStatus,
+                )
+              }
+            >
+              <option value="all">All</option>
+              <option value="accepted">Accepted</option>
+              <option value="rejected">Rejected</option>
+            </select>
           </label>
         </div>
-      )}
-      <FilterChecks
-        label="Outcomes"
-        options={['accepted', 'rejected', 'provider-error']}
-        selected={outcomes}
-        onToggle={(value) => setOutcomes(toggle(outcomes, value))}
-      />
-      <FilterChecks
-        label="Actions"
-        options={['move', 'infect', 'capture', 'wait']}
-        selected={actions}
-        onToggle={(value) => setActions(toggle(actions, value))}
-      />
-      <div className="range-row">
-        <label>
-          Communication channel
-          <select
-            value={communicationChannel}
-            onChange={(event) =>
-              setCommunicationChannel(
-                event.target.value as typeof communicationChannel,
-              )
-            }
+        {level === 'custom' && (
+          <fieldset>
+            <legend>Advanced Custom switches</legend>
+            {(Object.keys(custom) as Array<keyof CustomExportOptions>).map(
+              (key) => (
+                <label className="checkbox-row" key={key}>
+                  <input
+                    checked={custom[key]}
+                    disabled={
+                      (key === 'nearbyAgents' ||
+                        key === 'recentEvents' ||
+                        key === 'recentPublicMessages' ||
+                        key === 'recentDirectMessages' ||
+                        key === 'recentControlChanges') &&
+                      !custom.turnObservations
+                    }
+                    type="checkbox"
+                    onChange={() =>
+                      setCustom((current) => {
+                        const next = { ...current, [key]: !current[key] };
+                        if (
+                          key === 'turnObservations' &&
+                          !next.turnObservations
+                        ) {
+                          next.nearbyAgents = false;
+                          next.recentEvents = false;
+                          next.recentPublicMessages = false;
+                          next.recentDirectMessages = false;
+                          next.recentControlChanges = false;
+                        }
+                        return next;
+                      })
+                    }
+                  />
+                  {customOptionLabel(key)}
+                </label>
+              ),
+            )}
+          </fieldset>
+        )}
+        {open && !parsedRequest.success && (
+          <p className="inline-error" role="alert">
+            Select at least one agent, outcome, and action, and enter a valid
+            range.
+          </p>
+        )}
+        {disabled && (
+          <p className="muted">
+            Pause playback and wait for all turn, reset, and personality work to
+            finish.
+          </p>
+        )}
+        <div className="export-actions">
+          <button type="button" onClick={close}>
+            Cancel
+          </button>
+          <button
+            disabled={generationDisabled}
+            type="button"
+            onClick={() => void requestExport(true)}
           >
-            <option value="all">All</option>
-            <option value="public">Public</option>
-            <option value="direct">Direct</option>
-          </select>
-        </label>
-        <label>
-          Communication result
-          <select
-            value={communicationStatus}
-            onChange={(event) =>
-              setCommunicationStatus(
-                event.target.value as typeof communicationStatus,
-              )
-            }
+            Preview export
+          </button>
+          <button
+            disabled={generationDisabled}
+            type="button"
+            onClick={() => void requestExport(false)}
           >
-            <option value="all">All</option>
-            <option value="accepted">Accepted</option>
-            <option value="rejected">Rejected</option>
-          </select>
-        </label>
+            Generate JSON
+          </button>
+          <button
+            disabled={!documentIsCurrent}
+            type="button"
+            onClick={() => void copyJson()}
+          >
+            Copy JSON
+          </button>
+          <button
+            disabled={!documentIsCurrent}
+            type="button"
+            onClick={downloadJson}
+          >
+            Download JSON
+          </button>
+        </div>
+        {preview && (
+          <dl className="preview-grid" aria-label="Export preview">
+            <div>
+              <dt>Matching</dt>
+              <dd>{preview.matchingTurnCount} turns</dd>
+            </div>
+            <div>
+              <dt>Communications</dt>
+              <dd>{preview.matchingCommunicationCount} matched</dd>
+            </div>
+            <div>
+              <dt>Control changes</dt>
+              <dd>{preview.matchingControlChangeCount} matched</dd>
+            </div>
+            <div>
+              <dt>Diplomacy/alliance events</dt>
+              <dd>{preview.matchingDiplomacyEventCount} matched</dd>
+            </div>
+            <div>
+              <dt>Size</dt>
+              <dd>{preview.serializedUtf8Bytes} bytes</dd>
+            </div>
+            <div>
+              <dt>Approx. AI input</dt>
+              <dd>{preview.approximateAiInputTokens} tokens</dd>
+            </div>
+            <div>
+              <dt>Selected cost</dt>
+              <dd>{formatCost(preview.knownCostCredits)}</dd>
+            </div>
+          </dl>
+        )}
+        {notice && (
+          <p className="callout" role="status">
+            {notice}
+          </p>
+        )}
       </div>
-      {level === 'custom' && (
-        <fieldset>
-          <legend>Advanced Custom switches</legend>
-          {(Object.keys(custom) as Array<keyof CustomExportOptions>).map(
-            (key) => (
-              <label className="checkbox-row" key={key}>
-                <input
-                  checked={custom[key]}
-                  disabled={
-                    (key === 'nearbyAgents' ||
-                      key === 'recentEvents' ||
-                      key === 'recentPublicMessages' ||
-                      key === 'recentDirectMessages' ||
-                      key === 'recentControlChanges') &&
-                    !custom.turnObservations
-                  }
-                  type="checkbox"
-                  onChange={() =>
-                    setCustom((current) => {
-                      const next = { ...current, [key]: !current[key] };
-                      if (
-                        key === 'turnObservations' &&
-                        !next.turnObservations
-                      ) {
-                        next.nearbyAgents = false;
-                        next.recentEvents = false;
-                        next.recentPublicMessages = false;
-                        next.recentDirectMessages = false;
-                        next.recentControlChanges = false;
-                      }
-                      return next;
-                    })
-                  }
-                />
-                {customOptionLabel(key)}
-              </label>
-            ),
-          )}
-        </fieldset>
-      )}
-      {open && !parsedRequest.success && (
-        <p className="inline-error" role="alert">
-          Select at least one agent, outcome, and action, and enter a valid
-          range.
-        </p>
-      )}
-      {disabled && (
-        <p className="muted">
-          Pause playback and wait for all turn, reset, and personality work to
-          finish.
-        </p>
-      )}
-      <div className="export-actions">
-        <button
-          disabled={generationDisabled}
-          type="button"
-          onClick={() => void requestExport(true)}
-        >
-          Preview export
-        </button>
-        <button
-          disabled={generationDisabled}
-          type="button"
-          onClick={() => void requestExport(false)}
-        >
-          Generate JSON
-        </button>
-        <button
-          disabled={!documentIsCurrent}
-          type="button"
-          onClick={() => void copyJson()}
-        >
-          Copy JSON
-        </button>
-        <button
-          disabled={!documentIsCurrent}
-          type="button"
-          onClick={downloadJson}
-        >
-          Download JSON
-        </button>
-      </div>
-      {preview && (
-        <dl className="preview-grid" aria-label="Export preview">
-          <div>
-            <dt>Matching</dt>
-            <dd>{preview.matchingTurnCount} turns</dd>
-          </div>
-          <div>
-            <dt>Communications</dt>
-            <dd>{preview.matchingCommunicationCount} matched</dd>
-          </div>
-          <div>
-            <dt>Control changes</dt>
-            <dd>{preview.matchingControlChangeCount} matched</dd>
-          </div>
-          <div>
-            <dt>Diplomacy/alliance events</dt>
-            <dd>{preview.matchingDiplomacyEventCount} matched</dd>
-          </div>
-          <div>
-            <dt>Size</dt>
-            <dd>{preview.serializedUtf8Bytes} bytes</dd>
-          </div>
-          <div>
-            <dt>Approx. AI input</dt>
-            <dd>{preview.approximateAiInputTokens} tokens</dd>
-          </div>
-          <div>
-            <dt>Selected cost</dt>
-            <dd>{formatCost(preview.knownCostCredits)}</dd>
-          </div>
-        </dl>
-      )}
-      {notice && (
-        <p className="callout" role="status">
-          {notice}
-        </p>
-      )}
-    </details>
+    </div>
   );
+}
+
+function trapModalFocus(event: ReactKeyboardEvent<HTMLDivElement>) {
+  if (event.key !== 'Tab') return;
+  const focusable = [
+    ...event.currentTarget.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ];
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (!first || !last) return;
+  if (event.shiftKey && window.document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && window.document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function FilterChecks<T extends string>({
@@ -2625,6 +2936,14 @@ function formatPerMillion(pricePerToken: string): string {
   const value = Number(pricePerToken) * 1_000_000;
   if (!Number.isFinite(value)) return 'Unavailable';
   return `$${value.toLocaleString(undefined, { maximumFractionDigits: 6 })}/M`;
+}
+
+function formatReasoningProfile(profile: ReasoningProfile): string {
+  if (profile === 'provider-default') return 'Provider default';
+  if (profile === 'off') return 'Off';
+  return profile === 'xhigh'
+    ? 'XHigh'
+    : `${profile[0]!.toUpperCase()}${profile.slice(1)}`;
 }
 
 function serializeExportDocument(document: ExperimentExportDocument): string {
@@ -2695,6 +3014,8 @@ function formatTurn(
 ) {
   if (turn.outcome === 'provider-error')
     return `Provider failure · ${turn.failure.message}`;
+  if (turn.outcome === 'operator-skipped')
+    return `Operator skipped · ${turn.failure.message}`;
   const communication = !turn.communicationResult.requested
     ? ''
     : turn.communicationResult.accepted

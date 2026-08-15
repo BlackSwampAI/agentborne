@@ -3,6 +3,7 @@ import { gridDistance } from 'h3-js';
 import {
   agentDecisionSchema,
   agentObservationSchema,
+  modelIdSchema,
   providerDecisionEnvelopeSchema,
   OPENROUTER_MAX_OUTPUT_TOKENS,
   OPENROUTER_PROVIDER_TIMEOUT_MS,
@@ -11,6 +12,7 @@ import {
   type ProviderFailure,
   type ProviderDecisionEnvelope,
   type ProviderMetadata,
+  type ReasoningProfile,
 } from '@agentborne/shared';
 
 export { applyProviderEnvironmentFile } from './provider-environment';
@@ -41,6 +43,7 @@ export interface AgentProvider {
 }
 
 export interface AgentProviderDecisionOptions {
+  reasoningProfile?: ReasoningProfile;
   signal?: AbortSignal;
 }
 
@@ -86,6 +89,7 @@ const wireDecisionSchema = z
 export function buildOpenRouterRequest(
   observationInput: AgentObservation,
   model: string,
+  reasoningProfile: ReasoningProfile = 'provider-default',
 ) {
   const observation = agentObservationSchema.parse(observationInput);
   return {
@@ -106,6 +110,20 @@ export function buildOpenRouterRequest(
     ],
     max_tokens: OPENROUTER_MAX_OUTPUT_TOKENS,
     stream: false,
+    ...reasoningRequest(reasoningProfile),
+  };
+}
+
+function reasoningRequest(profile: ReasoningProfile) {
+  if (profile === 'provider-default') return {};
+  if (profile === 'off')
+    return { reasoning: { enabled: false as const, exclude: true as const } };
+  return {
+    reasoning: {
+      enabled: true as const,
+      effort: profile,
+      exclude: true as const,
+    },
   };
 }
 
@@ -343,7 +361,11 @@ export class OpenRouterAgentProvider implements AgentProvider {
     const cancel = () => controller.abort();
     options.signal?.addEventListener('abort', cancel, { once: true });
     try {
-      const providerRequest = buildOpenRouterRequest(observation, model);
+      const providerRequest = buildOpenRouterRequest(
+        observation,
+        model,
+        options.reasoningProfile,
+      );
       const requestBody = JSON.stringify(providerRequest);
       let response: Response;
       try {
@@ -401,8 +423,7 @@ export class OpenRouterAgentProvider implements AgentProvider {
           diagnostics ?? {
             httpStatus: response.status,
             model:
-              sanitizeDiagnosticMessage(model, sensitiveValues, 200) ??
-              '[redacted]',
+              safeDiagnosticModelId(model, sensitiveValues) ?? '[redacted]',
           },
         );
       }
@@ -572,11 +593,9 @@ function providerMetadataFromResponse(
       160,
     );
   const selectedModel =
-    sanitizeDiagnosticMessage(fallbackModel, sensitiveValues, 120) ??
-    fallbackModel;
+    safeDiagnosticModelId(fallbackModel, sensitiveValues) ?? fallbackModel;
   const resolvedModel =
-    sanitizeDiagnosticMessage(root?.model, sensitiveValues, 120) ??
-    selectedModel;
+    safeDiagnosticModelId(root?.model, sensitiveValues) ?? selectedModel;
   return {
     provider: 'openrouter',
     model: selectedModel,
@@ -613,6 +632,15 @@ function providerMetadataFromResponse(
       ? {}
       : { costCredits: parsedUsage.cost }),
   };
+}
+
+function safeDiagnosticModelId(
+  value: unknown,
+  sensitiveValues: string[],
+): string | undefined {
+  const validated = modelIdSchema.safeParse(value);
+  if (validated.success) return validated.data;
+  return sanitizeDiagnosticMessage(value, sensitiveValues, 120);
 }
 
 function requestFailure(
@@ -717,8 +745,7 @@ async function readOpenRouterFailureDiagnostics({
     providerCode,
     providerMessage,
     requestId,
-    model:
-      sanitizeDiagnosticMessage(model, sensitiveValues, 120) ?? '[unavailable]',
+    model: safeDiagnosticModelId(model, sensitiveValues) ?? '[unavailable]',
   };
 }
 

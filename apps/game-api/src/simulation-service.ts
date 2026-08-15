@@ -14,6 +14,7 @@ import {
   experimentExportDocumentSchema,
   experimentExportPreviewSchema,
   experimentModelConfigurationSchema,
+  modelSupportsReasoningProfile,
   updateExperimentModelsRequestSchema,
   h3CellSchema,
   RECENT_DIRECT_MESSAGE_LIMIT,
@@ -33,10 +34,12 @@ import {
   type ExperimentModelConfiguration,
   type CompatibleModel,
   type ModelId,
+  type ModelAttempt,
   type ExperimentConfigurationEvent,
   type H3Cell,
   type ProviderFailure,
   type ProviderMetadata,
+  type ReasoningProfile,
   type SimulationSnapshot,
   type SimulationStatus,
   type WorldEvent,
@@ -66,6 +69,15 @@ const RESET_GENERATED_AT = '2026-08-13T12:00:00.000Z';
 const MAX_TURN_HISTORY = 120;
 const MAX_WORLD_EVENT_HISTORY = 120;
 const DEFAULT_EXPERIMENT_RETENTION = 5_000;
+
+interface PendingFailedTurn {
+  turnNumber: number;
+  agentId: AgentId;
+  startedAt: string;
+  observation: AgentObservation;
+  failure: ProviderFailure;
+  attempts: ModelAttempt[];
+}
 
 export class SimulationConflictError extends Error {
   constructor(message: string) {
@@ -126,6 +138,7 @@ export class SimulationService {
   #activeAgentId: AgentId | null = null;
   #activeRequestController: AbortController | null = null;
   #cancellationRequested = false;
+  #pendingFailedTurn: PendingFailedTurn | null = null;
   #experimentId: ExperimentId;
   #experimentStartedAt: string;
   #experimentTurns: AgentTurnRecord[] = [];
@@ -178,6 +191,7 @@ export class SimulationService {
         : null);
     this.#modelConfiguration = experimentModelConfigurationSchema.parse({
       globalModelId: scriptedModel,
+      globalReasoningProfile: 'provider-default',
       overrides: [],
       locked: false,
     });
@@ -196,6 +210,14 @@ export class SimulationService {
       nextAgentId: next.id,
       activeAgentId: this.#activeAgentId,
       cancellationRequested: this.#cancellationRequested,
+      pendingFailedTurn: this.#pendingFailedTurn
+        ? {
+            turnNumber: this.#pendingFailedTurn.turnNumber,
+            agentId: this.#pendingFailedTurn.agentId,
+            failure: this.#pendingFailedTurn.failure,
+            attempts: this.#pendingFailedTurn.attempts,
+          }
+        : null,
       status: this.#status,
       providerMode: this.#provider.mode,
       providerConfigured: this.#provider.configured,
@@ -249,6 +271,7 @@ export class SimulationService {
     this.#activeAgentId = null;
     this.#activeRequestController = null;
     this.#cancellationRequested = false;
+    this.#pendingFailedTurn = null;
     this.#experimentId = experimentIdSchema.parse(this.#createExperimentId());
     this.#experimentStartedAt = this.#now();
     this.#experimentTurns = [];
@@ -301,6 +324,24 @@ export class SimulationService {
         'models_unavailable',
         'One or more selected models are not in the compatible OpenRouter catalog.',
       );
+    if (
+      (parsed.data.globalModelId !== null &&
+        !modelSupportsReasoningProfile(
+          this.#availableModels.get(parsed.data.globalModelId),
+          parsed.data.globalReasoningProfile,
+        )) ||
+      parsed.data.overrides.some(
+        ({ modelId, reasoningProfile }) =>
+          !modelSupportsReasoningProfile(
+            this.#availableModels.get(modelId),
+            reasoningProfile,
+          ),
+      )
+    )
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'A selected reasoning profile is not advertised by its model.',
+      );
     const nextConfiguration = experimentModelConfigurationSchema.parse({
       ...parsed.data,
       locked: false,
@@ -333,14 +374,15 @@ export class SimulationService {
       );
     const root = document as Record<string, unknown>;
     const version = root.schemaVersion;
-    if (version !== 5 && version !== 6)
+    if (version !== 5 && version !== 6 && version !== 7)
       throw new SimulationValidationError(
         'invalid_model_configuration',
-        'Only schema-version 5 or 6 experiment exports can be imported.',
+        'Only schema-version 5, 6, or 7 experiment exports can be imported.',
       );
     if (version === 5) {
       const legacyConfiguration: ExperimentModelConfiguration = {
         globalModelId: null,
+        globalReasoningProfile: 'provider-default',
         overrides: [],
         locked: false,
       };
@@ -380,6 +422,7 @@ export class SimulationService {
       );
     const importedConfiguration: ExperimentModelConfiguration = {
       globalModelId: configuration.data.globalModelId,
+      globalReasoningProfile: configuration.data.globalReasoningProfile,
       overrides: structuredClone(configuration.data.overrides),
       locked: false,
     };
@@ -395,7 +438,7 @@ export class SimulationService {
         ({ available }) => available,
       )
         ? 'Model assignments imported.'
-        : 'Model assignments imported; unavailable models require explicit replacement.',
+        : 'Model assignments imported; unavailable models or reasoning profiles require explicit replacement.',
     };
   }
 
@@ -515,7 +558,10 @@ export class SimulationService {
     return this.getSnapshot();
   }
 
-  async verifyModel(modelId: ModelId): Promise<ProviderMetadata> {
+  async verifyModel(
+    modelId: ModelId,
+    reasoningProfile: ReasoningProfile,
+  ): Promise<ProviderMetadata> {
     if (this.#busy || this.#verificationBusy)
       throw new SimulationConflictError(
         'A provider request is already in progress.',
@@ -526,6 +572,11 @@ export class SimulationService {
         'models_unavailable',
         'The selected model is not in the compatible OpenRouter catalog.',
       );
+    if (!modelSupportsReasoningProfile(model, reasoningProfile))
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'The selected reasoning profile is not advertised by this model.',
+      );
     const agents = [...this.#state.agents.values()];
     const agent = agents[this.#cursor % agents.length];
     if (!agent) throw new Error('The development world has no agents.');
@@ -534,6 +585,7 @@ export class SimulationService {
       const result = await this.#provider.decide(
         structuredClone(this.#buildObservation(agent.id)),
         modelId,
+        { reasoningProfile },
       );
       return result.metadata;
     } finally {
@@ -542,6 +594,51 @@ export class SimulationService {
   }
 
   async executeNextTurn(): Promise<AgentTurnRecord> {
+    if (this.#pendingFailedTurn)
+      throw new SimulationConflictError(
+        'The failed turn must be retried or skipped before starting another turn.',
+      );
+    return this.#executeTurnAttempt('initial');
+  }
+
+  async retryFailedTurn(): Promise<AgentTurnRecord> {
+    if (!this.#pendingFailedTurn)
+      throw new SimulationConflictError(
+        'There is no failed turn awaiting a manual retry.',
+      );
+    return this.#executeTurnAttempt('manual-retry');
+  }
+
+  skipFailedTurn(): AgentTurnRecord {
+    if (this.#busy || this.#verificationBusy)
+      throw new SimulationConflictError('A model request is still active.');
+    const pending = this.#pendingFailedTurn;
+    if (!pending)
+      throw new SimulationConflictError(
+        'There is no failed turn awaiting an operator decision.',
+      );
+    const agents = [...this.#state.agents.values()];
+    const record = agentTurnRecordSchema.parse({
+      turnNumber: pending.turnNumber,
+      agentId: pending.agentId,
+      startedAt: pending.startedAt,
+      completedAt: this.#now(),
+      observation: pending.observation,
+      outcome: 'operator-skipped',
+      failure: pending.failure,
+      provider: pending.attempts.at(-1)?.provider,
+      modelAttempts: pending.attempts,
+      allianceEvents: [],
+    });
+    this.#pendingFailedTurn = null;
+    this.#commitCompletedTurn(record, this.#state, agents.length);
+    this.#status = 'paused';
+    return record;
+  }
+
+  async #executeTurnAttempt(
+    attemptKind: 'initial' | 'manual-retry',
+  ): Promise<AgentTurnRecord> {
     if (this.#busy || this.#verificationBusy) {
       throw new SimulationConflictError('A model turn is already in progress.');
     }
@@ -554,7 +651,10 @@ export class SimulationService {
         'models_unavailable',
         'Every agent requires an available compatible model before the experiment can run.',
       );
-    const agent = agents[this.#cursor % agents.length];
+    const pending = this.#pendingFailedTurn;
+    const agent = pending
+      ? agents.find(({ id }) => id === pending.agentId)
+      : agents[this.#cursor % agents.length];
     if (!agent) throw new Error('The development world has no agents.');
 
     this.#busy = true;
@@ -562,20 +662,24 @@ export class SimulationService {
     this.#activeRequestController = new AbortController();
     this.#cancellationRequested = false;
     this.#status = 'waiting-for-model';
+    const startedAt = pending?.startedAt ?? this.#now();
+    const observation =
+      pending?.observation ?? this.#buildObservation(agent.id);
+    const turnNumber = pending?.turnNumber ?? this.#completedTurnCount + 1;
+    const attemptStartedAt = this.#now();
+    const resolvedModel = this.#resolvedModel(agent.id);
+    const selectedModel = resolvedModel.modelId!;
+    let providerResult: ProviderDecision | undefined;
 
     try {
-      const startedAt = this.#now();
-      const observation = this.#buildObservation(agent.id);
-      const turnNumber = this.#completedTurnCount + 1;
       const providerObservation = structuredClone(observation);
-      let providerResult: ProviderDecision;
 
       try {
-        const selectedModel = this.#resolvedModel(agent.id).modelId!;
         providerResult = await this.#provider.decide(
           providerObservation,
           selectedModel,
           {
+            reasoningProfile: resolvedModel.reasoningProfile,
             signal: this.#activeRequestController.signal,
           },
         );
@@ -592,6 +696,30 @@ export class SimulationService {
           this.#status = 'paused';
           throw new SimulationTurnCancelledError();
         }
+        const attemptProvider = providerError.metadata ?? {
+          provider: this.#provider.mode,
+          model: providerError.failure.model ?? selectedModel,
+          latencyMs: providerError.failure.latencyMs ?? 0,
+        };
+        const attempt = {
+          attemptNumber: (pending?.attempts.length ?? 0) + 1,
+          kind: attemptKind,
+          startedAt: attemptStartedAt,
+          completedAt: this.#now(),
+          modelId: selectedModel,
+          reasoningProfile: resolvedModel.reasoningProfile,
+          failure: providerError.failure,
+          provider: attemptProvider,
+        } satisfies ModelAttempt;
+        const attempts = [...(pending?.attempts ?? []), attempt];
+        this.#pendingFailedTurn = {
+          turnNumber,
+          agentId: agent.id,
+          startedAt,
+          observation,
+          failure: providerError.failure,
+          attempts,
+        };
         const record = agentTurnRecordSchema.parse({
           turnNumber,
           agentId: agent.id,
@@ -600,16 +728,19 @@ export class SimulationService {
           observation,
           outcome: 'provider-error',
           failure: providerError.failure,
-          provider: providerError.metadata,
+          provider: attemptProvider,
+          modelAttempts: attempts,
           allianceEvents: [],
         });
-        this.#commitCompletedTurn(record, this.#state, agents.length);
         this.#status =
           providerError.failure.code === 'configuration'
             ? 'configuration-error'
             : 'provider-error';
         return record;
       }
+
+      if (!providerResult)
+        throw new Error('The provider completed without a decision result.');
 
       const preActionState = this.#state;
       const occurredAt = this.#now();
@@ -656,59 +787,109 @@ export class SimulationService {
         turnNumber,
         context,
       );
-      let record: AgentTurnRecord;
       const candidateState = {
         ...stateAfterExpiration,
         events: stateAfterExpiration.events.slice(-MAX_WORLD_EVENT_HISTORY),
       };
 
-      if (appliedAction.result.accepted) {
-        record = agentTurnRecordSchema.parse({
-          turnNumber,
-          agentId: agent.id,
-          startedAt,
-          completedAt: this.#now(),
-          observation,
-          outcome: 'accepted',
-          worldAction: providerResult.decision.worldAction,
-          communication,
-          diplomacy,
-          summary: providerResult.decision.summary,
-          worldActionResult: appliedAction.result,
-          communicationResult: appliedCommunication.result,
-          diplomacyResult: appliedDiplomacy.result,
-          allianceEvents: allianceEventsSince(
-            preActionState,
-            stateAfterExpiration,
-          ),
-          provider: providerResult.metadata,
-        });
-      } else {
-        record = agentTurnRecordSchema.parse({
-          turnNumber,
-          agentId: agent.id,
-          startedAt,
-          completedAt: this.#now(),
-          observation,
-          outcome: 'rejected',
-          worldAction: providerResult.decision.worldAction,
-          communication,
-          diplomacy,
-          summary: providerResult.decision.summary,
-          worldActionResult: appliedAction.result,
-          communicationResult: appliedCommunication.result,
-          diplomacyResult: appliedDiplomacy.result,
-          allianceEvents: allianceEventsSince(
-            preActionState,
-            stateAfterExpiration,
-          ),
-          provider: providerResult.metadata,
-        });
-      }
+      const completed = {
+        turnNumber,
+        agentId: agent.id,
+        startedAt,
+        completedAt: this.#now(),
+        observation,
+        worldAction: providerResult.decision.worldAction,
+        communication,
+        diplomacy,
+        summary: providerResult.decision.summary,
+        worldActionResult: appliedAction.result,
+        communicationResult: appliedCommunication.result,
+        diplomacyResult: appliedDiplomacy.result,
+        allianceEvents: allianceEventsSince(
+          preActionState,
+          stateAfterExpiration,
+        ),
+        provider: providerResult.metadata,
+        modelAttempts: [
+          ...(pending?.attempts ?? []),
+          {
+            attemptNumber: (pending?.attempts.length ?? 0) + 1,
+            kind: attemptKind,
+            startedAt: attemptStartedAt,
+            completedAt: this.#now(),
+            modelId: selectedModel,
+            reasoningProfile: resolvedModel.reasoningProfile,
+            provider: providerResult.metadata,
+          },
+        ],
+      };
+      const record = agentTurnRecordSchema.parse(
+        appliedAction.result.accepted
+          ? {
+              ...completed,
+              outcome: 'accepted',
+              worldActionResult: appliedAction.result,
+            }
+          : {
+              ...completed,
+              outcome: 'rejected',
+              worldActionResult: appliedAction.result,
+            },
+      );
 
+      this.#pendingFailedTurn = null;
       this.#commitCompletedTurn(record, candidateState, agents.length);
       this.#status = 'paused';
       return record;
+    } catch (error) {
+      if (
+        error instanceof SimulationTurnCancelledError ||
+        !(error instanceof Error) ||
+        error.name !== 'ZodError'
+      )
+        throw error;
+      const failure: ProviderFailure = {
+        code: 'simulation-validation',
+        message: 'The model decision failed post-provider validation.',
+        retryable: true,
+        model: selectedModel,
+      };
+      const attempt = {
+        attemptNumber: (pending?.attempts.length ?? 0) + 1,
+        kind: attemptKind,
+        startedAt: attemptStartedAt,
+        completedAt: this.#now(),
+        modelId: selectedModel,
+        reasoningProfile: resolvedModel.reasoningProfile,
+        failure,
+        provider: {
+          provider: this.#provider.mode,
+          model: selectedModel,
+          latencyMs: 0,
+        },
+      } satisfies ModelAttempt;
+      const attempts = [...(pending?.attempts ?? []), attempt];
+      this.#pendingFailedTurn = {
+        turnNumber,
+        agentId: agent.id,
+        startedAt,
+        observation,
+        failure,
+        attempts,
+      };
+      this.#status = 'provider-error';
+      return agentTurnRecordSchema.parse({
+        turnNumber,
+        agentId: agent.id,
+        startedAt,
+        completedAt: this.#now(),
+        observation,
+        outcome: 'provider-error',
+        failure,
+        provider: attempt.provider,
+        modelAttempts: attempts,
+        allianceEvents: [],
+      });
     } finally {
       this.#busy = false;
       this.#activeAgentId = null;
@@ -749,20 +930,25 @@ export class SimulationService {
     const timestamp = this.#now();
     const effectiveTurn = this.#completedTurnCount + 1;
     const events: ExperimentConfigurationEvent[] = [];
-    if (previous.globalModelId !== next.globalModelId)
+    if (
+      previous.globalModelId !== next.globalModelId ||
+      previous.globalReasoningProfile !== next.globalReasoningProfile
+    )
       events.push({
         type: 'model-assignment-changed',
         timestamp,
         scope: 'global',
         previousModelId: previous.globalModelId,
         newModelId: next.globalModelId,
+        previousReasoningProfile: previous.globalReasoningProfile,
+        newReasoningProfile: next.globalReasoningProfile,
         effectiveTurn,
       });
     const previousOverrides = new Map(
-      previous.overrides.map(({ agentId, modelId }) => [agentId, modelId]),
+      previous.overrides.map((override) => [override.agentId, override]),
     );
     const nextOverrides = new Map(
-      next.overrides.map(({ agentId, modelId }) => [agentId, modelId]),
+      next.overrides.map((override) => [override.agentId, override]),
     );
     for (const agentId of new Set([
       ...previousOverrides.keys(),
@@ -770,14 +956,22 @@ export class SimulationService {
     ])) {
       const previousOverride = previousOverrides.get(agentId);
       const nextOverride = nextOverrides.get(agentId);
-      if (previousOverride === nextOverride) continue;
+      if (
+        previousOverride?.modelId === nextOverride?.modelId &&
+        previousOverride?.reasoningProfile === nextOverride?.reasoningProfile
+      )
+        continue;
       events.push({
         type: 'model-assignment-changed',
         timestamp,
         scope: 'agent',
         agentId,
-        previousModelId: previousOverride ?? previous.globalModelId,
-        newModelId: nextOverride ?? next.globalModelId,
+        previousModelId: previousOverride?.modelId ?? previous.globalModelId,
+        newModelId: nextOverride?.modelId ?? next.globalModelId,
+        previousReasoningProfile:
+          previousOverride?.reasoningProfile ?? previous.globalReasoningProfile,
+        newReasoningProfile:
+          nextOverride?.reasoningProfile ?? next.globalReasoningProfile,
         effectiveTurn,
       });
     }
@@ -819,22 +1013,34 @@ export class SimulationService {
       (candidate) => candidate.agentId === agentId,
     );
     const modelId = override?.modelId ?? this.#modelConfiguration.globalModelId;
+    const reasoningProfile =
+      override?.reasoningProfile ??
+      this.#modelConfiguration.globalReasoningProfile;
     const source = override
       ? ('override' as const)
       : modelId
         ? ('global' as const)
         : ('missing' as const);
-    const available = modelId !== null && this.#availableModelIds.has(modelId);
+    const modelAvailable =
+      modelId !== null && this.#availableModelIds.has(modelId);
+    const reasoningAvailable = modelSupportsReasoningProfile(
+      modelId === null ? undefined : this.#availableModels.get(modelId),
+      reasoningProfile,
+    );
+    const available = modelAvailable && reasoningAvailable;
     return {
       agentId,
       modelId,
+      reasoningProfile,
       source,
       available,
       ...(modelId === null
         ? { issue: 'missing' as const }
-        : available
-          ? {}
-          : { issue: 'unavailable' as const }),
+        : !modelAvailable
+          ? { issue: 'unavailable' as const }
+          : available
+            ? {}
+            : { issue: 'reasoning-unavailable' as const }),
     };
   }
 

@@ -131,7 +131,7 @@ export function createApp(options: AppOptions = {}) {
         }),
         400,
       );
-    const cacheKey = `${request.data.modelId}:${AGENT_DECISION_CONTRACT_VERSION}`;
+    const cacheKey = `${request.data.modelId}:${request.data.reasoningProfile}:${AGENT_DECISION_CONTRACT_VERSION}`;
     const cached = modelVerifications.get(cacheKey);
     if (cached && !request.data.force)
       return context.json(
@@ -142,9 +142,13 @@ export function createApp(options: AppOptions = {}) {
     );
     service.setCompatibleModels(currentCatalog.models);
     try {
-      const provider = await service.verifyModel(request.data.modelId);
+      const provider = await service.verifyModel(
+        request.data.modelId,
+        request.data.reasoningProfile,
+      );
       const verification = modelVerificationSchema.parse({
         modelId: request.data.modelId,
+        reasoningProfile: request.data.reasoningProfile,
         contractVersion: AGENT_DECISION_CONTRACT_VERSION,
         status: 'verified',
         testedAt: new Date().toISOString(),
@@ -156,6 +160,7 @@ export function createApp(options: AppOptions = {}) {
       if (error instanceof AgentProviderError) {
         const verification = modelVerificationSchema.parse({
           modelId: request.data.modelId,
+          reasoningProfile: request.data.reasoningProfile,
           contractVersion: AGENT_DECISION_CONTRACT_VERSION,
           status: 'failed',
           testedAt: new Date().toISOString(),
@@ -275,6 +280,13 @@ export function createApp(options: AppOptions = {}) {
           }),
           409,
         );
+      if (error instanceof SimulationValidationError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'invalid_request', message: error.message },
+          }),
+          400,
+        );
       throw error;
     }
   });
@@ -297,6 +309,54 @@ export function createApp(options: AppOptions = {}) {
       throw error;
     }
   });
+
+  const respondToManualTurn = async (
+    context: Context,
+    operation: 'retry' | 'skip',
+  ) => {
+    try {
+      const turn =
+        operation === 'retry'
+          ? await service.retryFailedTurn()
+          : service.skipFailedTurn();
+      return context.json(
+        singleTurnResponseSchema.parse({
+          snapshot: service.getSnapshot(),
+          turn,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SimulationTurnCancelledError)
+        return context.json(
+          cancelledTurnResponseSchema.parse({
+            snapshot: service.getSnapshot(),
+            cancelled: true,
+          }),
+        );
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'turn_conflict', message: error.message },
+          }),
+          409,
+        );
+      if (error instanceof SimulationValidationError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: error.code, message: error.message },
+          }),
+          409,
+        );
+      throw error;
+    }
+  };
+
+  app.post('/api/simulation/turn/retry', (context) =>
+    respondToManualTurn(context, 'retry'),
+  );
+  app.post('/api/simulation/turn/skip', (context) =>
+    respondToManualTurn(context, 'skip'),
+  );
 
   app.post('/api/simulation/reset', (context) => {
     try {

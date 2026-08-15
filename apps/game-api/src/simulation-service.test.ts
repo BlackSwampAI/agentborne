@@ -9,6 +9,7 @@ import {
 import {
   PERSONALITY_MAX_LENGTH,
   agentIdSchema,
+  agentTurnRecordSchema,
   experimentExportDocumentSchema,
   h3CellSchema,
   type AgentObservation,
@@ -23,7 +24,10 @@ import {
   SimulationTurnCancelledError,
   SimulationValidationError,
 } from './simulation-service';
-import { serializeExperimentExport } from './experiment-export';
+import {
+  calculateExperimentMetrics,
+  serializeExperimentExport,
+} from './experiment-export';
 
 const now = () => '2026-08-13T12:00:01.000Z';
 const createEventId = () => '67aa21b9-fc78-4b04-9f92-9862bf346f96';
@@ -37,6 +41,10 @@ const compatibleModels: CompatibleModel[] = [
     outputPricePerToken: '0.000002',
     supportedParameters: ['max_tokens'],
     isFree: false,
+    reasoning: {
+      mandatory: false,
+      supportedEfforts: ['xhigh', 'low', 'medium'],
+    },
   },
   {
     id: 'author/override-model',
@@ -47,6 +55,10 @@ const compatibleModels: CompatibleModel[] = [
     outputPricePerToken: '0',
     supportedParameters: ['max_tokens'],
     isFree: true,
+    reasoning: {
+      mandatory: true,
+      supportedEfforts: ['high', 'low'],
+    },
   },
 ];
 
@@ -364,7 +376,7 @@ describe('SimulationService', () => {
       actions: ['capture'],
       level: 'minimal',
     });
-    expect(victimExport.schemaVersion).toBe(6);
+    expect(victimExport.schemaVersion).toBe(7);
     expect(victimExport.turns).toHaveLength(0);
     expect(victimExport.selection).toMatchObject({
       matchingTurnCount: 0,
@@ -474,7 +486,7 @@ describe('SimulationService', () => {
       outcomes: ['rejected'],
       actions: ['capture'],
     });
-    expect(exported.schemaVersion).toBe(6);
+    expect(exported.schemaVersion).toBe(7);
     expect(exported.turns).toMatchObject([
       {
         outcome: 'rejected',
@@ -1045,7 +1057,7 @@ describe('SimulationService', () => {
         controlChanges: false,
       },
     });
-    expect(minimal.schemaVersion).toBe(6);
+    expect(minimal.schemaVersion).toBe(7);
     expect(
       experimentExportDocumentSchema.safeParse({
         ...minimal,
@@ -1266,6 +1278,7 @@ describe('SimulationService', () => {
     });
     if (
       turn.outcome === 'provider-error' ||
+      turn.outcome === 'operator-skipped' ||
       !turn.communicationResult.requested ||
       turn.communicationResult.accepted
     )
@@ -1313,7 +1326,7 @@ describe('SimulationService', () => {
     ];
     expect(
       turns.map((turn) =>
-        turn.outcome === 'provider-error'
+        turn.outcome === 'provider-error' || turn.outcome === 'operator-skipped'
           ? undefined
           : turn.communicationResult,
       ),
@@ -1447,6 +1460,8 @@ describe('SimulationService', () => {
         { worldAction: { type: 'wait' }, summary: 'Wait.' },
         { worldAction: { type: 'wait' }, summary: 'Wait.' },
         { worldAction: { type: 'wait' }, summary: 'Observe sender.' },
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
+        { worldAction: { type: 'wait' }, summary: 'Observe sender again.' },
       ]),
     );
     const before = simulation.getSnapshot().world;
@@ -1851,7 +1866,7 @@ describe('SimulationService', () => {
     expect(rejected.getSnapshot().turnNumber).toBe(2);
   });
 
-  it('records a sanitized provider failure, preserves the world, and continues', async () => {
+  it('manually retries the same failed logical turn without mutating the world', async () => {
     let calls = 0;
     const provider: AgentProvider = {
       mode: 'scripted-test',
@@ -1860,11 +1875,25 @@ describe('SimulationService', () => {
       async decide(): Promise<ProviderDecision> {
         calls += 1;
         if (calls === 1)
-          throw new AgentProviderError({
-            code: 'timeout',
-            message: 'The model request timed out.',
-            retryable: true,
-          });
+          throw new AgentProviderError(
+            {
+              code: 'timeout',
+              message: 'The model request timed out.',
+              retryable: true,
+            },
+            {
+              provider: 'scripted-test',
+              model: 'failure-test',
+              latencyMs: 10,
+              promptTokens: 10,
+              completionTokens: 2,
+              reasoningTokens: 1,
+              cachedReadTokens: 3,
+              cacheWriteTokens: 4,
+              totalTokens: 12,
+              costCredits: 0.1,
+            },
+          );
         return {
           decision: {
             worldAction: { type: 'wait' },
@@ -1873,7 +1902,14 @@ describe('SimulationService', () => {
           metadata: {
             provider: 'scripted-test',
             model: 'failure-test',
-            latencyMs: 0,
+            latencyMs: 20,
+            promptTokens: 20,
+            completionTokens: 5,
+            reasoningTokens: 2,
+            cachedReadTokens: 6,
+            cacheWriteTokens: 8,
+            totalTokens: 25,
+            costCredits: 0.2,
           },
         };
       },
@@ -1885,11 +1921,179 @@ describe('SimulationService', () => {
       outcome: 'provider-error',
     });
     expect(simulation.getSnapshot().world).toEqual(before);
-    expect(await simulation.executeNextTurn()).toMatchObject({
-      turnNumber: 2,
-      outcome: 'accepted',
+    expect(simulation.getSnapshot().turnNumber).toBe(0);
+    expect(simulation.getSnapshot().pendingFailedTurn).toMatchObject({
+      turnNumber: 1,
+      attempts: [{ kind: 'initial' }],
     });
-    expect(simulation.getSnapshot().turnNumber).toBe(2);
+    expect(await simulation.retryFailedTurn()).toMatchObject({
+      turnNumber: 1,
+      outcome: 'accepted',
+      modelAttempts: [{ kind: 'initial' }, { kind: 'manual-retry' }],
+    });
+    expect(simulation.getSnapshot().turnNumber).toBe(1);
+    expect(simulation.getSnapshot().experiment.metrics.aggregate).toMatchObject(
+      {
+        totalTurns: 1,
+        accepted: 1,
+        rejected: 0,
+        providerErrors: 0,
+        operatorSkipped: 0,
+        modelCalls: 2,
+        failedModelAttempts: 1,
+        manualRetryAttempts: 1,
+        retriedTurns: 1,
+        recoveredByRetry: 1,
+        tokens: {
+          promptTokens: 30,
+          completionTokens: 7,
+          reasoningTokens: 3,
+          cachedReadTokens: 9,
+          cacheWriteTokens: 12,
+          totalTokens: 37,
+        },
+        knownCostCredits: 0.3,
+      },
+    );
+  });
+
+  it('skips one failed logical turn without applying an action and exports its attempts', async () => {
+    const simulation = service({
+      mode: 'scripted-test',
+      model: 'failure-test',
+      configured: true,
+      async decide(_observation, model) {
+        throw new AgentProviderError(
+          {
+            code: 'timeout',
+            message: 'Timed out.',
+            retryable: true,
+            model,
+          },
+          {
+            provider: 'scripted-test',
+            model,
+            latencyMs: 5,
+            promptTokens: 4,
+            completionTokens: 1,
+            totalTokens: 5,
+            reasoningTokens: 0,
+            cachedReadTokens: 0,
+            cacheWriteTokens: 0,
+            costCredits: 0.01,
+          },
+        );
+      },
+    });
+    const before = simulation.getSnapshot().world;
+    await simulation.executeNextTurn();
+    await simulation.retryFailedTurn();
+    await simulation.retryFailedTurn();
+    const skipped = simulation.skipFailedTurn();
+    expect(skipped).toMatchObject({
+      turnNumber: 1,
+      outcome: 'operator-skipped',
+      failure: { code: 'timeout', model: 'failure-test' },
+      provider: { model: 'failure-test' },
+      modelAttempts: [
+        { kind: 'initial' },
+        { kind: 'manual-retry' },
+        { kind: 'manual-retry' },
+      ],
+    });
+    expect(simulation.getSnapshot().world).toEqual(before);
+    expect(simulation.getSnapshot()).toMatchObject({
+      turnNumber: 1,
+      status: 'paused',
+      pendingFailedTurn: null,
+    });
+    const exported = simulation.generateExperimentExport({
+      ...exportRequest('minimal'),
+      outcomes: ['operator-skipped'],
+    });
+    expect(exported.turns[0]).toMatchObject({
+      outcome: 'operator-skipped',
+      modelAttempts: [
+        { kind: 'initial' },
+        { kind: 'manual-retry' },
+        { kind: 'manual-retry' },
+      ],
+    });
+    expect(exported.metrics?.aggregate).toMatchObject({
+      totalTurns: 1,
+      accepted: 0,
+      rejected: 0,
+      providerErrors: 0,
+      operatorSkipped: 1,
+      modelCalls: 3,
+      failedModelAttempts: 3,
+      manualRetryAttempts: 2,
+      retriedTurns: 1,
+      recoveredByRetry: 0,
+      knownCostCredits: 0.03,
+    });
+  });
+
+  it('uses the operator current model and reasoning profile for one manual retry', async () => {
+    const calls: Array<{ model: string; reasoningProfile?: string }> = [];
+    const simulation = service({
+      mode: 'openrouter',
+      configured: true,
+      async decide(_observation, model, options) {
+        calls.push({ model, reasoningProfile: options?.reasoningProfile });
+        if (calls.length === 1)
+          throw new AgentProviderError({
+            code: 'timeout',
+            message: 'Timed out.',
+            retryable: true,
+            model,
+          });
+        return {
+          decision: { worldAction: { type: 'wait' }, summary: 'Recovered.' },
+          metadata: { provider: 'openrouter', model, latencyMs: 1 },
+        };
+      },
+    });
+    simulation.setCompatibleModels(compatibleModels);
+    simulation.updateModelConfiguration({
+      globalModelId: compatibleModels[0]!.id,
+      globalReasoningProfile: 'low',
+      overrides: [],
+    });
+    await simulation.executeNextTurn();
+    simulation.updateModelConfiguration({
+      globalModelId: compatibleModels[1]!.id,
+      globalReasoningProfile: 'low',
+      overrides: [],
+    });
+    await simulation.retryFailedTurn();
+    expect(calls).toEqual([
+      { model: compatibleModels[0]!.id, reasoningProfile: 'low' },
+      { model: compatibleModels[1]!.id, reasoningProfile: 'low' },
+    ]);
+  });
+
+  it('counts legacy top-level provider metadata once when attempts are absent', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'Legacy wait.' },
+      ]),
+    );
+    const turn = await simulation.executeNextTurn();
+    const legacy = agentTurnRecordSchema.parse({
+      ...turn,
+      modelAttempts: undefined,
+    });
+    const metrics = calculateExperimentMetrics([legacy], [legacy.agentId]);
+    expect(metrics.aggregate).toMatchObject({
+      totalTurns: 1,
+      accepted: 1,
+      providerErrors: 0,
+      operatorSkipped: 0,
+      modelCalls: 1,
+      failedModelAttempts: 0,
+      knownCostCredits: 0,
+    });
   });
 
   it('does not commit or advance after post-provider validation fails', async () => {
@@ -1928,7 +2132,10 @@ describe('SimulationService', () => {
     const simulation = service(provider);
     const before = simulation.getSnapshot();
 
-    await expect(simulation.executeNextTurn()).rejects.toBeDefined();
+    await expect(simulation.executeNextTurn()).resolves.toMatchObject({
+      outcome: 'provider-error',
+      failure: { code: 'simulation-validation' },
+    });
 
     const afterFailure = simulation.getSnapshot();
     expect(afterFailure.world).toEqual(before.world);
@@ -1937,10 +2144,11 @@ describe('SimulationService', () => {
     expect(afterFailure.nextAgentId).toBe(before.nextAgentId);
     expect(afterFailure).toMatchObject({
       activeAgentId: null,
-      status: 'paused',
+      status: 'provider-error',
+      pendingFailedTurn: { turnNumber: 1 },
     });
 
-    const recovered = await simulation.executeNextTurn();
+    const recovered = await simulation.retryFailedTurn();
     expect(recovered).toMatchObject({
       turnNumber: 1,
       agentId: before.nextAgentId,
@@ -2096,11 +2304,15 @@ describe('SimulationService', () => {
 
   it('resolves models per turn and records between-turn model changes', async () => {
     const usedModels: string[] = [];
+    const usedReasoningProfiles: string[] = [];
     const provider: AgentProvider = {
       mode: 'openrouter',
       configured: true,
-      async decide(_observation, model) {
+      async decide(_observation, model, options) {
         usedModels.push(model);
+        usedReasoningProfiles.push(
+          options?.reasoningProfile ?? 'provider-default',
+        );
         return {
           decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
           metadata: {
@@ -2120,17 +2332,26 @@ describe('SimulationService', () => {
     simulation.setCompatibleModels(compatibleModels);
     simulation.updateModelConfiguration({
       globalModelId: compatibleModels[0]!.id,
-      overrides: [{ agentId: second!.id, modelId: compatibleModels[1]!.id }],
+      globalReasoningProfile: 'xhigh',
+      overrides: [
+        {
+          agentId: second!.id,
+          modelId: compatibleModels[1]!.id,
+          reasoningProfile: 'low',
+        },
+      ],
     });
     expect(simulation.getSnapshot().resolvedModels.slice(0, 2)).toMatchObject([
       {
         agentId: first!.id,
         modelId: compatibleModels[0]!.id,
+        reasoningProfile: 'xhigh',
         source: 'global',
       },
       {
         agentId: second!.id,
         modelId: compatibleModels[1]!.id,
+        reasoningProfile: 'low',
         source: 'override',
       },
     ]);
@@ -2140,10 +2361,12 @@ describe('SimulationService', () => {
       compatibleModels[0]!.id,
       compatibleModels[1]!.id,
     ]);
+    expect(usedReasoningProfiles).toEqual(['xhigh', 'low']);
     expect(simulation.getSnapshot().modelConfiguration.locked).toBe(false);
     expect(() =>
       simulation.updateModelConfiguration({
         globalModelId: compatibleModels[1]!.id,
+        globalReasoningProfile: 'high',
         overrides: [],
       }),
     ).not.toThrow();
@@ -2152,7 +2375,14 @@ describe('SimulationService', () => {
     const fourth = simulation.getSnapshot().world.agents[3]!;
     simulation.updateModelConfiguration({
       globalModelId: compatibleModels[1]!.id,
-      overrides: [{ agentId: fourth.id, modelId: compatibleModels[0]!.id }],
+      globalReasoningProfile: 'high',
+      overrides: [
+        {
+          agentId: fourth.id,
+          modelId: compatibleModels[0]!.id,
+          reasoningProfile: 'medium',
+        },
+      ],
     });
     await simulation.executeNextTurn();
     expect(usedModels.at(-1)).toBe(compatibleModels[0]!.id);
@@ -2172,6 +2402,8 @@ describe('SimulationService', () => {
           agentId: fourth.id,
           previousModelId: compatibleModels[1]!.id,
           newModelId: compatibleModels[0]!.id,
+          previousReasoningProfile: 'high',
+          newReasoningProfile: 'medium',
           effectiveTurn: 4,
         }),
       ]),
@@ -2191,6 +2423,13 @@ describe('SimulationService', () => {
     });
     simulation.setCompatibleModels(compatibleModels);
     const agent = simulation.getSnapshot().world.agents[0]!;
+    expect(() =>
+      simulation.updateModelConfiguration({
+        globalModelId: compatibleModels[1]!.id,
+        globalReasoningProfile: 'off',
+        overrides: [],
+      }),
+    ).toThrow(SimulationValidationError);
     simulation.updateModelConfiguration({
       globalModelId: compatibleModels[0]!.id,
       overrides: [{ agentId: agent.id, modelId: compatibleModels[1]!.id }],
@@ -2210,6 +2449,25 @@ describe('SimulationService', () => {
     expect(exported.experiment.modelConfiguration).toEqual(
       simulation.getSnapshot().modelConfiguration,
     );
+    const olderVersionSix = structuredClone(exported) as unknown as {
+      schemaVersion: number;
+      experiment: {
+        modelConfiguration: {
+          globalReasoningProfile?: string;
+          overrides: Array<{ reasoningProfile?: string }>;
+        };
+      };
+    };
+    olderVersionSix.schemaVersion = 6;
+    delete olderVersionSix.experiment.modelConfiguration.globalReasoningProfile;
+    for (const override of olderVersionSix.experiment.modelConfiguration
+      .overrides)
+      delete override.reasoningProfile;
+    const migrated = simulation.importModelConfiguration(olderVersionSix);
+    expect(migrated.snapshot.modelConfiguration).toMatchObject({
+      globalReasoningProfile: 'provider-default',
+      overrides: [],
+    });
     const unavailable = structuredClone(exported);
     unavailable.experiment.modelConfiguration!.globalModelId = 'retired/model';
     const imported = simulation.importModelConfiguration(unavailable);

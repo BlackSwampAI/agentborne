@@ -70,6 +70,7 @@ export class ExperimentMetricAccumulator {
       }
     if (
       turn.outcome !== 'provider-error' &&
+      turn.outcome !== 'operator-skipped' &&
       turn.communicationResult.requested &&
       turn.communicationResult.accepted &&
       turn.communicationResult.event.channel === 'direct'
@@ -145,6 +146,12 @@ interface MutableMetrics {
   accepted: number;
   rejected: number;
   providerErrors: number;
+  operatorSkipped: number;
+  modelCalls: number;
+  failedModelAttempts: number;
+  manualRetryAttempts: number;
+  retriedTurns: number;
+  recoveredByRetry: number;
   requestedMoves: number;
   requestedInfections: number;
   requestedCaptures: number;
@@ -208,6 +215,12 @@ function mutableMetrics(): MutableMetrics {
     accepted: 0,
     rejected: 0,
     providerErrors: 0,
+    operatorSkipped: 0,
+    modelCalls: 0,
+    failedModelAttempts: 0,
+    manualRetryAttempts: 0,
+    retriedTurns: 0,
+    recoveredByRetry: 0,
     requestedMoves: 0,
     requestedInfections: 0,
     requestedCaptures: 0,
@@ -268,11 +281,14 @@ function addToMutable(
   aggregate = false,
 ): void {
   metrics.turns += 1;
-  metrics[
-    turn.outcome === 'provider-error' ? 'providerErrors' : turn.outcome
-  ] += 1;
+  if (turn.outcome === 'provider-error') metrics.providerErrors += 1;
+  else if (turn.outcome === 'operator-skipped') metrics.operatorSkipped += 1;
+  else metrics[turn.outcome] += 1;
   metrics.visited.add(turn.observation.currentCell.cell);
-  if (turn.outcome !== 'provider-error') {
+  if (
+    turn.outcome !== 'provider-error' &&
+    turn.outcome !== 'operator-skipped'
+  ) {
     if (turn.worldAction.type === 'move') metrics.requestedMoves += 1;
     if (turn.worldAction.type === 'infect') metrics.requestedInfections += 1;
     if (turn.worldAction.type === 'capture') metrics.requestedCaptures += 1;
@@ -362,21 +378,55 @@ function addToMutable(
     turn.worldActionResult.event.type === 'agent-waited'
   )
     metrics.acceptedWaits += 1;
-  if (turn.provider) {
-    metrics.latencyTotal += turn.provider.latencyMs;
-    metrics.latencyCount += 1;
+  const attempts = usageAttempts(turn);
+  metrics.modelCalls += attempts.length;
+  metrics.failedModelAttempts += attempts.filter(({ failed }) => failed).length;
+  metrics.manualRetryAttempts += attempts.filter(
+    ({ kind }) => kind === 'manual-retry',
+  ).length;
+  const retried = attempts.some(({ kind }) => kind === 'manual-retry');
+  if (retried) metrics.retriedTurns += 1;
+  if (
+    retried &&
+    turn.outcome !== 'provider-error' &&
+    turn.outcome !== 'operator-skipped'
+  )
+    metrics.recoveredByRetry += 1;
+  for (const { provider } of attempts) {
+    if (provider) {
+      metrics.latencyTotal += provider.latencyMs;
+      metrics.latencyCount += 1;
+    }
+    for (const field of metricTokenFields) {
+      const value = provider?.[field];
+      if (value === undefined) metrics.tokenFieldsComplete[field] = false;
+      else metrics.tokens[field] += value;
+    }
+    if (provider?.costCredits === undefined) metrics.unknownCost += 1;
+    else
+      metrics.knownCostCredits = addDecimalValue(
+        metrics.knownCostCredits,
+        provider.costCredits,
+      );
   }
-  for (const field of metricTokenFields) {
-    const value = turn.provider?.[field];
-    if (value === undefined) metrics.tokenFieldsComplete[field] = false;
-    else metrics.tokens[field] += value;
-  }
-  if (turn.provider?.costCredits === undefined) metrics.unknownCost += 1;
-  else
-    metrics.knownCostCredits = addDecimalValue(
-      metrics.knownCostCredits,
-      turn.provider.costCredits,
-    );
+}
+
+function usageAttempts(turn: AgentTurnRecord) {
+  if (turn.modelAttempts.length > 0)
+    return turn.modelAttempts.map((attempt) => ({
+      provider: attempt.provider,
+      failed: attempt.failure !== undefined,
+      kind: attempt.kind,
+    }));
+  return turn.provider
+    ? [
+        {
+          provider: turn.provider,
+          failed: turn.outcome === 'provider-error',
+          kind: 'initial' as const,
+        },
+      ]
+    : [];
 }
 
 function finalizeMutable(metrics: MutableMetrics) {
@@ -391,6 +441,12 @@ function finalizeMutable(metrics: MutableMetrics) {
     accepted: metrics.accepted,
     rejected: metrics.rejected,
     providerErrors: metrics.providerErrors,
+    operatorSkipped: metrics.operatorSkipped,
+    modelCalls: metrics.modelCalls,
+    failedModelAttempts: metrics.failedModelAttempts,
+    manualRetryAttempts: metrics.manualRetryAttempts,
+    retriedTurns: metrics.retriedTurns,
+    recoveredByRetry: metrics.recoveredByRetry,
     requestedMoves: metrics.requestedMoves,
     requestedInfections: metrics.requestedInfections,
     requestedCaptures: metrics.requestedCaptures,
@@ -493,7 +549,7 @@ export function createExperimentExport(
           },
     );
   const document: ExperimentExportDocument = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     generatedAt,
     experiment: {
       id: source.id,
@@ -709,6 +765,7 @@ function filterTurns(
       selected.has(turn.agentId) &&
       request.outcomes.includes(turn.outcome) &&
       (turn.outcome === 'provider-error' ||
+        turn.outcome === 'operator-skipped' ||
         request.actions.includes(turn.worldAction.type)),
   );
   if (request.turns.mode === 'range') {
@@ -731,6 +788,7 @@ function filterCommunications(
   let communications = source.turns.flatMap((turn) => {
     if (
       turn.outcome === 'provider-error' ||
+      turn.outcome === 'operator-skipped' ||
       !turn.communicationResult.requested
     )
       return [];
@@ -969,7 +1027,11 @@ function exportTurn(
     completedAt: turn.completedAt,
     agentId: turn.agentId,
     outcome: turn.outcome,
-    ...(turn.outcome === 'provider-error'
+    modelAttempts: turn.modelAttempts.map((attempt) => ({
+      ...structuredClone(attempt),
+      ...(includeProvider ? {} : { provider: undefined }),
+    })),
+    ...(turn.outcome === 'provider-error' || turn.outcome === 'operator-skipped'
       ? { failure: structuredClone(turn.failure) }
       : {
           worldAction: structuredClone(turn.worldAction),
@@ -1025,6 +1087,7 @@ function exportTurn(
   }
   if (
     turn.outcome !== 'provider-error' &&
+    turn.outcome !== 'operator-skipped' &&
     (includeValidation || includeEvent)
   ) {
     base.worldActionResult = structuredClone(turn.worldActionResult);
@@ -1075,15 +1138,16 @@ export function calculateExperimentMetrics(
     relevantControlChanges: readonly ExportedControlChange[],
     agentId?: AgentId,
   ) => {
-    const latencies = records.flatMap(({ provider }) =>
+    const attempts = records.flatMap(usageAttempts);
+    const latencies = attempts.flatMap(({ provider }) =>
       provider ? [provider.latencyMs] : [],
     );
     const tokens: Record<string, number> = {};
     for (const field of metricTokenFields) {
-      const known = records
+      const known = attempts
         .map(({ provider }) => provider?.[field])
         .filter((value): value is number => value !== undefined);
-      if (known.length === records.length && known.length > 0)
+      if (known.length === attempts.length && known.length > 0)
         tokens[field] = known.reduce((sum, value) => sum + value, 0);
     }
     const visited = new Set<string>();
@@ -1095,8 +1159,14 @@ export function calculateExperimentMetrics(
       )
         visited.add(turn.worldActionResult.event.toCell);
     }
-    const costs = records.flatMap(({ provider }) =>
+    const costs = attempts.flatMap(({ provider }) =>
       provider?.costCredits === undefined ? [] : [provider.costCredits],
+    );
+    const manualRetryAttempts = attempts.filter(
+      ({ kind }) => kind === 'manual-retry',
+    ).length;
+    const retriedTurns = records.filter((turn) =>
+      usageAttempts(turn).some(({ kind }) => kind === 'manual-retry'),
     );
     return {
       totalTurns: records.length,
@@ -1105,23 +1175,40 @@ export function calculateExperimentMetrics(
       providerErrors: records.filter(
         ({ outcome }) => outcome === 'provider-error',
       ).length,
+      operatorSkipped: records.filter(
+        ({ outcome }) => outcome === 'operator-skipped',
+      ).length,
+      modelCalls: attempts.length,
+      failedModelAttempts: attempts.filter(({ failed }) => failed).length,
+      manualRetryAttempts,
+      retriedTurns: retriedTurns.length,
+      recoveredByRetry: retriedTurns.filter(
+        ({ outcome }) =>
+          outcome !== 'provider-error' && outcome !== 'operator-skipped',
+      ).length,
       requestedMoves: records.filter(
         (turn) =>
-          turn.outcome !== 'provider-error' && turn.worldAction.type === 'move',
+          turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'operator-skipped' &&
+          turn.worldAction.type === 'move',
       ).length,
       requestedInfections: records.filter(
         (turn) =>
           turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'operator-skipped' &&
           turn.worldAction.type === 'infect',
       ).length,
       requestedCaptures: records.filter(
         (turn) =>
           turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'operator-skipped' &&
           turn.worldAction.type === 'capture',
       ).length,
       requestedWaits: records.filter(
         (turn) =>
-          turn.outcome !== 'provider-error' && turn.worldAction.type === 'wait',
+          turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'operator-skipped' &&
+          turn.worldAction.type === 'wait',
       ).length,
       acceptedMovements: records.filter(
         (turn) =>
@@ -1178,7 +1265,7 @@ export function calculateExperimentMetrics(
         : {}),
       tokens,
       knownCostCredits: sumDecimalNumbers(costs),
-      turnsWithUnknownCost: records.filter(
+      turnsWithUnknownCost: attempts.filter(
         ({ provider }) => provider?.costCredits === undefined,
       ).length,
     };
@@ -1210,7 +1297,10 @@ function diplomacyMetrics(
       turn,
     ): turn is Exclude<AgentTurnRecord, { outcome: 'provider-error' }> & {
       diplomacyResult: Exclude<DiplomacyResult, { requested: false }>;
-    } => turn.outcome !== 'provider-error' && turn.diplomacyResult.requested,
+    } =>
+      turn.outcome !== 'provider-error' &&
+      turn.outcome !== 'operator-skipped' &&
+      turn.diplomacyResult.requested,
   );
   const requested = (type: string) =>
     completed.filter((turn) => {
@@ -1286,6 +1376,7 @@ function diplomacyMetrics(
     alliedCaptureAttempts: records.filter(
       (turn) =>
         turn.outcome !== 'provider-error' &&
+        turn.outcome !== 'operator-skipped' &&
         turn.worldAction.type === 'capture' &&
         !turn.worldActionResult.accepted &&
         turn.worldActionResult.reason === 'allied-controller',
@@ -1293,6 +1384,7 @@ function diplomacyMetrics(
     alliedCaptureRejections: records.filter(
       (turn) =>
         turn.outcome !== 'provider-error' &&
+        turn.outcome !== 'operator-skipped' &&
         turn.worldAction.type === 'capture' &&
         !turn.worldActionResult.accepted &&
         turn.worldActionResult.reason === 'allied-controller',
@@ -1313,6 +1405,7 @@ function groupedDiplomacyRejections(records: readonly AgentTurnRecord[]) {
   for (const turn of records) {
     if (
       turn.outcome === 'provider-error' ||
+      turn.outcome === 'operator-skipped' ||
       !turn.diplomacyResult.requested ||
       turn.diplomacyResult.accepted
     )

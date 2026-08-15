@@ -235,7 +235,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   const exported = experimentExportDocumentSchema.parse(
     JSON.parse(await readFile(downloadedPath!, 'utf8')),
   );
-  expect(exported.schemaVersion).toBe(6);
+  expect(exported.schemaVersion).toBe(7);
   expect(exported.filters.level).toBe('minimal');
   expect(exported.selection.selectedAgentIds).toEqual([EMBER_ID]);
   expect(exported.turns).toEqual([]);
@@ -257,6 +257,14 @@ test('runs the complete deterministic World Lab browser flow', async ({
       .map(({ turnNumber }) => turnNumber)
       .toSorted((a, b) => a - b),
   );
+
+  await page.getByRole('button', { name: 'Close export' }).click();
+  await expect(
+    page.getByRole('dialog', { name: 'Experiment export' }),
+  ).toBeHidden();
+  await expect(
+    page.getByRole('button', { name: 'Select agent Ember' }),
+  ).toHaveClass(/selected/);
 
   page.once('dialog', (dialog) => dialog.accept());
   await page.getByRole('button', { name: 'Reset world' }).click();
