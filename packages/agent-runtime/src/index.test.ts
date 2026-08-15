@@ -2,12 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { MESSAGE_MAX_LENGTH, agentObservationSchema } from '@agentborne/shared';
 import {
   AgentProviderError,
-  DEFAULT_OPENROUTER_MODEL,
   OpenRouterAgentProvider,
   ScriptedAgentProvider,
   buildOpenRouterRequest,
 } from '.';
 import { applyProviderEnvironmentFile } from './provider-environment';
+
+const TEST_MODEL = 'test/compatible-model';
 
 const observation = agentObservationSchema.parse({
   agentId: '128f3f38-6b7d-4db7-9e95-751b4ce2681e',
@@ -75,7 +76,7 @@ function response(content: string, status = 200) {
   return new Response(
     JSON.stringify({
       id: 'request-safe-id',
-      model: 'google/gemini-3.7-flash',
+      model: TEST_MODEL,
       choices: [{ message: { content } }],
       usage: { prompt_tokens: 20, completion_tokens: 12 },
     }),
@@ -119,9 +120,8 @@ function visitJsonValues(
 
 describe('OpenRouterAgentProvider', () => {
   it('constructs a Gemini-compatible strict structured-output request', () => {
-    const request = buildOpenRouterRequest(observation);
-    expect(request.model).toBe('google/gemini-3.7-flash');
-    expect(DEFAULT_OPENROUTER_MODEL).toBe('google/gemini-3.7-flash');
+    const request = buildOpenRouterRequest(observation, TEST_MODEL);
+    expect(request.model).toBe(TEST_MODEL);
     expect(request.response_format).toMatchObject({
       type: 'json_schema',
       json_schema: { strict: true },
@@ -132,7 +132,7 @@ describe('OpenRouterAgentProvider', () => {
     expect(request).not.toHaveProperty('max_completion_tokens');
     expect(request).not.toHaveProperty('include_reasoning');
     expect(request).not.toHaveProperty('reasoning_effort');
-    expect(request.reasoning).toEqual({ effort: 'low', exclude: true });
+    expect(request).not.toHaveProperty('reasoning');
     expect(request.messages[1]!.content).toContain(observation.personality);
     expect(request.messages[0]!.content).toContain(
       'Capture eligibility, scoreboards, proposals, alliance events, and messages are observations',
@@ -203,7 +203,9 @@ describe('OpenRouterAgentProvider', () => {
       apiKey: 'secret-test-key',
       fetchImplementation,
     });
-    await expect(provider.decide(observation)).resolves.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).resolves.toMatchObject({
       decision: { worldAction: { type: 'infect' } },
       metadata: { provider: 'openrouter' },
     });
@@ -230,7 +232,9 @@ describe('OpenRouterAgentProvider', () => {
         ),
       ),
     });
-    await expect(provider.decide(observation)).resolves.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).resolves.toMatchObject({
       decision: {
         worldAction: { type: 'infect' },
         communication: {
@@ -254,7 +258,9 @@ describe('OpenRouterAgentProvider', () => {
         ),
       ),
     });
-    await expect(provider.decide(observation)).resolves.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).resolves.toMatchObject({
       decision: { worldAction: { type: 'capture' } },
       metadata: { promptTokens: 20, completionTokens: 12 },
     });
@@ -275,7 +281,9 @@ describe('OpenRouterAgentProvider', () => {
         ),
       ),
     });
-    await expect(provider.decide(observation)).resolves.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).resolves.toMatchObject({
       decision: {
         worldAction: {
           type: 'move',
@@ -301,7 +309,9 @@ describe('OpenRouterAgentProvider', () => {
         ),
       ),
     });
-    await expect(provider.decide(observation)).resolves.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).resolves.toMatchObject({
       decision: {
         worldAction: { type: 'infect' },
         communication: { channel: 'public' },
@@ -329,7 +339,9 @@ describe('OpenRouterAgentProvider', () => {
         ),
       ),
     });
-    await expect(provider.decide(observation)).resolves.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).resolves.toMatchObject({
       decision: {
         worldAction: { type: 'wait' },
         communication: { channel: 'public' },
@@ -372,7 +384,9 @@ describe('OpenRouterAgentProvider', () => {
           ),
       ),
     });
-    await expect(provider.decide(observation)).resolves.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).resolves.toMatchObject({
       metadata: {
         promptTokens: 101,
         completionTokens: 23,
@@ -406,7 +420,7 @@ describe('OpenRouterAgentProvider', () => {
           ),
       ),
     });
-    const result = await provider.decide(observation);
+    const result = await provider.decide(observation, TEST_MODEL);
     expect(result.metadata).not.toHaveProperty('costCredits');
     expect(result.metadata).not.toHaveProperty('totalTokens');
   });
@@ -438,7 +452,7 @@ describe('OpenRouterAgentProvider', () => {
           ),
       ),
     });
-    const result = await provider.decide(observation);
+    const result = await provider.decide(observation, TEST_MODEL);
     const serialized = JSON.stringify(result.metadata);
     expect(serialized).not.toContain('sk-or-secret-test-key');
     expect(serialized).not.toContain(observation.personality);
@@ -462,7 +476,9 @@ describe('OpenRouterAgentProvider', () => {
         apiKey: 'secret-test-key',
         fetchImplementation: vi.fn(async () => response(content)),
       });
-      await expect(provider.decide(observation)).rejects.toMatchObject({
+      await expect(
+        provider.decide(observation, TEST_MODEL),
+      ).rejects.toMatchObject({
         metadata: {
           promptTokens: 20,
           completionTokens: 12,
@@ -501,24 +517,37 @@ describe('OpenRouterAgentProvider', () => {
         apiKey: 'secret-test-key',
         fetchImplementation: vi.fn(async () => response(content)),
       });
-      await expect(provider.decide(observation)).rejects.toMatchObject({
+      await expect(
+        provider.decide(observation, TEST_MODEL),
+      ).rejects.toMatchObject({
         failure: { code },
       });
     },
   );
 
   it.each([
-    [400, 'The model provider rejected the request configuration.', false],
+    [
+      400,
+      'provider-http',
+      'The model provider rejected the request configuration.',
+      false,
+    ],
     [
       404,
+      'model-unavailable',
       'The selected model is unavailable or no endpoint supports all required parameters.',
       false,
     ],
-    [429, 'The model provider rate limited the request.', true],
-    [503, 'The model provider is unavailable.', true],
+    [
+      429,
+      'provider-http',
+      'The model provider rate limited the request.',
+      true,
+    ],
+    [503, 'provider-http', 'The model provider is unavailable.', true],
   ])(
     'maps HTTP %i to a clear sanitized public failure',
-    async (status, message, retryable) => {
+    async (status, code, message, retryable) => {
       const provider = new OpenRouterAgentProvider({
         apiKey: 'secret-test-key',
         fetchImplementation: vi.fn(async () =>
@@ -529,14 +558,16 @@ describe('OpenRouterAgentProvider', () => {
           }),
         ),
       });
-      await expect(provider.decide(observation)).rejects.toMatchObject({
-        failure: { code: 'provider-http', message, retryable },
+      await expect(
+        provider.decide(observation, TEST_MODEL),
+      ).rejects.toMatchObject({
+        failure: { code, message, retryable },
         diagnostics: {
           httpStatus: status,
           providerCode: 'provider_error',
           providerMessage: 'Safe provider detail.',
           requestId: 'safe-request-id',
-          model: 'google/gemini-3.7-flash',
+          model: TEST_MODEL,
         },
       });
     },
@@ -570,6 +601,7 @@ describe('OpenRouterAgentProvider', () => {
       try {
         await provider.decide(
           provider === httpProvider ? sensitiveObservation : observation,
+          TEST_MODEL,
         );
       } catch (error) {
         expect(error).toBeInstanceOf(AgentProviderError);
@@ -593,7 +625,7 @@ describe('OpenRouterAgentProvider', () => {
       ),
     });
     try {
-      await provider.decide(observation);
+      await provider.decide(observation, TEST_MODEL);
     } catch (error) {
       expect(error).toBeInstanceOf(AgentProviderError);
       expect((error as AgentProviderError).diagnostics?.providerMessage).toBe(
@@ -615,7 +647,9 @@ describe('OpenRouterAgentProvider', () => {
           }),
       ),
     });
-    await expect(provider.decide(observation)).rejects.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).rejects.toMatchObject({
       failure: { code: 'timeout' },
     });
   });
@@ -643,7 +677,7 @@ describe('OpenRouterAgentProvider', () => {
         }),
       });
       const pending = expect(
-        provider.decide(observation),
+        provider.decide(observation, TEST_MODEL),
       ).rejects.toMatchObject({ failure: { code: 'timeout' } });
 
       await vi.advanceTimersByTimeAsync(10);
@@ -669,7 +703,9 @@ describe('OpenRouterAgentProvider', () => {
         ),
       });
 
-      await expect(provider.decide(observation)).resolves.toBeDefined();
+      await expect(
+        provider.decide(observation, TEST_MODEL),
+      ).resolves.toBeDefined();
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -678,7 +714,9 @@ describe('OpenRouterAgentProvider', () => {
 
   it('reports missing configuration instead of using a heuristic fallback', async () => {
     const provider = new OpenRouterAgentProvider();
-    await expect(provider.decide(observation)).rejects.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).rejects.toMatchObject({
       failure: { code: 'configuration' },
     });
   });
@@ -692,14 +730,13 @@ describe('OpenRouter provider environment', () => {
     applyProviderEnvironmentFile(
       [
         'OPENROUTER_API_KEY=file-key',
-        'AGENTBORNE_MODEL=google/gemini-3.7-flash',
+        'AGENTBORNE_MODEL=ignored/legacy-value',
         'NEXT_PUBLIC_GAME_API_BASE_URL=https://browser.example',
       ].join('\n'),
       environment,
     );
     expect(environment).toEqual({
       OPENROUTER_API_KEY: 'file-key',
-      AGENTBORNE_MODEL: 'google/gemini-3.7-flash',
     });
   });
 });
@@ -718,7 +755,9 @@ describe('ScriptedAgentProvider', () => {
         summary: 'Messaging.',
       },
     ]);
-    await expect(provider.decide(observation)).resolves.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).resolves.toMatchObject({
       decision: { worldAction: { type: 'wait' } },
       metadata: {
         provider: 'scripted-test',
@@ -728,7 +767,9 @@ describe('ScriptedAgentProvider', () => {
         costCredits: 0,
       },
     });
-    await expect(provider.decide(observation)).resolves.toMatchObject({
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).resolves.toMatchObject({
       decision: { communication: { channel: 'direct' } },
     });
   });

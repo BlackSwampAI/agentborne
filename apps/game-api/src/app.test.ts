@@ -11,11 +11,13 @@ import {
   experimentExportPreviewSchema,
   experimentExportResponseSchema,
   healthResponseSchema,
+  modelCatalogResponseSchema,
   resetSimulationResponseSchema,
   restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
   singleTurnResponseSchema,
   updateAgentPersonalityResponseSchema,
+  updateExperimentModelsResponseSchema,
 } from '@agentborne/shared';
 import { createApp } from './app';
 
@@ -39,6 +41,76 @@ describe('game API simulation boundary', () => {
       ),
     ).toBe(true);
     expect(payload.experiment.currentTerritory).toHaveLength(8);
+  });
+
+  it('serves and refreshes sanitized catalogs without exposing the server key', async () => {
+    const secret = 'server-only-secret-marker';
+    const forced: boolean[] = [];
+    const catalogResponse = modelCatalogResponseSchema.parse({
+      models: [
+        {
+          id: 'example/compatible-model',
+          name: 'Compatible model',
+          author: 'example',
+          contextLength: 32_768,
+          inputPricePerToken: '0.000001',
+          outputPricePerToken: '0.000002',
+          supportedParameters: [
+            'max_tokens',
+            'response_format',
+            'structured_outputs',
+          ],
+          isFree: false,
+        },
+      ],
+      filteredOutCount: 4,
+      stale: false,
+      requirements: {
+        input: 'text',
+        output: 'text',
+        endpoint: 'chat-completions',
+        requiredParameters: [
+          'max_tokens',
+          'response_format',
+          'structured_outputs',
+        ],
+        minimumContextLength: 16_384,
+        streaming: false,
+      },
+    });
+    const app = createApp({
+      provider: new OpenRouterAgentProvider({ apiKey: secret }),
+      catalog: {
+        async getCatalog(force = false) {
+          forced.push(force);
+          return catalogResponse;
+        },
+      },
+    });
+    const catalog = await (await app.request('/api/simulation/models')).json();
+    expect(modelCatalogResponseSchema.parse(catalog).models).toHaveLength(1);
+    const assigned = updateExperimentModelsResponseSchema.parse(
+      await (
+        await app.request('/api/simulation/experiment/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            globalModelId: 'example/compatible-model',
+            overrides: [],
+          }),
+        })
+      ).json(),
+    );
+    expect(
+      assigned.snapshot.resolvedModels.every(({ available }) => available),
+    ).toBe(true);
+    const refreshed = await (
+      await app.request('/api/simulation/models/refresh', { method: 'POST' })
+    ).json();
+    expect(forced).toEqual([false, false, true]);
+    expect(JSON.stringify({ catalog, assigned, refreshed })).not.toContain(
+      secret,
+    );
   });
 
   it('returns accepted and rejected single-turn records with valid response shapes', async () => {
@@ -173,7 +245,7 @@ describe('game API simulation boundary', () => {
           {
             httpStatus: 400,
             providerMessage: 'internal-diagnostic-marker',
-            model: 'google/gemini-3.7-flash',
+            model: 'example/compatible-model',
           },
         );
       },

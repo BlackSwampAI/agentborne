@@ -14,6 +14,7 @@ import {
   type ExperimentExportWorldState,
   type ExperimentId,
   type ExperimentMetrics,
+  type ExperimentModelConfiguration,
   type DiplomacyRejectionReason,
   type DiplomacyResult,
   type ExportedCommunication,
@@ -35,6 +36,7 @@ export interface ExperimentSource {
   configurationEvents: readonly PersonalityConfigurationEvent[];
   initialWorld: WorldSnapshot;
   currentWorld: WorldSnapshot;
+  modelConfiguration: ExperimentModelConfiguration;
 }
 
 export class ExperimentExportValidationError extends Error {
@@ -491,12 +493,13 @@ export function createExperimentExport(
           },
     );
   const document: ExperimentExportDocument = {
-    schemaVersion: 5,
+    schemaVersion: 6,
     generatedAt,
     experiment: {
       id: source.id,
       startedAt: source.startedAt,
       providerMode: source.providerMode,
+      modelConfiguration: structuredClone(source.modelConfiguration),
       ...(request.level === 'full-safe'
         ? { initialAgents: structuredClone([...source.initialAgents]) }
         : {}),

@@ -96,7 +96,7 @@ const baseTurn = {
 };
 const provider = {
   provider: 'openrouter',
-  model: 'google/gemini-3.7-flash',
+  model: 'example/compatible-model',
   latencyMs: 100,
 };
 const event = {
@@ -134,6 +134,17 @@ const snapshot = {
   status: 'paused',
   providerMode: 'openrouter',
   providerConfigured: true,
+  modelConfiguration: {
+    globalModelId: 'author/compatible-model',
+    overrides: [],
+    locked: false,
+  },
+  resolvedModels: worldAgents.map(({ id }) => ({
+    agentId: id,
+    modelId: 'author/compatible-model',
+    source: 'global',
+    available: true,
+  })),
   turns: [],
   experiment: {
     id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',

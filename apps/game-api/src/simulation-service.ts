@@ -13,6 +13,8 @@ import {
   experimentIdSchema,
   experimentExportDocumentSchema,
   experimentExportPreviewSchema,
+  experimentModelConfigurationSchema,
+  updateExperimentModelsRequestSchema,
   h3CellSchema,
   RECENT_DIRECT_MESSAGE_LIMIT,
   RECENT_PUBLIC_MESSAGE_LIMIT,
@@ -28,6 +30,9 @@ import {
   type ExperimentExportDocument,
   type ExperimentExportPreview,
   type ExperimentId,
+  type ExperimentModelConfiguration,
+  type CompatibleModel,
+  type ModelId,
   type PersonalityConfigurationEvent,
   type H3Cell,
   type ProviderFailure,
@@ -69,7 +74,11 @@ export class SimulationConflictError extends Error {
 }
 
 export type SimulationValidationCode =
-  'invalid_agent_id' | 'unknown_agent' | 'invalid_personality';
+  | 'invalid_agent_id'
+  | 'unknown_agent'
+  | 'invalid_personality'
+  | 'invalid_model_configuration'
+  | 'models_unavailable';
 
 export class SimulationValidationError extends Error {
   constructor(
@@ -113,6 +122,8 @@ export class SimulationService {
   #initialExperimentWorld: SimulationSnapshot['world'];
   #configurationEvents: PersonalityConfigurationEvent[] = [];
   #experimentMetrics: ExperimentMetricAccumulator;
+  #modelConfiguration: ExperimentModelConfiguration;
+  #availableModelIds = new Set<ModelId>();
 
   constructor({
     provider,
@@ -148,6 +159,17 @@ export class SimulationService {
     this.#experimentMetrics = new ExperimentMetricAccumulator([
       ...this.#state.agents.keys(),
     ]);
+    const scriptedModel =
+      (provider.model as ModelId | undefined) ??
+      (provider.mode === 'scripted-test'
+        ? ('deterministic-script' as ModelId)
+        : null);
+    this.#modelConfiguration = experimentModelConfigurationSchema.parse({
+      globalModelId: scriptedModel,
+      overrides: [],
+      locked: false,
+    });
+    if (scriptedModel) this.#availableModelIds.add(scriptedModel);
   }
 
   getSnapshot(): SimulationSnapshot {
@@ -164,6 +186,8 @@ export class SimulationService {
       status: this.#status,
       providerMode: this.#provider.mode,
       providerConfigured: this.#provider.configured,
+      modelConfiguration: this.#modelConfiguration,
+      resolvedModels: agents.map(({ id }) => this.#resolvedModel(id)),
       turns: this.#turns,
       experiment: {
         id: this.#experimentId,
@@ -221,8 +245,131 @@ export class SimulationService {
     this.#experimentMetrics = new ExperimentMetricAccumulator([
       ...this.#state.agents.keys(),
     ]);
+    this.#modelConfiguration = {
+      ...this.#modelConfiguration,
+      locked: false,
+    };
     this.#status = this.#provider.configured ? 'paused' : 'configuration-error';
     return this.getSnapshot();
+  }
+
+  setCompatibleModels(models: CompatibleModel[]): void {
+    this.#availableModelIds = new Set(models.map(({ id }) => id));
+    if (this.#provider.mode === 'scripted-test')
+      this.#availableModelIds.add('deterministic-script' as ModelId);
+  }
+
+  updateModelConfiguration(input: unknown): SimulationSnapshot {
+    if (this.#busy)
+      throw new SimulationConflictError(
+        'Model changes are unavailable while a model turn is in progress.',
+      );
+    if (this.#modelConfiguration.locked)
+      throw new SimulationConflictError(
+        'Model assignments are locked after the first completed turn. Reset the experiment to change them.',
+      );
+    const parsed = updateExperimentModelsRequestSchema.safeParse(input);
+    if (!parsed.success)
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'The model assignment is invalid.',
+      );
+    const agentIds = new Set(this.#state.agents.keys());
+    if (parsed.data.overrides.some(({ agentId }) => !agentIds.has(agentId)))
+      throw new SimulationValidationError(
+        'unknown_agent',
+        'A model override references an unknown agent.',
+      );
+    const selected = [
+      parsed.data.globalModelId,
+      ...parsed.data.overrides.map(({ modelId }) => modelId),
+    ].filter((modelId): modelId is ModelId => modelId !== null);
+    if (selected.some((modelId) => !this.#availableModelIds.has(modelId)))
+      throw new SimulationValidationError(
+        'models_unavailable',
+        'One or more selected models are not in the compatible OpenRouter catalog.',
+      );
+    this.#modelConfiguration = experimentModelConfigurationSchema.parse({
+      ...parsed.data,
+      locked: false,
+    });
+    return this.getSnapshot();
+  }
+
+  importModelConfiguration(document: unknown): {
+    snapshot: SimulationSnapshot;
+    legacy: boolean;
+    message: string;
+  } {
+    if (this.#busy || this.#modelConfiguration.locked)
+      throw new SimulationConflictError(
+        'Import is unavailable after the experiment has started. Reset first.',
+      );
+    if (
+      typeof document !== 'object' ||
+      document === null ||
+      Array.isArray(document)
+    )
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'The experiment import is invalid.',
+      );
+    const root = document as Record<string, unknown>;
+    const version = root.schemaVersion;
+    if (version !== 5 && version !== 6)
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'Only schema-version 5 or 6 experiment exports can be imported.',
+      );
+    if (version === 5) {
+      this.#modelConfiguration = {
+        globalModelId: null,
+        overrides: [],
+        locked: false,
+      };
+      return {
+        snapshot: this.getSnapshot(),
+        legacy: true,
+        message:
+          'Legacy experiment preserved. Select compatible models before continuing.',
+      };
+    }
+    const experiment =
+      typeof root.experiment === 'object' && root.experiment !== null
+        ? (root.experiment as Record<string, unknown>)
+        : undefined;
+    const configuration = experimentModelConfigurationSchema.safeParse(
+      experiment?.modelConfiguration,
+    );
+    if (!configuration.success)
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        'The imported model assignment is invalid.',
+      );
+    const knownAgents = new Set(this.#state.agents.keys());
+    if (
+      configuration.data.overrides.some(
+        ({ agentId }) => !knownAgents.has(agentId),
+      )
+    )
+      throw new SimulationValidationError(
+        'unknown_agent',
+        'The imported model assignment references an unknown agent.',
+      );
+    this.#modelConfiguration = {
+      globalModelId: configuration.data.globalModelId,
+      overrides: structuredClone(configuration.data.overrides),
+      locked: false,
+    };
+    return {
+      snapshot: this.getSnapshot(),
+      legacy: false,
+      message: this.getSnapshot().resolvedModels.every(
+        ({ available }) => available,
+      )
+        ? 'Model assignments imported.'
+        : 'Model assignments imported; unavailable models require explicit replacement.',
+    };
   }
 
   updateAgentPersonality(
@@ -336,6 +483,14 @@ export class SimulationService {
       throw new SimulationConflictError('A model turn is already in progress.');
     }
     const agents = [...this.#state.agents.values()];
+    const unresolved = agents
+      .map(({ id }) => this.#resolvedModel(id))
+      .filter(({ available }) => !available);
+    if (unresolved.length)
+      throw new SimulationValidationError(
+        'models_unavailable',
+        'Every agent requires an available compatible model before the experiment can run.',
+      );
     const agent = agents[this.#cursor % agents.length];
     if (!agent) throw new Error('The development world has no agents.');
 
@@ -351,7 +506,10 @@ export class SimulationService {
       let providerResult: ProviderDecision;
 
       try {
-        providerResult = await this.#provider.decide(providerObservation);
+        providerResult = await this.#provider.decide(
+          providerObservation,
+          this.#resolvedModel(agent.id).modelId!,
+        );
       } catch (error) {
         const providerError = asProviderError(error);
         const expiredState = expireAllianceProposals(this.#state, turnNumber, {
@@ -512,6 +670,7 @@ export class SimulationService {
     this.#experimentMetrics.add(record);
     this.#completedTurnCount = record.turnNumber;
     this.#cursor = cursor;
+    this.#modelConfiguration = { ...this.#modelConfiguration, locked: true };
   }
 
   #worldSnapshot(): SimulationSnapshot['world'] {
@@ -540,6 +699,31 @@ export class SimulationService {
       configurationEvents: this.#configurationEvents,
       initialWorld: this.#initialExperimentWorld,
       currentWorld: this.#worldSnapshot(),
+      modelConfiguration: this.#modelConfiguration,
+    };
+  }
+
+  #resolvedModel(agentId: AgentId) {
+    const override = this.#modelConfiguration.overrides.find(
+      (candidate) => candidate.agentId === agentId,
+    );
+    const modelId = override?.modelId ?? this.#modelConfiguration.globalModelId;
+    const source = override
+      ? ('override' as const)
+      : modelId
+        ? ('global' as const)
+        : ('missing' as const);
+    const available = modelId !== null && this.#availableModelIds.has(modelId);
+    return {
+      agentId,
+      modelId,
+      source,
+      available,
+      ...(modelId === null
+        ? { issue: 'missing' as const }
+        : available
+          ? {}
+          : { issue: 'unavailable' as const }),
     };
   }
 

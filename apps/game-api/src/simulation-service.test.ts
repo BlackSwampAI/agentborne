@@ -13,6 +13,7 @@ import {
   h3CellSchema,
   type AgentObservation,
   type AgentTurnRecord,
+  type CompatibleModel,
   type WorldEvent,
 } from '@agentborne/shared';
 import { DEVELOPMENT_AGENT_BLUEPRINTS } from '@agentborne/world-engine';
@@ -25,6 +26,36 @@ import { serializeExperimentExport } from './experiment-export';
 
 const now = () => '2026-08-13T12:00:01.000Z';
 const createEventId = () => '67aa21b9-fc78-4b04-9f92-9862bf346f96';
+const compatibleModels: CompatibleModel[] = [
+  {
+    id: 'author/global-model',
+    name: 'Global Model',
+    author: 'author',
+    contextLength: 16_384,
+    inputPricePerToken: '0.000001',
+    outputPricePerToken: '0.000002',
+    supportedParameters: [
+      'max_tokens',
+      'response_format',
+      'structured_outputs',
+    ],
+    isFree: false,
+  },
+  {
+    id: 'author/override-model',
+    name: 'Override Model',
+    author: 'author',
+    contextLength: 32_768,
+    inputPricePerToken: '0',
+    outputPricePerToken: '0',
+    supportedParameters: [
+      'max_tokens',
+      'response_format',
+      'structured_outputs',
+    ],
+    isFree: true,
+  },
+];
 
 function service(provider: AgentProvider) {
   return new SimulationService({ provider, now, createEventId });
@@ -340,7 +371,7 @@ describe('SimulationService', () => {
       actions: ['capture'],
       level: 'minimal',
     });
-    expect(victimExport.schemaVersion).toBe(5);
+    expect(victimExport.schemaVersion).toBe(6);
     expect(victimExport.turns).toHaveLength(0);
     expect(victimExport.selection).toMatchObject({
       matchingTurnCount: 0,
@@ -450,7 +481,7 @@ describe('SimulationService', () => {
       outcomes: ['rejected'],
       actions: ['capture'],
     });
-    expect(exported.schemaVersion).toBe(5);
+    expect(exported.schemaVersion).toBe(6);
     expect(exported.turns).toMatchObject([
       {
         outcome: 'rejected',
@@ -1021,7 +1052,7 @@ describe('SimulationService', () => {
         controlChanges: false,
       },
     });
-    expect(minimal.schemaVersion).toBe(5);
+    expect(minimal.schemaVersion).toBe(6);
     expect(
       experimentExportDocumentSchema.safeParse({
         ...minimal,
@@ -2033,5 +2064,105 @@ describe('SimulationService', () => {
     });
     await pending;
     expect(simulation.getSnapshot().turnNumber).toBe(1);
+  });
+
+  it('resolves global and per-agent models, passes them per turn, and locks after execution', async () => {
+    const usedModels: string[] = [];
+    const provider: AgentProvider = {
+      mode: 'openrouter',
+      configured: true,
+      async decide(_observation, model) {
+        usedModels.push(model);
+        return {
+          decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
+          metadata: {
+            provider: 'openrouter',
+            model,
+            latencyMs: 1,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    const [first, second] = simulation.getSnapshot().world.agents;
+    await expect(simulation.executeNextTurn()).rejects.toMatchObject({
+      code: 'models_unavailable',
+    });
+    simulation.setCompatibleModels(compatibleModels);
+    simulation.updateModelConfiguration({
+      globalModelId: compatibleModels[0]!.id,
+      overrides: [{ agentId: second!.id, modelId: compatibleModels[1]!.id }],
+    });
+    expect(simulation.getSnapshot().resolvedModels.slice(0, 2)).toMatchObject([
+      {
+        agentId: first!.id,
+        modelId: compatibleModels[0]!.id,
+        source: 'global',
+      },
+      {
+        agentId: second!.id,
+        modelId: compatibleModels[1]!.id,
+        source: 'override',
+      },
+    ]);
+    await simulation.executeNextTurn();
+    await simulation.executeNextTurn();
+    expect(usedModels).toEqual([
+      compatibleModels[0]!.id,
+      compatibleModels[1]!.id,
+    ]);
+    expect(simulation.getSnapshot().modelConfiguration.locked).toBe(true);
+    expect(() =>
+      simulation.updateModelConfiguration({
+        globalModelId: compatibleModels[1]!.id,
+        overrides: [],
+      }),
+    ).toThrow(SimulationConflictError);
+  });
+
+  it('removes overrides, preserves unavailable imports, and migrates legacy exports safely', () => {
+    const simulation = service({
+      mode: 'openrouter',
+      configured: true,
+      async decide(_observation, model) {
+        return {
+          decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
+          metadata: { provider: 'openrouter', model, latencyMs: 1 },
+        };
+      },
+    });
+    simulation.setCompatibleModels(compatibleModels);
+    const agent = simulation.getSnapshot().world.agents[0]!;
+    simulation.updateModelConfiguration({
+      globalModelId: compatibleModels[0]!.id,
+      overrides: [{ agentId: agent.id, modelId: compatibleModels[1]!.id }],
+    });
+    simulation.updateModelConfiguration({
+      globalModelId: compatibleModels[0]!.id,
+      overrides: [],
+    });
+    expect(simulation.getSnapshot().resolvedModels[0]).toMatchObject({
+      modelId: compatibleModels[0]!.id,
+      source: 'global',
+    });
+
+    const exported = simulation.generateExperimentExport(
+      exportRequest('minimal'),
+    );
+    expect(exported.experiment.modelConfiguration).toEqual(
+      simulation.getSnapshot().modelConfiguration,
+    );
+    const unavailable = structuredClone(exported);
+    unavailable.experiment.modelConfiguration!.globalModelId = 'retired/model';
+    const imported = simulation.importModelConfiguration(unavailable);
+    expect(imported.snapshot.resolvedModels[0]).toMatchObject({
+      modelId: 'retired/model',
+      available: false,
+      issue: 'unavailable',
+    });
+    const legacy = simulation.importModelConfiguration({ schemaVersion: 5 });
+    expect(legacy.legacy).toBe(true);
+    expect(legacy.snapshot.modelConfiguration.globalModelId).toBeNull();
   });
 });

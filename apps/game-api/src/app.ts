@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import {
   BrowserTestAgentProvider,
-  DEFAULT_OPENROUTER_MODEL,
+  OpenRouterModelCatalog,
   OpenRouterAgentProvider,
   type AgentProvider,
 } from '@agentborne/agent-runtime';
@@ -11,7 +11,10 @@ import {
   experimentExportRequestSchema,
   experimentExportPreviewSchema,
   experimentExportResponseSchema,
+  experimentImportRequestSchema,
+  experimentImportResponseSchema,
   healthResponseSchema,
+  modelCatalogResponseSchema,
   PERSONALITY_MAX_LENGTH,
   resetSimulationResponseSchema,
   restoreDefaultPersonalitiesResponseSchema,
@@ -19,6 +22,8 @@ import {
   singleTurnResponseSchema,
   updateAgentPersonalityRequestSchema,
   updateAgentPersonalityResponseSchema,
+  updateExperimentModelsRequestSchema,
+  updateExperimentModelsResponseSchema,
   worldSnapshotSchema,
 } from '@agentborne/shared';
 import { createDevelopmentWorld } from '@agentborne/world-engine';
@@ -34,6 +39,7 @@ export { healthResponseSchema };
 export interface AppOptions {
   service?: SimulationService;
   provider?: AgentProvider;
+  catalog?: Pick<OpenRouterModelCatalog, 'getCatalog'>;
 }
 
 export function providerFromEnvironment(): AgentProvider {
@@ -42,7 +48,6 @@ export function providerFromEnvironment(): AgentProvider {
   }
   return new OpenRouterAgentProvider({
     apiKey: process.env.OPENROUTER_API_KEY,
-    model: process.env.AGENTBORNE_MODEL ?? DEFAULT_OPENROUTER_MODEL,
   });
 }
 
@@ -53,6 +58,9 @@ export function createApp(options: AppOptions = {}) {
     new SimulationService({
       provider: options.provider ?? providerFromEnvironment(),
     });
+  const catalog =
+    options.catalog ??
+    new OpenRouterModelCatalog({ apiKey: process.env.OPENROUTER_API_KEY });
 
   app.use(
     '/api/*',
@@ -83,6 +91,68 @@ export function createApp(options: AppOptions = {}) {
     context.json(simulationSnapshotSchema.parse(service.getSnapshot())),
   );
 
+  app.get('/api/simulation/models', async (context) => {
+    const response = modelCatalogResponseSchema.parse(
+      await catalog.getCatalog(false),
+    );
+    service.setCompatibleModels(response.models);
+    return context.json(response);
+  });
+
+  app.post('/api/simulation/models/refresh', async (context) => {
+    const response = modelCatalogResponseSchema.parse(
+      await catalog.getCatalog(true),
+    );
+    service.setCompatibleModels(response.models);
+    return context.json(response);
+  });
+
+  app.post('/api/simulation/experiment/models', async (context) => {
+    const request = updateExperimentModelsRequestSchema.safeParse(
+      await context.req.json().catch(() => undefined),
+    );
+    if (!request.success)
+      return context.json(
+        apiErrorSchema.parse({
+          error: {
+            code: 'invalid_model_configuration',
+            message: 'The model assignment is invalid.',
+          },
+        }),
+        400,
+      );
+    const currentCatalog = modelCatalogResponseSchema.parse(
+      await catalog.getCatalog(false),
+    );
+    service.setCompatibleModels(currentCatalog.models);
+    try {
+      return context.json(
+        updateExperimentModelsResponseSchema.parse({
+          snapshot: service.updateModelConfiguration(request.data),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: {
+              code: 'model_configuration_conflict',
+              message: error.message,
+            },
+          }),
+          409,
+        );
+      if (error instanceof SimulationValidationError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: error.code, message: error.message },
+          }),
+          error.code === 'unknown_agent' ? 404 : 400,
+        );
+      throw error;
+    }
+  });
+
   app.post('/api/simulation/turn', async (context) => {
     try {
       const turn = await service.executeNextTurn();
@@ -101,6 +171,16 @@ export function createApp(options: AppOptions = {}) {
           409,
         );
       }
+      if (
+        error instanceof SimulationValidationError &&
+        error.code === 'models_unavailable'
+      )
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: error.code, message: error.message },
+          }),
+          409,
+        );
       throw error;
     }
   });
@@ -237,6 +317,52 @@ export function createApp(options: AppOptions = {}) {
       );
     } catch (error) {
       return exportErrorResponse(context, error);
+    }
+  });
+
+  app.post('/api/simulation/experiment/import', async (context) => {
+    const request = experimentImportRequestSchema.safeParse(
+      await context.req.json().catch(() => undefined),
+    );
+    if (!request.success)
+      return context.json(
+        apiErrorSchema.parse({
+          error: {
+            code: 'invalid_import',
+            message: 'The experiment import is invalid.',
+          },
+        }),
+        400,
+      );
+    const currentCatalog = modelCatalogResponseSchema.parse(
+      await catalog.getCatalog(false),
+    );
+    service.setCompatibleModels(currentCatalog.models);
+    try {
+      return context.json(
+        experimentImportResponseSchema.parse(
+          service.importModelConfiguration(request.data.document),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: {
+              code: 'model_configuration_conflict',
+              message: error.message,
+            },
+          }),
+          409,
+        );
+      if (error instanceof SimulationValidationError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'invalid_import', message: error.message },
+          }),
+          400,
+        );
+      throw error;
     }
   });
 

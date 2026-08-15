@@ -9,6 +9,13 @@ export const RECENT_CONTROL_CHANGE_LIMIT = 6;
 export const RECENT_ALLIANCE_EVENT_LIMIT = 8;
 export const PERSONALITY_MAX_LENGTH = 600;
 export const PROVIDER_ERROR_MAX_LENGTH = 240;
+export const OPENROUTER_MODEL_CONTEXT_MINIMUM = 16_384;
+export const OPENROUTER_MAX_OUTPUT_TOKENS = 1_024;
+export const OPENROUTER_REQUIRED_PARAMETERS = [
+  'max_tokens',
+  'response_format',
+  'structured_outputs',
+] as const;
 export const DEVELOPMENT_WORLD_CONFIG = {
   latitude: 41.6528,
   longitude: -83.5379,
@@ -764,9 +771,107 @@ export type ProviderDecisionEnvelope = z.infer<
 export const providerModeSchema = z.enum(['openrouter', 'scripted-test']);
 export type ProviderMode = z.infer<typeof providerModeSchema>;
 
+export const modelIdSchema = z.string().trim().min(1).max(200);
+export type ModelId = z.infer<typeof modelIdSchema>;
+
+const priceStringSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+(?:\.\d+)?$/)
+  .max(80);
+
+export const compatibleModelSchema = z.object({
+  id: modelIdSchema,
+  name: z.string().trim().min(1).max(160),
+  author: z.string().trim().min(1).max(100),
+  contextLength: z.number().int().min(OPENROUTER_MODEL_CONTEXT_MINIMUM),
+  inputPricePerToken: priceStringSchema,
+  outputPricePerToken: priceStringSchema,
+  requestPrice: priceStringSchema.optional(),
+  supportedParameters: z.array(z.string().trim().min(1).max(80)).max(80),
+  createdAt: z.iso.datetime().optional(),
+  expirationDate: z.iso.date().nullable().optional(),
+  isFree: z.boolean(),
+});
+export type CompatibleModel = z.infer<typeof compatibleModelSchema>;
+
+export const modelOverrideSchema = z.object({
+  agentId: agentIdSchema,
+  modelId: modelIdSchema,
+});
+export const experimentModelConfigurationSchema = z
+  .object({
+    globalModelId: modelIdSchema.nullable(),
+    overrides: z
+      .array(modelOverrideSchema)
+      .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+    locked: z.boolean(),
+  })
+  .strict()
+  .refine(
+    ({ overrides }) =>
+      new Set(overrides.map(({ agentId }) => agentId)).size ===
+      overrides.length,
+    { message: 'Each agent may have at most one model override.' },
+  );
+export type ExperimentModelConfiguration = z.infer<
+  typeof experimentModelConfigurationSchema
+>;
+
+export const resolvedAgentModelSchema = z.object({
+  agentId: agentIdSchema,
+  modelId: modelIdSchema.nullable(),
+  source: z.enum(['global', 'override', 'missing']),
+  available: z.boolean(),
+  issue: z.enum(['missing', 'unavailable']).optional(),
+});
+export type ResolvedAgentModel = z.infer<typeof resolvedAgentModelSchema>;
+
+export const modelCatalogErrorSchema = z.object({
+  code: z.enum([
+    'configuration',
+    'timeout',
+    'network',
+    'provider-http',
+    'invalid-response',
+  ]),
+  message: z.string().trim().min(1).max(240),
+});
+export const modelCatalogResponseSchema = z.object({
+  models: z.array(compatibleModelSchema),
+  filteredOutCount: z.number().int().nonnegative(),
+  fetchedAt: z.iso.datetime().optional(),
+  expiresAt: z.iso.datetime().optional(),
+  stale: z.boolean(),
+  error: modelCatalogErrorSchema.optional(),
+  requirements: z.object({
+    input: z.literal('text'),
+    output: z.literal('text'),
+    endpoint: z.literal('chat-completions'),
+    requiredParameters: z
+      .array(z.enum(OPENROUTER_REQUIRED_PARAMETERS))
+      .length(3),
+    minimumContextLength: z.literal(OPENROUTER_MODEL_CONTEXT_MINIMUM),
+    streaming: z.literal(false),
+  }),
+});
+export type ModelCatalogResponse = z.infer<typeof modelCatalogResponseSchema>;
+
+export const updateExperimentModelsRequestSchema = z
+  .object({
+    globalModelId: modelIdSchema.nullable(),
+    overrides: z
+      .array(modelOverrideSchema)
+      .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+  })
+  .strict();
+export const updateExperimentModelsResponseSchema = z.object({
+  snapshot: z.lazy(() => simulationSnapshotSchema),
+});
+
 export const providerMetadataSchema = z.object({
   provider: providerModeSchema,
-  model: z.string().trim().min(1).max(120),
+  model: modelIdSchema,
   requestId: z.string().trim().min(1).max(160).optional(),
   latencyMs: z.number().int().nonnegative().max(300_000),
   promptTokens: z.number().int().nonnegative().optional(),
@@ -784,6 +889,7 @@ export const providerFailureSchema = z.object({
     'configuration',
     'timeout',
     'network',
+    'model-unavailable',
     'provider-http',
     'malformed-response',
     'unsupported-response',
@@ -857,6 +963,10 @@ export const simulationSnapshotSchema = z
     status: simulationStatusSchema,
     providerMode: providerModeSchema,
     providerConfigured: z.boolean(),
+    modelConfiguration: experimentModelConfigurationSchema,
+    resolvedModels: z
+      .array(resolvedAgentModelSchema)
+      .length(DEVELOPMENT_WORLD_CONFIG.agentCount),
     turns: z.array(agentTurnRecordSchema).max(120),
     experiment: z.object({
       id: z.uuid().brand<'ExperimentId'>(),
@@ -1022,6 +1132,10 @@ export const apiErrorCodeSchema = z.enum([
   'invalid_export',
   'export_conflict',
   'records_unavailable',
+  'model_configuration_conflict',
+  'invalid_model_configuration',
+  'models_unavailable',
+  'invalid_import',
   'not_found',
   'internal_error',
 ]);
@@ -1054,6 +1168,7 @@ export const experimentManifestSchema = z.object({
   startedAt: z.iso.datetime(),
   generatedAt: z.iso.datetime().optional(),
   providerMode: providerModeSchema,
+  modelConfiguration: experimentModelConfigurationSchema.optional(),
   initialAgents: z
     .array(agentProfileSchema)
     .length(DEVELOPMENT_WORLD_CONFIG.agentCount)
@@ -1409,7 +1524,7 @@ export type ExperimentExportWorldState = z.infer<
 
 export const experimentExportDocumentSchema = z
   .object({
-    schemaVersion: z.literal(5),
+    schemaVersion: z.literal(6),
     generatedAt: z.iso.datetime(),
     experiment: experimentManifestSchema,
     retention: experimentRetentionSchema,
@@ -1552,4 +1667,12 @@ export type ExperimentExportDocument = z.infer<
 
 export const experimentExportResponseSchema = z.object({
   document: experimentExportDocumentSchema,
+});
+export const experimentImportRequestSchema = z
+  .object({ document: z.unknown() })
+  .strict();
+export const experimentImportResponseSchema = z.object({
+  snapshot: simulationSnapshotSchema,
+  legacy: z.boolean(),
+  message: z.string().trim().min(1).max(300),
 });

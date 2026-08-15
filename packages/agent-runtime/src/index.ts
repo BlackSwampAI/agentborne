@@ -5,6 +5,7 @@ import {
   agentObservationSchema,
   providerDecisionEnvelopeSchema,
   MESSAGE_MAX_LENGTH,
+  OPENROUTER_MAX_OUTPUT_TOKENS,
   type AgentDecision,
   type AgentObservation,
   type ProviderFailure,
@@ -13,8 +14,8 @@ import {
 } from '@agentborne/shared';
 
 export { applyProviderEnvironmentFile } from './provider-environment';
+export * from './model-catalog';
 
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.7-flash';
 export const OPENROUTER_ENDPOINT =
   'https://openrouter.ai/api/v1/chat/completions';
 
@@ -29,9 +30,13 @@ export interface ProviderDecision {
 /** Providers receive immutable data and never receive a world handle. */
 export interface AgentProvider {
   readonly mode: 'openrouter' | 'scripted-test';
-  readonly model: string;
+  /** Optional descriptive test-provider label; OpenRouter selection is per decision. */
+  readonly model?: string;
   readonly configured: boolean;
-  decide(observation: AgentObservation): Promise<ProviderDecision>;
+  decide(
+    observation: AgentObservation,
+    model: string,
+  ): Promise<ProviderDecision>;
 }
 
 export class AgentProviderError extends Error {
@@ -166,7 +171,7 @@ const decisionJsonSchema = {
 
 export function buildOpenRouterRequest(
   observationInput: AgentObservation,
-  model = DEFAULT_OPENROUTER_MODEL,
+  model: string,
 ) {
   const observation = agentObservationSchema.parse(observationInput);
   return {
@@ -194,11 +199,7 @@ export function buildOpenRouterRequest(
       },
     },
     provider: { require_parameters: true },
-    max_tokens: 1024,
-    reasoning: {
-      effort: 'low' as const,
-      exclude: true,
-    },
+    max_tokens: OPENROUTER_MAX_OUTPUT_TOKENS,
     stream: false,
   };
 }
@@ -234,14 +235,12 @@ const openRouterUsageSchema = z.object({
 
 export interface OpenRouterProviderOptions {
   apiKey?: string;
-  model?: string;
   timeoutMs?: number;
   fetchImplementation?: typeof fetch;
 }
 
 export class OpenRouterAgentProvider implements AgentProvider {
   readonly mode = 'openrouter' as const;
-  readonly model: string;
   readonly configured: boolean;
   readonly #apiKey?: string;
   readonly #timeoutMs: number;
@@ -249,18 +248,19 @@ export class OpenRouterAgentProvider implements AgentProvider {
 
   constructor({
     apiKey,
-    model = DEFAULT_OPENROUTER_MODEL,
     timeoutMs = 15_000,
     fetchImplementation = fetch,
   }: OpenRouterProviderOptions = {}) {
     this.#apiKey = apiKey?.trim() || undefined;
-    this.model = model.trim() || DEFAULT_OPENROUTER_MODEL;
     this.#timeoutMs = timeoutMs;
     this.#fetch = fetchImplementation;
     this.configured = Boolean(this.#apiKey);
   }
 
-  async decide(observation: AgentObservation): Promise<ProviderDecision> {
+  async decide(
+    observation: AgentObservation,
+    model: string,
+  ): Promise<ProviderDecision> {
     const started = Date.now();
     if (!this.#apiKey) {
       throw new AgentProviderError({
@@ -274,7 +274,7 @@ export class OpenRouterAgentProvider implements AgentProvider {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
-      const providerRequest = buildOpenRouterRequest(observation, this.model);
+      const providerRequest = buildOpenRouterRequest(observation, model);
       const requestBody = JSON.stringify(providerRequest);
       let response: Response;
       try {
@@ -302,7 +302,7 @@ export class OpenRouterAgentProvider implements AgentProvider {
         });
         const diagnostics = await readOpenRouterFailureDiagnostics({
           response,
-          model: this.model,
+          model,
           sensitiveValues,
         }).catch(() => undefined);
         if (controller.signal.aborted) throw requestFailure(true);
@@ -313,7 +313,7 @@ export class OpenRouterAgentProvider implements AgentProvider {
           diagnostics ?? {
             httpStatus: response.status,
             model:
-              sanitizeDiagnosticMessage(this.model, sensitiveValues, 120) ??
+              sanitizeDiagnosticMessage(model, sensitiveValues, 200) ??
               '[redacted]',
           },
         );
@@ -335,7 +335,7 @@ export class OpenRouterAgentProvider implements AgentProvider {
       const safeMetadata = providerMetadataFromResponse(
         raw,
         response,
-        this.model,
+        model,
         Date.now() - started,
         collectSensitiveValues({
           apiKey: this.#apiKey,
@@ -426,7 +426,7 @@ function providerMetadataFromResponse(
     model:
       sanitizeDiagnosticMessage(root?.model, sensitiveValues, 120) ??
       sanitizeDiagnosticMessage(fallbackModel, sensitiveValues, 120) ??
-      DEFAULT_OPENROUTER_MODEL,
+      fallbackModel,
     latencyMs,
     ...(requestId === undefined ? {} : { requestId }),
     ...(parsedUsage?.prompt_tokens === undefined
@@ -479,7 +479,7 @@ function httpFailure(status: number): ProviderFailure {
   }
   if (status === 404) {
     return {
-      code: 'provider-http',
+      code: 'model-unavailable',
       message:
         'The selected model is unavailable or no endpoint supports all required parameters.',
       retryable: false,
@@ -546,8 +546,7 @@ async function readOpenRouterFailureDiagnostics({
     providerMessage,
     requestId,
     model:
-      sanitizeDiagnosticMessage(model, sensitiveValues, 120) ??
-      DEFAULT_OPENROUTER_MODEL,
+      sanitizeDiagnosticMessage(model, sensitiveValues, 120) ?? '[unavailable]',
   };
 }
 
@@ -667,7 +666,10 @@ export class ScriptedAgentProvider implements AgentProvider {
     );
   }
 
-  async decide(observation: AgentObservation): Promise<ProviderDecision> {
+  async decide(
+    observation: AgentObservation,
+    selectedModel?: string,
+  ): Promise<ProviderDecision> {
     agentObservationSchema.parse(observation);
     const decision = this.#decisions[this.#cursor];
     if (!decision) {
@@ -682,7 +684,7 @@ export class ScriptedAgentProvider implements AgentProvider {
       decision: structuredClone(decision),
       metadata: {
         provider: 'scripted-test',
-        model: this.model,
+        model: selectedModel ?? this.model,
         latencyMs: 0,
         promptTokens: 0,
         completionTokens: 0,
@@ -707,7 +709,10 @@ export class BrowserTestAgentProvider implements AgentProvider {
   #capturingAgentId?: AgentObservation['agentId'];
   #controllerDeparted = false;
 
-  async decide(observationInput: AgentObservation): Promise<ProviderDecision> {
+  async decide(
+    observationInput: AgentObservation,
+    selectedModel?: string,
+  ): Promise<ProviderDecision> {
     const observation = agentObservationSchema.parse(observationInput);
     if (
       this.#targetCell &&
@@ -806,7 +811,7 @@ export class BrowserTestAgentProvider implements AgentProvider {
       },
       metadata: {
         provider: 'scripted-test',
-        model: this.model,
+        model: selectedModel ?? this.model,
         latencyMs: 0,
         promptTokens: 0,
         completionTokens: 0,
