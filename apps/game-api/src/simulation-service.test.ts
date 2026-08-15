@@ -552,7 +552,7 @@ describe('SimulationService', () => {
       actions: ['capture'],
       level: 'minimal',
     });
-    expect(victimExport.schemaVersion).toBe(7);
+    expect(victimExport.schemaVersion).toBe(8);
     expect(victimExport.turns).toHaveLength(0);
     expect(victimExport.selection).toMatchObject({
       matchingTurnCount: 0,
@@ -662,7 +662,7 @@ describe('SimulationService', () => {
       outcomes: ['rejected'],
       actions: ['capture'],
     });
-    expect(exported.schemaVersion).toBe(7);
+    expect(exported.schemaVersion).toBe(8);
     expect(exported.turns).toMatchObject([
       {
         outcome: 'rejected',
@@ -1235,7 +1235,7 @@ describe('SimulationService', () => {
         controlChanges: false,
       },
     });
-    expect(minimal.schemaVersion).toBe(7);
+    expect(minimal.schemaVersion).toBe(8);
     expect(
       experimentExportDocumentSchema.safeParse({
         ...minimal,

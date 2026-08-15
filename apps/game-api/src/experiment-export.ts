@@ -22,6 +22,7 @@ import {
   type ExperimentConfigurationEvent,
   type ProviderMetadata,
   type WorldSnapshot,
+  type BehaviorConfiguration,
 } from '@agentborne/shared';
 
 export interface ExperimentSource {
@@ -37,6 +38,7 @@ export interface ExperimentSource {
   initialWorld: WorldSnapshot;
   currentWorld: WorldSnapshot;
   modelConfiguration: ExperimentModelConfiguration;
+  behaviorConfiguration: BehaviorConfiguration;
 }
 
 export class ExperimentExportValidationError extends Error {
@@ -593,13 +595,14 @@ export function createExperimentExport(
           },
     );
   const document: ExperimentExportDocument = {
-    schemaVersion: 7,
+    schemaVersion: 8,
     generatedAt,
     experiment: {
       id: source.id,
       startedAt: source.startedAt,
       providerMode: source.providerMode,
       modelConfiguration: structuredClone(source.modelConfiguration),
+      behaviorConfiguration: structuredClone(source.behaviorConfiguration),
       ...(request.level === 'full-safe'
         ? { initialAgents: structuredClone([...source.initialAgents]) }
         : {}),

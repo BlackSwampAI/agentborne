@@ -82,7 +82,7 @@ The agent runtime follows [OpenRouter's usage-accounting contract](https://openr
 
 ## Packages
 
-`packages/shared` owns centralized development limits and all public schemas, including the model capability contract, typed catalog data, assignments, alliances/proposals/diplomacy/results/events, metrics, and schema-v7 exports. Types are inferred from Zod.
+`packages/shared` owns centralized development limits and all public schemas, including the model capability contract, typed catalog data, behavior assignments, alliances/proposals/diplomacy/results/events, metrics, and schema-v8 exports. Schema v8 extends rather than redefines v7 attempt accounting. Types are inferred from Zod.
 
 `packages/world-engine` remains deterministic and has no model, HTTP, UI, storage, or credential dependency. It validates world action, communication, and diplomacy independently and is the sole alliance mutation authority. Direct proximity is derived from a separately supplied pre-action state.
 
@@ -119,3 +119,6 @@ Contested control, capture, territory authority, and schema-v3 selection semanti
 Decoupled communication and schema-v4 selection semantics are recorded in [ADR 0007](adr/0007-decoupled-world-communication.md).
 Formal alliances, the expanded experiment, and schema-v5 semantics are recorded in [ADR 0008](adr/0008-formal-alliances-experiment.md).
 Capability-driven model discovery and experiment assignments are recorded in [ADR 0009](adr/0009-capability-driven-model-catalog.md).
+Versioned behavior profiles, seeded assignment, and authoritative diplomacy affordances are recorded in [ADR 0010](adr/0010-versioned-agent-behavior.md).
+
+Behavior configuration is experiment-owned and includes registry version 1, assignment mode, seed, and one allowlisted personality/strategy pair per agent. Balanced random is the safe default. Reset creates a new experiment and deterministic assignment from its seed; the first completed turn locks behavior. Every retained turn copies its effective assignment, while model and reasoning changes retain their existing between-request semantics.

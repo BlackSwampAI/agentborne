@@ -36,6 +36,8 @@ dialog focus/dismissal/overflow structure, and complete collapsed dock headers.
 Playwright exercises the map-first layout at 1920×1080, 1440×900, 1024×768,
 and approximately 768×900 with deterministic scripted data only.
 
+Behavior coverage verifies registry uniqueness/versioning, deterministic balanced and fully random assignment, independent profile dimensions, turn-one locking, reset semantics, exact diplomacy affordances, layered prompt trust language, bounded structural detail codes, turn attribution, and export preservation. Agent Controller coverage verifies accessible Overview/Models/Behavior tabs, default readiness, manual pre-turn selection, post-start locking, responsive dialog layout, and compact roster summaries.
+
 Attempt-accounting coverage verifies that schema-v7 metrics count every initial,
 automatic-repair, automatic-transport-retry, and manual-retry call exactly once,
 reconcile logical outcomes independently,

@@ -29,6 +29,8 @@ import {
   updateAgentPersonalityResponseSchema,
   updateExperimentModelsRequestSchema,
   updateExperimentModelsResponseSchema,
+  updateExperimentBehaviorRequestSchema,
+  updateExperimentBehaviorResponseSchema,
   verifyModelRequestSchema,
   verifyModelResponseSchema,
   worldSnapshotSchema,
@@ -262,6 +264,48 @@ export function createApp(options: AppOptions = {}) {
             error: { code: error.code, message: error.message },
           }),
           error.code === 'unknown_agent' ? 404 : 400,
+        );
+      throw error;
+    }
+  });
+
+  app.post('/api/simulation/experiment/behavior', async (context) => {
+    const request = updateExperimentBehaviorRequestSchema.safeParse(
+      await context.req.json().catch(() => undefined),
+    );
+    if (!request.success)
+      return context.json(
+        apiErrorSchema.parse({
+          error: {
+            code: 'invalid_behavior_configuration',
+            message: 'The behavior configuration is invalid.',
+          },
+        }),
+        400,
+      );
+    try {
+      return context.json(
+        updateExperimentBehaviorResponseSchema.parse({
+          snapshot: service.updateBehaviorConfiguration(request.data),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: {
+              code: 'behavior_configuration_conflict',
+              message: error.message,
+            },
+          }),
+          409,
+        );
+      if (error instanceof SimulationValidationError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: error.code, message: error.message },
+          }),
+          400,
         );
       throw error;
     }

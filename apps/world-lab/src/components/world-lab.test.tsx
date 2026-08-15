@@ -2464,7 +2464,7 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
   const turn = snapshot.turns[0]!;
   const agent = snapshot.world.agents[0]!;
   return {
-    schemaVersion: 7 as const,
+    schemaVersion: 8 as const,
     generatedAt: '2026-08-13T12:00:02.000Z',
     experiment: {
       id: snapshot.experiment.id,

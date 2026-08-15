@@ -49,6 +49,8 @@ Sixth focused slice: harden each logical model turn with engine-derived legal-ac
 
 Seventh focused slice: polish the production World Lab with newest-first bounded public chat, browser-local follow-turn inspection, a shared accessible responsive dialog shell for model assignment and export, and stable complete headers in the collapsible communication dock. Simulation behavior, provider execution, API contracts, telemetry, and export documents remain unchanged.
 
+Eighth focused slice: add versioned objective/personality/strategy prompt layers, reproducible seeded behavior assignment, engine-derived diplomacy affordances, specific safe validation detail codes, a cohesive Agent Controller, and behavior-attributed safe telemetry. Behavior locks after the experiment begins; arbitrary prompts and mid-experiment reassignment remain deferred.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.

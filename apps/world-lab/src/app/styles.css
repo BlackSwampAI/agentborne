@@ -280,6 +280,73 @@ h2 {
 .model-console {
   justify-self: stretch;
 }
+
+.controller-tabs {
+  display: flex;
+  gap: 0.4rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.65rem;
+}
+.agent-setup-trigger {
+  font-size: 0;
+}
+.agent-setup-trigger > span {
+  font-size: 0.86rem;
+}
+.controller-tabs [aria-selected='true'] {
+  background: var(--accent);
+  color: #fff;
+}
+.controller-overview,
+.behavior-assignments {
+  display: grid;
+  gap: 0.5rem;
+}
+.controller-overview > button {
+  display: grid;
+  grid-template-columns:
+    auto minmax(7rem, 0.6fr) minmax(12rem, 1fr) minmax(10rem, 1fr)
+    auto;
+  align-items: center;
+  gap: 0.65rem;
+  text-align: left;
+  width: 100%;
+}
+.behavior-toolbar {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(14rem, 1fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+.behavior-toolbar label,
+.behavior-assignments label {
+  display: grid;
+  gap: 0.3rem;
+}
+.behavior-assignments > div {
+  display: grid;
+  grid-template-columns: minmax(7rem, 0.6fr) 1fr 1fr;
+  gap: 0.65rem;
+  align-items: end;
+}
+.profile-reference {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.profile-reference p {
+  margin: 0.35rem 0;
+  font-size: 0.84rem;
+}
+@media (max-width: 800px) {
+  .controller-overview > button,
+  .behavior-toolbar,
+  .behavior-assignments > div,
+  .profile-reference {
+    grid-template-columns: 1fr;
+  }
+}
 .model-console > button {
   width: 100%;
   padding: 8px 10px;

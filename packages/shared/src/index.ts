@@ -1,4 +1,10 @@
 import { z } from 'zod';
+export * from './behavior';
+import {
+  assignBehavior,
+  behaviorAssignmentSchema,
+  behaviorConfigurationSchema,
+} from './behavior';
 
 export const MODEL_SUMMARY_MAX_LENGTH = 240;
 export const MESSAGE_MAX_LENGTH = 280;
@@ -717,6 +723,7 @@ const agentObservationObjectSchema = z.object({
   agentId: agentIdSchema,
   agentName: z.string().trim().min(1).max(80),
   personality: z.string().trim().min(1).max(PERSONALITY_MAX_LENGTH),
+  behavior: behaviorAssignmentSchema.optional(),
   currentCell: cellObservationSchema,
   captureEligibility: captureEligibilitySchema,
   actionAvailability: z
@@ -741,6 +748,57 @@ const agentObservationObjectSchema = z.object({
           .strict(),
       ]),
       wait: z.object({ available: z.literal(true) }).strict(),
+    })
+    .strict()
+    .optional(),
+  diplomacyAvailability: z
+    .object({
+      neutral: z.object({ available: z.literal(true) }).strict(),
+      propose: z.discriminatedUnion('available', [
+        z
+          .object({
+            available: z.literal(true),
+            eligibleRecipientAgentIds: z.array(agentIdSchema).min(1).max(7),
+          })
+          .strict(),
+        z
+          .object({
+            available: z.literal(false),
+            eligibleRecipientAgentIds: z.array(agentIdSchema).length(0),
+            reason: z.string().trim().min(1).max(120),
+          })
+          .strict(),
+      ]),
+      accept: z.discriminatedUnion('available', [
+        z
+          .object({
+            available: z.literal(true),
+            acceptableProposalIds: z
+              .array(allianceProposalIdSchema)
+              .min(1)
+              .max(4),
+          })
+          .strict(),
+        z
+          .object({
+            available: z.literal(false),
+            acceptableProposalIds: z.array(allianceProposalIdSchema).length(0),
+            reason: z.string().trim().min(1).max(120),
+          })
+          .strict(),
+      ]),
+      leave: z.discriminatedUnion('available', [
+        z
+          .object({ available: z.literal(true), allianceId: allianceIdSchema })
+          .strict(),
+        z
+          .object({
+            available: z.literal(false),
+            allianceId: z.null(),
+            reason: z.string().trim().min(1).max(120),
+          })
+          .strict(),
+      ]),
     })
     .strict()
     .optional(),
@@ -772,6 +830,12 @@ const agentObservationObjectSchema = z.object({
 export const agentObservationSchema = agentObservationObjectSchema.transform(
   (observation) => ({
     ...observation,
+    behavior: observation.behavior ?? {
+      agentId: observation.agentId,
+      personalityId: 'analytical',
+      strategyId: 'adaptive',
+      manual: false,
+    },
     actionAvailability: observation.actionAvailability ?? {
       moveTargetCellIds: observation.adjacentCells.map(({ cell }) => cell),
       infect:
@@ -788,6 +852,33 @@ export const agentObservationSchema = agentObservationObjectSchema.transform(
             reason: observation.captureEligibility.blockedReason,
           },
       wait: { available: true as const },
+    },
+    diplomacyAvailability: observation.diplomacyAvailability ?? {
+      neutral: { available: true as const },
+      propose: {
+        available: false as const,
+        eligibleRecipientAgentIds: [],
+        reason: 'Authoritative recipient availability was not supplied.',
+      },
+      accept: observation.inboundAllianceProposals.length
+        ? {
+            available: true as const,
+            acceptableProposalIds: observation.inboundAllianceProposals.map(
+              ({ id }) => id,
+            ),
+          }
+        : {
+            available: false as const,
+            acceptableProposalIds: [],
+            reason: 'No acceptable inbound formal alliance proposal exists.',
+          },
+      leave: observation.actingAllianceId
+        ? { available: true as const, allianceId: observation.actingAllianceId }
+        : {
+            available: false as const,
+            allianceId: null,
+            reason: 'The agent is not currently in an alliance.',
+          },
     },
   }),
 );
@@ -976,6 +1067,18 @@ export const updateExperimentModelsRequestSchema = z
 export const updateExperimentModelsResponseSchema = z.object({
   snapshot: z.lazy(() => simulationSnapshotSchema),
 });
+export const updateExperimentBehaviorRequestSchema = z
+  .object({
+    assignmentMode: z.enum(['balanced-random', 'fully-random', 'manual']),
+    seed: z.string().trim().min(1).max(80),
+    assignments: z
+      .array(behaviorAssignmentSchema)
+      .length(DEVELOPMENT_WORLD_CONFIG.agentCount),
+  })
+  .strict();
+export const updateExperimentBehaviorResponseSchema = z.object({
+  snapshot: z.lazy(() => simulationSnapshotSchema),
+});
 
 export const modelVerificationStatusSchema = z.enum([
   'untested',
@@ -1078,6 +1181,14 @@ export const providerFailureSchema = z.object({
         'contradictory-fields',
         'invalid-recipient-sentinel',
         'invalid-action-fields',
+        'missing-move-target',
+        'unexpected-world-target',
+        'contradictory-world-action-fields',
+        'contradictory-diplomacy-fields',
+        'missing-formal-proposal-id',
+        'unexpected-formal-proposal-id',
+        'invalid-formal-proposal-reference',
+        'ineligible-alliance-recipient',
       ]),
     )
     .max(8)
@@ -1109,6 +1220,7 @@ const turnRecordBaseSchema = z.object({
   startedAt: z.iso.datetime(),
   completedAt: z.iso.datetime(),
   observation: agentObservationSchema,
+  behavior: behaviorAssignmentSchema.optional(),
   allianceEvents: z.array(allianceEventSchema).default([]),
   modelAttempts: z.array(modelAttemptSchema).max(1_000).default([]),
 });
@@ -1196,6 +1308,7 @@ export const simulationSnapshotSchema = z
     providerMode: providerModeSchema,
     providerConfigured: z.boolean(),
     modelConfiguration: experimentModelConfigurationSchema,
+    behaviorConfiguration: behaviorConfigurationSchema.optional(),
     resolvedModels: z
       .array(resolvedAgentModelSchema)
       .length(DEVELOPMENT_WORLD_CONFIG.agentCount),
@@ -1309,7 +1422,21 @@ export const simulationSnapshotSchema = z
         path: ['experiment', 'currentAlliances'],
         message: 'Every active alliance requires one current summary.',
       });
-  });
+  })
+  .transform((snapshot) => ({
+    ...snapshot,
+    behaviorConfiguration: snapshot.behaviorConfiguration ?? {
+      registryVersion: 1 as const,
+      assignmentMode: 'balanced-random' as const,
+      seed: 'legacy-default-v1',
+      assignments: assignBehavior(
+        snapshot.world.agents.map(({ id }) => id),
+        'legacy-default-v1',
+        'balanced-random',
+      ),
+      locked: snapshot.turnNumber > 0,
+    },
+  }));
 export type SimulationSnapshot = z.infer<typeof simulationSnapshotSchema>;
 
 export const singleTurnResponseSchema = z.object({
@@ -1376,6 +1503,8 @@ export const apiErrorCodeSchema = z.enum([
   'model_configuration_conflict',
   'invalid_model_configuration',
   'models_unavailable',
+  'behavior_configuration_conflict',
+  'invalid_behavior_configuration',
   'model_verification_conflict',
   'cancel_conflict',
   'invalid_import',
@@ -1451,6 +1580,7 @@ export const experimentManifestSchema = z.object({
   generatedAt: z.iso.datetime().optional(),
   providerMode: providerModeSchema,
   modelConfiguration: experimentModelConfigurationSchema.optional(),
+  behaviorConfiguration: behaviorConfigurationSchema.optional(),
   initialAgents: z
     .array(agentProfileSchema)
     .length(DEVELOPMENT_WORLD_CONFIG.agentCount)
@@ -1836,7 +1966,7 @@ export type ExperimentExportWorldState = z.infer<
 
 export const experimentExportDocumentSchema = z
   .object({
-    schemaVersion: z.literal(7),
+    schemaVersion: z.literal(8),
     generatedAt: z.iso.datetime(),
     experiment: experimentManifestSchema,
     retention: experimentRetentionSchema,

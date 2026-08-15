@@ -281,7 +281,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   const exported = experimentExportDocumentSchema.parse(
     JSON.parse(await readFile(downloadedPath!, 'utf8')),
   );
-  expect(exported.schemaVersion).toBe(7);
+  expect(exported.schemaVersion).toBe(8);
   expect(exported.filters.level).toBe('minimal');
   expect(exported.selection.selectedAgentIds).toEqual([EMBER_ID]);
   expect(exported.turns).toEqual([]);
