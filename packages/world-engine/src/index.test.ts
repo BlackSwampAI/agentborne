@@ -3,10 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { agentIdSchema, h3CellSchema, type Agent } from '@agentborne/shared';
 import {
   applyCommunication,
+  applyDiplomacy,
   applyWorldAction,
   areAdjacent,
   createDevelopmentWorld,
   getCaptureEligibility,
+  expireAllianceProposals,
   toWorldState,
 } from '.';
 
@@ -29,6 +31,8 @@ const agent: Agent = {
 };
 const context = {
   createEventId: () => '67aa21b9-fc78-4b04-9f92-9862bf346f96',
+  createAllianceId: () => 'a1111111-1111-4111-8111-111111111111',
+  createProposalId: () => 'b2222222-2222-4222-8222-222222222222',
   now: () => '2026-08-13T12:00:00.000Z',
 };
 
@@ -466,18 +470,21 @@ describe('wait and deterministic development world', () => {
     expect(result.state.agents).toBe(before.agents);
   });
 
-  it('constructs the same 61 cells and six valid named agents', () => {
+  it('constructs the same 127 cells and eight valid named agents', () => {
     const first = createDevelopmentWorld({ generatedAt: context.now() });
     const second = createDevelopmentWorld({ generatedAt: context.now() });
     expect(first).toEqual(second);
-    expect(first.hexes).toHaveLength(61);
+    expect(first.hexes).toHaveLength(127);
     expect(
       first.hexes.every(
         (hex) => hex.state === 'open' && hex.controllerAgentId === null,
       ),
     ).toBe(true);
-    expect(first.agents).toHaveLength(6);
-    expect(new Set(first.agents.map(({ id }) => id)).size).toBe(6);
+    expect(first.agents).toHaveLength(8);
+    expect(new Set(first.agents.map(({ id }) => id)).size).toBe(8);
+    expect(
+      new Set(first.agents.map(({ currentCell }) => currentCell)).size,
+    ).toBe(8);
     expect(
       first.agents.every(({ currentCell }) =>
         first.hexes.some(({ cell }) => cell === currentCell),
@@ -486,9 +493,96 @@ describe('wait and deterministic development world', () => {
     expect(first.agents.find(({ name }) => name === 'Mingle')).toMatchObject({
       id: '3ba3ef0b-2142-44cc-b175-f6e5d6e98df5',
       color: '#63d2ff',
-      currentCell: first.hexes[20]!.cell,
+      currentCell: first.hexes[97]!.cell,
       personality:
-        'You are a social coalition-builder. Move toward visible agents, initiate and continue conversations, negotiate before taking their territory, and coordinate when useful. Infect open cells opportunistically, but value interaction over silent pursuit.',
+        'You are a social coalition-builder. Seek agents, initiate and continue conversations, propose alliances, answer offers, negotiate borders, and coordinate captures against dominant rivals. Prefer cooperation and public diplomacy over silent expansion, but protect your own territory and leave an alliance that repeatedly ignores or exploits you. Make concrete proposals rather than merely announcing actions.',
+    });
+  });
+});
+
+describe('formal alliances', () => {
+  it('forms, colors, leaves, dissolves, and expires proposals deterministically', () => {
+    const initial = toWorldState(
+      createDevelopmentWorld({ generatedAt: context.now() }),
+    );
+    const [ember, rook, mingle] = [...initial.agents.values()];
+    const proposed = applyDiplomacy(
+      initial,
+      ember!.id,
+      { type: 'propose-alliance', recipientId: rook!.id },
+      1,
+      context,
+    );
+    expect(proposed.result).toMatchObject({ requested: true, accepted: true });
+    const proposalId = [...proposed.state.pendingAllianceProposals!.keys()][0]!;
+    const formed = applyDiplomacy(
+      proposed.state,
+      rook!.id,
+      { type: 'accept-alliance', proposalId },
+      2,
+      context,
+    );
+    expect(formed.result).toMatchObject({
+      requested: true,
+      accepted: true,
+      events: [{ type: 'alliance-formed', allianceColor: '#0072B2' }],
+    });
+    expect([...formed.state.alliances!.values()][0]?.memberAgentIds).toEqual([
+      ember!.id,
+      rook!.id,
+    ]);
+    const invite = applyDiplomacy(
+      formed.state,
+      ember!.id,
+      { type: 'propose-alliance', recipientId: mingle!.id },
+      3,
+      {
+        ...context,
+        createProposalId: () => 'c3333333-3333-4333-8333-333333333333',
+      },
+    );
+    const inviteId = [...invite.state.pendingAllianceProposals!.keys()][0]!;
+    const joined = applyDiplomacy(
+      invite.state,
+      mingle!.id,
+      { type: 'accept-alliance', proposalId: inviteId },
+      4,
+      context,
+    );
+    expect(
+      [...joined.state.alliances!.values()][0]?.memberAgentIds,
+    ).toHaveLength(3);
+    const left = applyDiplomacy(
+      joined.state,
+      rook!.id,
+      { type: 'leave-alliance' },
+      5,
+      context,
+    );
+    expect([...left.state.alliances!.values()][0]?.memberAgentIds).toEqual([
+      ember!.id,
+      mingle!.id,
+    ]);
+    const dissolved = applyDiplomacy(
+      left.state,
+      mingle!.id,
+      { type: 'leave-alliance' },
+      6,
+      context,
+    );
+    expect(dissolved.state.alliances?.size).toBe(0);
+    const laterProposal = applyDiplomacy(
+      dissolved.state,
+      ember!.id,
+      { type: 'propose-alliance', recipientId: rook!.id },
+      10,
+      context,
+    );
+    const expired = expireAllianceProposals(laterProposal.state, 18, context);
+    expect(expired.pendingAllianceProposals?.size).toBe(0);
+    expect(expired.events.at(-1)).toMatchObject({
+      type: 'alliance-proposal-closed',
+      reason: 'expired',
     });
   });
 });

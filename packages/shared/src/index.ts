@@ -6,14 +6,36 @@ export const MESSAGE_RANGE = 3;
 export const RECENT_PUBLIC_MESSAGE_LIMIT = 12;
 export const RECENT_DIRECT_MESSAGE_LIMIT = 6;
 export const RECENT_CONTROL_CHANGE_LIMIT = 6;
+export const RECENT_ALLIANCE_EVENT_LIMIT = 8;
 export const PERSONALITY_MAX_LENGTH = 600;
 export const PROVIDER_ERROR_MAX_LENGTH = 240;
+export const DEVELOPMENT_WORLD_CONFIG = {
+  latitude: 41.6528,
+  longitude: -83.5379,
+  resolution: 9,
+  radius: 6,
+  cellCount: 127,
+  agentCount: 8,
+} as const;
+export const ALLIANCE_PROPOSAL_DURATION_TURNS = 8;
+export const ALLIANCE_COLOR_PALETTE = [
+  '#0072B2',
+  '#D55E00',
+  '#009E73',
+  '#CC79A7',
+] as const;
 
 export const agentIdSchema = z.uuid().brand<'AgentId'>();
 export type AgentId = z.infer<typeof agentIdSchema>;
 
 export const eventIdSchema = z.uuid().brand<'EventId'>();
 export type EventId = z.infer<typeof eventIdSchema>;
+
+export const allianceIdSchema = z.uuid().brand<'AllianceId'>();
+export type AllianceId = z.infer<typeof allianceIdSchema>;
+export const allianceProposalIdSchema = z.uuid().brand<'AllianceProposalId'>();
+export type AllianceProposalId = z.infer<typeof allianceProposalIdSchema>;
+export const colorSchema = z.string().regex(/^#[0-9a-f]{6}$/i);
 
 export const h3CellSchema = z
   .string()
@@ -47,7 +69,7 @@ export const personalitySchema = z
 export const agentProfileSchema = z.object({
   id: agentIdSchema,
   name: z.string().trim().min(1).max(80),
-  color: z.string().regex(/^#[0-9a-f]{6}$/i),
+  color: colorSchema,
   personality: personalitySchema,
   currentCell: h3CellSchema,
 });
@@ -87,6 +109,51 @@ export const communicationIntentSchema = z.discriminatedUnion('channel', [
   directCommunicationSchema,
 ]);
 export type CommunicationIntent = z.infer<typeof communicationIntentSchema>;
+
+export const diplomacyIntentSchema = z.discriminatedUnion('type', [
+  z
+    .object({ type: z.literal('propose-alliance'), recipientId: agentIdSchema })
+    .strict(),
+  z
+    .object({
+      type: z.literal('accept-alliance'),
+      proposalId: allianceProposalIdSchema,
+    })
+    .strict(),
+  z.object({ type: z.literal('leave-alliance') }).strict(),
+]);
+export type DiplomacyIntent = z.infer<typeof diplomacyIntentSchema>;
+
+export const allianceSchema = z.object({
+  id: allianceIdSchema,
+  color: z.enum(ALLIANCE_COLOR_PALETTE),
+  memberAgentIds: z
+    .array(agentIdSchema)
+    .min(2)
+    .max(DEVELOPMENT_WORLD_CONFIG.agentCount)
+    .refine((ids) => new Set(ids).size === ids.length, {
+      message: 'Alliance members must be unique.',
+    }),
+});
+export type Alliance = z.infer<typeof allianceSchema>;
+
+export const allianceProposalSchema = z
+  .object({
+    id: allianceProposalIdSchema,
+    proposerAgentId: agentIdSchema,
+    recipientAgentId: agentIdSchema,
+    proposerAllianceId: allianceIdSchema.nullable(),
+    originatingTurn: z.number().int().positive(),
+    expirationTurn: z.number().int().positive(),
+  })
+  .strict()
+  .refine(
+    (proposal) => proposal.proposerAgentId !== proposal.recipientAgentId,
+    {
+      message: 'Alliance proposal participants must be distinct.',
+    },
+  );
+export type AllianceProposal = z.infer<typeof allianceProposalSchema>;
 
 export const waitActionSchema = z.object({ type: z.literal('wait') });
 
@@ -150,6 +217,69 @@ const agentWaitedWorldEventSchema = worldEventBaseSchema.extend({
   type: z.literal('agent-waited'),
 });
 
+const allianceEventBaseSchema = worldEventBaseSchema.extend({
+  turnNumber: z.number().int().positive(),
+});
+export const allianceProposedEventSchema = allianceEventBaseSchema.extend({
+  type: z.literal('alliance-proposed'),
+  proposalId: allianceProposalIdSchema,
+  recipientAgentId: agentIdSchema,
+  allianceId: allianceIdSchema.nullable(),
+  expirationTurn: z.number().int().positive(),
+});
+export const allianceProposalClosedEventSchema = allianceEventBaseSchema.extend(
+  {
+    type: z.literal('alliance-proposal-closed'),
+    proposalId: allianceProposalIdSchema,
+    proposerAgentId: agentIdSchema,
+    recipientAgentId: agentIdSchema,
+    reason: z.enum(['expired', 'invalidated']),
+  },
+);
+export const allianceFormedEventSchema = allianceEventBaseSchema.extend({
+  type: z.literal('alliance-formed'),
+  allianceId: allianceIdSchema,
+  allianceColor: z.enum(ALLIANCE_COLOR_PALETTE),
+  memberAgentIds: z.array(agentIdSchema).length(2),
+});
+export const agentJoinedAllianceEventSchema = allianceEventBaseSchema.extend({
+  type: z.literal('agent-joined-alliance'),
+  allianceId: allianceIdSchema,
+  allianceColor: z.enum(ALLIANCE_COLOR_PALETTE),
+  joinedAgentId: agentIdSchema,
+  memberAgentIds: z
+    .array(agentIdSchema)
+    .min(2)
+    .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+});
+export const agentLeftAllianceEventSchema = allianceEventBaseSchema.extend({
+  type: z.literal('agent-left-alliance'),
+  allianceId: allianceIdSchema,
+  allianceColor: z.enum(ALLIANCE_COLOR_PALETTE),
+  leftAgentId: agentIdSchema,
+  remainingMemberAgentIds: z
+    .array(agentIdSchema)
+    .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+});
+export const allianceDissolvedEventSchema = allianceEventBaseSchema.extend({
+  type: z.literal('alliance-dissolved'),
+  allianceId: allianceIdSchema,
+  allianceColor: z.enum(ALLIANCE_COLOR_PALETTE),
+  formerMemberAgentIds: z
+    .array(agentIdSchema)
+    .min(1)
+    .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+});
+export const allianceEventSchema = z.discriminatedUnion('type', [
+  allianceProposedEventSchema,
+  allianceProposalClosedEventSchema,
+  allianceFormedEventSchema,
+  agentJoinedAllianceEventSchema,
+  agentLeftAllianceEventSchema,
+  allianceDissolvedEventSchema,
+]);
+export type AllianceEvent = z.infer<typeof allianceEventSchema>;
+
 export const nonCommunicationWorldEventSchema = z.discriminatedUnion('type', [
   agentMovedWorldEventSchema,
   hexInfectedWorldEventSchema,
@@ -167,6 +297,12 @@ export const worldEventSchema = z.discriminatedUnion('type', [
   publicMessageEventSchema,
   directMessageEventSchema,
   agentWaitedWorldEventSchema,
+  allianceProposedEventSchema,
+  allianceProposalClosedEventSchema,
+  allianceFormedEventSchema,
+  agentJoinedAllianceEventSchema,
+  agentLeftAllianceEventSchema,
+  allianceDissolvedEventSchema,
 ]);
 export type WorldEvent = z.infer<typeof worldEventSchema>;
 
@@ -179,6 +315,7 @@ export const invalidActionReasonSchema = z.enum([
   'capture-open-cell',
   'already-controller',
   'controller-present',
+  'allied-controller',
 ]);
 export type InvalidActionReason = z.infer<typeof invalidActionReasonSchema>;
 
@@ -186,6 +323,7 @@ export const captureBlockedReasonSchema = z.enum([
   'capture-open-cell',
   'already-controller',
   'controller-present',
+  'allied-controller',
 ]);
 export type CaptureBlockedReason = z.infer<typeof captureBlockedReasonSchema>;
 
@@ -258,15 +396,68 @@ export const communicationResultSchema = z.union([
 ]);
 export type CommunicationResult = z.infer<typeof communicationResultSchema>;
 
+export const diplomacyRejectionReasonSchema = z.enum([
+  'invalid-diplomacy',
+  'unknown-recipient',
+  'self-proposal',
+  'recipient-allied',
+  'current-ally',
+  'outgoing-proposal-exists',
+  'incoming-proposal-exists',
+  'unknown-proposal',
+  'not-proposal-recipient',
+  'stale-proposal',
+  'not-allied',
+  'alliance-capacity',
+]);
+export type DiplomacyRejectionReason = z.infer<
+  typeof diplomacyRejectionReasonSchema
+>;
+export const diplomacyAttemptSchema = z.object({
+  type: z.enum([
+    'propose-alliance',
+    'accept-alliance',
+    'leave-alliance',
+    'invalid',
+  ]),
+  recipientId: agentIdSchema.nullable().optional(),
+  proposalId: allianceProposalIdSchema.nullable().optional(),
+});
+export const diplomacyResultSchema = z.union([
+  z.object({ requested: z.literal(false) }).strict(),
+  z.object({
+    requested: z.literal(true),
+    accepted: z.literal(true),
+    intent: diplomacyIntentSchema,
+    events: z.array(allianceEventSchema).min(1),
+  }),
+  z.object({
+    requested: z.literal(true),
+    accepted: z.literal(false),
+    attempt: diplomacyAttemptSchema,
+    reason: diplomacyRejectionReasonSchema,
+    details: z.string().min(1).max(300),
+  }),
+]);
+export type DiplomacyResult = z.infer<typeof diplomacyResultSchema>;
+
 const worldSnapshotObjectSchema = z.object({
   generatedAt: z.iso.datetime(),
   hexes: z.array(hexSchema),
   agents: z.array(agentSchema),
   events: z.array(worldEventSchema).max(120),
+  alliances: z.array(allianceSchema).max(4).default([]),
+  pendingAllianceProposals: z
+    .array(allianceProposalSchema)
+    .max(DEVELOPMENT_WORLD_CONFIG.agentCount)
+    .default([]),
 });
 
 function validateWorldControllers(
-  world: Pick<z.infer<typeof worldSnapshotObjectSchema>, 'hexes' | 'agents'>,
+  world: Pick<
+    z.infer<typeof worldSnapshotObjectSchema>,
+    'hexes' | 'agents' | 'alliances' | 'pendingAllianceProposals'
+  >,
   context: z.RefinementCtx,
 ): void {
   const agentIds = new Set(world.agents.map(({ id }) => id));
@@ -278,6 +469,110 @@ function validateWorldControllers(
         message: 'An infected hex controller must be a world agent.',
       });
   }
+  const memberships = new Set<AgentId>();
+  const colors = new Set<string>();
+  const allianceIds = new Set<AllianceId>();
+  for (const [index, alliance] of world.alliances.entries()) {
+    if (allianceIds.has(alliance.id))
+      context.addIssue({
+        code: 'custom',
+        path: ['alliances', index, 'id'],
+        message: 'Active alliance IDs must be unique.',
+      });
+    allianceIds.add(alliance.id);
+    if (colors.has(alliance.color))
+      context.addIssue({
+        code: 'custom',
+        path: ['alliances', index, 'color'],
+        message: 'Active alliance colors must be unique.',
+      });
+    colors.add(alliance.color);
+    for (const memberId of alliance.memberAgentIds) {
+      if (!agentIds.has(memberId))
+        context.addIssue({
+          code: 'custom',
+          path: ['alliances', index, 'memberAgentIds'],
+          message: 'Alliance members must be world agents.',
+        });
+      if (memberships.has(memberId))
+        context.addIssue({
+          code: 'custom',
+          path: ['alliances', index, 'memberAgentIds'],
+          message: 'An agent may belong to at most one alliance.',
+        });
+      memberships.add(memberId);
+    }
+  }
+  const outgoing = new Set<AgentId>();
+  const incoming = new Set<AgentId>();
+  const proposalIds = new Set<AllianceProposalId>();
+  for (const [index, proposal] of world.pendingAllianceProposals.entries()) {
+    if (proposalIds.has(proposal.id))
+      context.addIssue({
+        code: 'custom',
+        path: ['pendingAllianceProposals', index, 'id'],
+        message: 'Proposal IDs must be unique.',
+      });
+    proposalIds.add(proposal.id);
+    if (
+      !agentIds.has(proposal.proposerAgentId) ||
+      !agentIds.has(proposal.recipientAgentId)
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['pendingAllianceProposals', index],
+        message: 'Proposal participants must be world agents.',
+      });
+    if (outgoing.has(proposal.proposerAgentId))
+      context.addIssue({
+        code: 'custom',
+        path: ['pendingAllianceProposals', index, 'proposerAgentId'],
+        message: 'A proposer may have at most one outgoing proposal.',
+      });
+    if (incoming.has(proposal.recipientAgentId))
+      context.addIssue({
+        code: 'custom',
+        path: ['pendingAllianceProposals', index, 'recipientAgentId'],
+        message: 'A recipient may have at most one incoming proposal.',
+      });
+    if (
+      proposal.expirationTurn !==
+      proposal.originatingTurn + ALLIANCE_PROPOSAL_DURATION_TURNS
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['pendingAllianceProposals', index, 'expirationTurn'],
+        message: 'Proposal expiration must be exactly one eight-agent round.',
+      });
+    if (
+      proposal.proposerAllianceId &&
+      !world.alliances.some(({ id }) => id === proposal.proposerAllianceId)
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['pendingAllianceProposals', index, 'proposerAllianceId'],
+        message: 'A recorded proposer alliance must be active.',
+      });
+    if (
+      proposal.proposerAllianceId &&
+      !world.alliances
+        .find(({ id }) => id === proposal.proposerAllianceId)
+        ?.memberAgentIds.includes(proposal.proposerAgentId)
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['pendingAllianceProposals', index, 'proposerAllianceId'],
+        message: 'The proposer must remain in the recorded alliance.',
+      });
+    if (memberships.has(proposal.recipientAgentId))
+      context.addIssue({
+        code: 'custom',
+        path: ['pendingAllianceProposals', index, 'recipientAgentId'],
+        message: 'A proposal recipient must remain unaffiliated.',
+      });
+    outgoing.add(proposal.proposerAgentId);
+    incoming.add(proposal.recipientAgentId);
+  }
 }
 
 export const worldSnapshotSchema = worldSnapshotObjectSchema.superRefine(
@@ -285,7 +580,22 @@ export const worldSnapshotSchema = worldSnapshotObjectSchema.superRefine(
 );
 export type WorldSnapshot = z.infer<typeof worldSnapshotSchema>;
 
-export const cellObservationSchema = hexSchema;
+export const cellObservationSchema = z.discriminatedUnion('state', [
+  z.object({
+    cell: h3CellSchema,
+    state: z.literal('open'),
+    controllerAgentId: z.null(),
+    controllerAllianceId: z.null(),
+    effectiveColor: z.null(),
+  }),
+  z.object({
+    cell: h3CellSchema,
+    state: z.literal('infected'),
+    controllerAgentId: agentIdSchema,
+    controllerAllianceId: allianceIdSchema.nullable(),
+    effectiveColor: colorSchema,
+  }),
+]);
 export type CellObservation = z.infer<typeof cellObservationSchema>;
 
 export const nearbyAgentObservationSchema = z.object({
@@ -293,6 +603,7 @@ export const nearbyAgentObservationSchema = z.object({
   name: z.string().trim().min(1).max(80),
   currentCell: h3CellSchema,
   distance: z.number().int().min(0).max(4),
+  allianceId: allianceIdSchema.nullable(),
 });
 
 export const publicEventObservationSchema = z.object({
@@ -327,14 +638,22 @@ export type ObservedDirectMessage = z.infer<typeof observedDirectMessageSchema>;
 export const territoryScoreboardEntrySchema = z.object({
   agentId: agentIdSchema,
   name: z.string().trim().min(1).max(80),
-  color: z.string().regex(/^#[0-9a-f]{6}$/i),
-  controlledCellCount: z.number().int().nonnegative().max(61),
+  color: colorSchema,
+  allianceId: allianceIdSchema.nullable(),
+  effectiveColor: colorSchema,
+  controlledCellCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(DEVELOPMENT_WORLD_CONFIG.cellCount),
 });
 export const territoryScoreboardSchema = z
   .array(territoryScoreboardEntrySchema)
-  .length(6)
+  .length(DEVELOPMENT_WORLD_CONFIG.agentCount)
   .refine(
-    (entries) => new Set(entries.map(({ agentId }) => agentId)).size === 6,
+    (entries) =>
+      new Set(entries.map(({ agentId }) => agentId)).size ===
+      DEVELOPMENT_WORLD_CONFIG.agentCount,
     { message: 'Territory scoreboard agent IDs must be unique.' },
   );
 export type TerritoryScoreboard = z.infer<typeof territoryScoreboardSchema>;
@@ -349,6 +668,45 @@ export const observedControlChangeSchema = z.object({
 });
 export type ObservedControlChange = z.infer<typeof observedControlChangeSchema>;
 
+export const allianceTerritorySummarySchema = z
+  .object({
+    allianceId: allianceIdSchema,
+    color: z.enum(ALLIANCE_COLOR_PALETTE),
+    totalControlledCellCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(DEVELOPMENT_WORLD_CONFIG.cellCount),
+    members: z
+      .array(
+        z.object({
+          agentId: agentIdSchema,
+          name: z.string().trim().min(1).max(80),
+          controlledCellCount: z
+            .number()
+            .int()
+            .nonnegative()
+            .max(DEVELOPMENT_WORLD_CONFIG.cellCount),
+        }),
+      )
+      .min(2)
+      .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+  })
+  .refine(
+    ({ totalControlledCellCount, members }) =>
+      totalControlledCellCount ===
+      members.reduce((sum, member) => sum + member.controlledCellCount, 0),
+    { message: 'Alliance territory must equal the sum of member control.' },
+  );
+export type AllianceTerritorySummary = z.infer<
+  typeof allianceTerritorySummarySchema
+>;
+
+export const observedAllianceEventSchema = z.object({
+  event: allianceEventSchema,
+  summary: z.string().trim().min(1).max(240),
+});
+
 export const agentObservationSchema = z.object({
   agentId: agentIdSchema,
   agentName: z.string().trim().min(1).max(80),
@@ -356,7 +714,9 @@ export const agentObservationSchema = z.object({
   currentCell: cellObservationSchema,
   captureEligibility: captureEligibilitySchema,
   adjacentCells: z.array(cellObservationSchema).min(1).max(6),
-  nearbyAgents: z.array(nearbyAgentObservationSchema).max(5),
+  nearbyAgents: z
+    .array(nearbyAgentObservationSchema)
+    .max(DEVELOPMENT_WORLD_CONFIG.agentCount - 1),
   recentEvents: z.array(publicEventObservationSchema).max(8),
   recentPublicMessages: z
     .array(observedPublicMessageSchema)
@@ -365,6 +725,14 @@ export const agentObservationSchema = z.object({
     .array(observedDirectMessageSchema)
     .max(RECENT_DIRECT_MESSAGE_LIMIT),
   territoryScoreboard: territoryScoreboardSchema,
+  actingAllianceId: allianceIdSchema.nullable(),
+  actingAlliance: allianceTerritorySummarySchema.nullable(),
+  activeAlliances: z.array(allianceTerritorySummarySchema).max(4),
+  inboundAllianceProposals: z.array(allianceProposalSchema).max(1),
+  outboundAllianceProposals: z.array(allianceProposalSchema).max(1),
+  recentAllianceEvents: z
+    .array(observedAllianceEventSchema)
+    .max(RECENT_ALLIANCE_EVENT_LIMIT),
   recentControlChanges: z
     .array(observedControlChangeSchema)
     .max(RECENT_CONTROL_CHANGE_LIMIT),
@@ -375,6 +743,7 @@ export const agentDecisionSchema = z
   .object({
     worldAction: worldActionSchema,
     communication: communicationIntentSchema.nullish(),
+    diplomacy: diplomacyIntentSchema.nullish(),
     summary: z.string().trim().min(1).max(MODEL_SUMMARY_MAX_LENGTH),
   })
   .strict();
@@ -384,6 +753,7 @@ export const providerDecisionEnvelopeSchema = z
   .object({
     worldAction: worldActionSchema,
     communication: z.unknown().optional(),
+    diplomacy: z.unknown().optional(),
     summary: z.string().trim().min(1).max(MODEL_SUMMARY_MAX_LENGTH),
   })
   .strict();
@@ -429,14 +799,17 @@ const turnRecordBaseSchema = z.object({
   startedAt: z.iso.datetime(),
   completedAt: z.iso.datetime(),
   observation: agentObservationSchema,
+  allianceEvents: z.array(allianceEventSchema).default([]),
 });
 
 const completedTurnFields = {
   worldAction: worldActionSchema,
   communication: communicationIntentSchema.optional(),
+  diplomacy: diplomacyIntentSchema.optional(),
   summary: z.string().trim().min(1).max(MODEL_SUMMARY_MAX_LENGTH),
   provider: providerMetadataSchema,
   communicationResult: communicationResultSchema,
+  diplomacyResult: diplomacyResultSchema,
 };
 
 export const agentTurnRecordSchema = z.discriminatedUnion('outcome', [
@@ -496,6 +869,7 @@ export const simulationSnapshotSchema = z
       complete: z.boolean(),
       metrics: z.lazy(() => experimentMetricsSchema),
       currentTerritory: territoryScoreboardSchema,
+      currentAlliances: z.array(allianceTerritorySummarySchema).max(4),
     }),
   })
   .superRefine((snapshot, context) => {
@@ -522,6 +896,19 @@ export const simulationSnapshotSchema = z
           path: ['experiment', 'currentTerritory', index],
           message: 'Current territory identity must match a world agent.',
         });
+      const alliance = snapshot.world.alliances.find(({ memberAgentIds }) =>
+        memberAgentIds.includes(entry.agentId),
+      );
+      if (
+        entry.allianceId !== (alliance?.id ?? null) ||
+        entry.effectiveColor !== (alliance?.color ?? agent?.color)
+      )
+        context.addIssue({
+          code: 'custom',
+          path: ['experiment', 'currentTerritory', index],
+          message:
+            'Current territory alliance and effective color must be authoritative.',
+        });
       if (authoritative.get(entry.agentId) !== entry.controlledCellCount)
         context.addIssue({
           code: 'custom',
@@ -534,6 +921,52 @@ export const simulationSnapshotSchema = z
           message: 'Current territory must match authoritative world control.',
         });
     }
+    for (const [
+      index,
+      summary,
+    ] of snapshot.experiment.currentAlliances.entries()) {
+      const alliance = snapshot.world.alliances.find(
+        ({ id }) => id === summary.allianceId,
+      );
+      if (
+        !alliance ||
+        alliance.color !== summary.color ||
+        alliance.memberAgentIds.length !== summary.members.length ||
+        alliance.memberAgentIds.some(
+          (id) => !summary.members.some(({ agentId }) => agentId === id),
+        )
+      )
+        context.addIssue({
+          code: 'custom',
+          path: ['experiment', 'currentAlliances', index],
+          message:
+            'Current alliance summary must match authoritative membership.',
+        });
+      for (const member of summary.members) {
+        const territory = snapshot.experiment.currentTerritory.find(
+          ({ agentId }) => agentId === member.agentId,
+        );
+        if (
+          !territory ||
+          territory.controlledCellCount !== member.controlledCellCount
+        )
+          context.addIssue({
+            code: 'custom',
+            path: ['experiment', 'currentAlliances', index, 'members'],
+            message:
+              'Alliance member territory must match current individual control.',
+          });
+      }
+    }
+    if (
+      snapshot.experiment.currentAlliances.length !==
+      snapshot.world.alliances.length
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['experiment', 'currentAlliances'],
+        message: 'Every active alliance requires one current summary.',
+      });
   });
 export type SimulationSnapshot = z.infer<typeof simulationSnapshotSchema>;
 
@@ -621,7 +1054,10 @@ export const experimentManifestSchema = z.object({
   startedAt: z.iso.datetime(),
   generatedAt: z.iso.datetime().optional(),
   providerMode: providerModeSchema,
-  initialAgents: z.array(agentProfileSchema).length(6).optional(),
+  initialAgents: z
+    .array(agentProfileSchema)
+    .length(DEVELOPMENT_WORLD_CONFIG.agentCount)
+    .optional(),
 });
 export type ExperimentManifest = z.infer<typeof experimentManifestSchema>;
 
@@ -672,6 +1108,39 @@ export const metricCountsSchema = z.object({
   publicMessagesSent: z.number().int().nonnegative().default(0),
   directMessagesSent: z.number().int().nonnegative().default(0),
   directMessagesReceived: z.number().int().nonnegative().default(0),
+  diplomacyProposalsRequested: z.number().int().nonnegative().default(0),
+  diplomacyAcceptancesRequested: z.number().int().nonnegative().default(0),
+  diplomacyDeparturesRequested: z.number().int().nonnegative().default(0),
+  diplomacyProposalsAccepted: z.number().int().nonnegative().default(0),
+  diplomacyAcceptancesAccepted: z.number().int().nonnegative().default(0),
+  diplomacyDeparturesAccepted: z.number().int().nonnegative().default(0),
+  diplomacyRejected: z.number().int().nonnegative().default(0),
+  diplomacyRejections: z
+    .array(
+      z.object({
+        type: z.enum([
+          'propose-alliance',
+          'accept-alliance',
+          'leave-alliance',
+          'invalid',
+        ]),
+        reason: diplomacyRejectionReasonSchema,
+        count: z.number().int().positive(),
+      }),
+    )
+    .max(48)
+    .default([]),
+  proposalsCreated: z.number().int().nonnegative().default(0),
+  proposalsSent: z.number().int().nonnegative().default(0),
+  proposalsReceived: z.number().int().nonnegative().default(0),
+  proposalsExpired: z.number().int().nonnegative().default(0),
+  proposalsInvalidated: z.number().int().nonnegative().default(0),
+  alliancesFormed: z.number().int().nonnegative().default(0),
+  alliancesJoined: z.number().int().nonnegative().default(0),
+  alliancesLeft: z.number().int().nonnegative().default(0),
+  alliancesDissolved: z.number().int().nonnegative().default(0),
+  alliedCaptureAttempts: z.number().int().nonnegative().default(0),
+  alliedCaptureRejections: z.number().int().nonnegative().default(0),
   uniqueVisitedCells: z.number().int().nonnegative(),
   averageLatencyMs: z.number().nonnegative().optional(),
   tokens: tokenTotalsSchema,
@@ -754,7 +1223,10 @@ const exportSelectionSchema = z.discriminatedUnion('mode', [
   z
     .object({
       mode: z.literal('selected'),
-      agentIds: z.array(agentIdSchema).min(1).max(6),
+      agentIds: z
+        .array(agentIdSchema)
+        .min(1)
+        .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
     })
     .strict()
     .refine((value) => new Set(value.agentIds).size === value.agentIds.length, {
@@ -830,7 +1302,12 @@ export const experimentExportPreviewSchema = z.object({
   matchingTurnCount: z.number().int().nonnegative(),
   matchingCommunicationCount: z.number().int().nonnegative(),
   matchingControlChangeCount: z.number().int().nonnegative(),
-  selectedAgentCount: z.number().int().positive().max(6),
+  matchingDiplomacyEventCount: z.number().int().nonnegative(),
+  selectedAgentCount: z
+    .number()
+    .int()
+    .positive()
+    .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
   firstMatchingTurn: z.number().int().positive().optional(),
   lastMatchingTurn: z.number().int().positive().optional(),
   retention: experimentRetentionSchema,
@@ -852,13 +1329,16 @@ export const experimentExportTurnSchema = z.object({
   outcome: exportOutcomeSchema,
   worldAction: worldActionSchema.optional(),
   communication: communicationIntentSchema.optional(),
+  diplomacy: diplomacyIntentSchema.optional(),
   summary: z.string().trim().min(1).max(MODEL_SUMMARY_MAX_LENGTH).optional(),
   worldActionSummary: z.string().trim().min(1).max(300).optional(),
   communicationSummary: z.string().trim().min(1).max(300).optional(),
+  diplomacySummary: z.string().trim().min(1).max(300).optional(),
   personality: personalitySchema.optional(),
   observation: agentObservationSchema.partial().optional(),
   worldActionResult: worldActionResultSchema.optional(),
   communicationResult: communicationResultSchema.optional(),
+  diplomacyResult: diplomacyResultSchema.optional(),
   failure: providerFailureSchema.optional(),
   provider: providerMetadataSchema.optional(),
 });
@@ -929,16 +1409,20 @@ export type ExperimentExportWorldState = z.infer<
 
 export const experimentExportDocumentSchema = z
   .object({
-    schemaVersion: z.literal(4),
+    schemaVersion: z.literal(5),
     generatedAt: z.iso.datetime(),
     experiment: experimentManifestSchema,
     retention: experimentRetentionSchema,
     filters: experimentExportRequestSchema,
     selection: z.object({
-      selectedAgentIds: z.array(agentIdSchema).min(1).max(6),
+      selectedAgentIds: z
+        .array(agentIdSchema)
+        .min(1)
+        .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
       matchingTurnCount: z.number().int().nonnegative(),
       matchingCommunicationCount: z.number().int().nonnegative(),
       matchingControlChangeCount: z.number().int().nonnegative(),
+      matchingDiplomacyEventCount: z.number().int().nonnegative(),
       firstMatchingTurn: z.number().int().positive().optional(),
       lastMatchingTurn: z.number().int().positive().optional(),
     }),
@@ -949,17 +1433,19 @@ export const experimentExportDocumentSchema = z
         }),
       )
       .min(1)
-      .max(6),
+      .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
     configurationEvents: z
       .array(personalityConfigurationEventSchema)
       .optional(),
     metrics: experimentMetricsSchema.optional(),
     currentTerritory: territoryScoreboardSchema.optional(),
+    currentAlliances: z.array(allianceTerritorySummarySchema).max(4).optional(),
     initialWorld: experimentExportWorldStateSchema.optional(),
     currentWorld: experimentExportWorldStateSchema.optional(),
     worldEvents: z.array(nonCommunicationWorldEventSchema).optional(),
     communications: z.array(exportedCommunicationSchema).optional(),
     controlChanges: z.array(exportedControlChangeSchema).optional(),
+    allianceEvents: z.array(allianceEventSchema).optional(),
     turns: z.array(experimentExportTurnSchema),
   })
   .superRefine((document, context) => {
@@ -975,6 +1461,11 @@ export const experimentExportDocumentSchema = z
       context.addIssue({
         code: 'custom',
         message: 'Current territory inclusion does not match the export level.',
+      });
+    if (Boolean(document.currentAlliances) !== Boolean(requiresMetrics))
+      context.addIssue({
+        code: 'custom',
+        message: 'Current alliance inclusion does not match the export level.',
       });
     const personalityHistory =
       level === 'full-safe' || custom?.personalityTextHistory;
@@ -1041,7 +1532,8 @@ export const experimentExportDocumentSchema = z
       if (
         turn.outcome !== 'provider-error' &&
         (Boolean(turn.worldActionResult) !== results ||
-          Boolean(turn.communicationResult) !== results)
+          Boolean(turn.communicationResult) !== results ||
+          Boolean(turn.diplomacyResult) !== results)
       )
         context.addIssue({
           code: 'custom',

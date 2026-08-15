@@ -5,7 +5,7 @@ import { experimentExportDocumentSchema } from '@agentborne/shared';
 const ROOK_ID = '2507bb46-7ae4-45ca-8dda-644c4f85ca14';
 const EMBER_ID = '128f3f38-6b7d-4db7-9e95-751b4ce2681e';
 const MINGLE_PERSONALITY =
-  'You are a social coalition-builder. Move toward visible agents, initiate and continue conversations, negotiate before taking their territory, and coordinate when useful. Infect open cells opportunistically, but value interaction over silent pursuit.';
+  'You are a social coalition-builder. Seek agents, initiate and continue conversations, propose alliances, answer offers, negotiate borders, and coordinate captures against dominant rivals. Prefer cooperation and public diplomacy over silent expansion, but protect your own territory and leave an alliance that repeatedly ignores or exploits you. Make concrete proposals rather than merely announcing actions.';
 
 test('runs the complete deterministic World Lab browser flow', async ({
   page,
@@ -51,13 +51,13 @@ test('runs the complete deterministic World Lab browser flow', async ({
   const worldMap = page.getByTestId('world-map');
   await expect(worldMap).toBeVisible();
   await expect(worldMap).toHaveAttribute('data-overlay-status', 'ready');
-  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '61');
+  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '127');
   await expect(worldMap).toHaveAttribute(
     'data-rendered-infected-cell-count',
     '0',
   );
   await expect(
-    page.getByText(/H3 overlay ready · 61\/61 rendered cells · 6 agents/),
+    page.getByText(/H3 overlay ready · 127\/127 rendered cells · 8 agents/),
   ).toBeVisible();
   await expect(page.getByTestId('infected-count')).toHaveText(
     '0 rendered infected',
@@ -70,14 +70,14 @@ test('runs the complete deterministic World Lab browser flow', async ({
   );
 
   const markers = page.getByRole('button', { name: /Select agent/ });
-  await expect(markers).toHaveCount(6);
-  for (let index = 0; index < 6; index += 1) {
+  await expect(markers).toHaveCount(8);
+  for (let index = 0; index < 8; index += 1) {
     await expect(markers.nth(index)).toBeVisible();
   }
   await page.getByRole('button', { name: 'Select agent Ember' }).click();
   await expect(page.getByRole('heading', { name: /Ember/ })).toBeVisible();
   const defaultPersonality =
-    'You are an aggressive infector. Prefer infecting open cells and move decisively toward uninfected space when your current cell is already infected.';
+    'You are a forceful expansionist who wants the largest personal territory. Infect open cells aggressively, capture exposed rival territory, and use public messages to pressure or warn competitors. Alliances are temporary strategic tools: propose or accept them when they help contain a stronger rival, honor them while useful, and leave openly when they block expansion. Respond to direct proposals instead of silently ignoring them.';
   const customPersonality =
     'Infect every open current cell, then move decisively to an adjacent open cell.';
   await expect(
@@ -108,7 +108,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
       .locator('details')
       .filter({ hasText: 'Latest structured observation' }),
   ).toContainText(customPersonality);
-  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '61');
+  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '127');
   await expect(worldMap).toHaveAttribute(
     'data-rendered-infected-cell-count',
     '1',
@@ -131,8 +131,23 @@ test('runs the complete deterministic World Lab browser flow', async ({
   ).toContainText('inbound: Ember → Rook');
   await expect(worldMap).toHaveAttribute('data-controller-colors', /#ff6b57/);
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Ember1');
-  for (let index = 0; index < 6; index += 1)
+  for (let index = 0; index < 8; index += 1)
     await page.getByRole('button', { name: 'Single turn' }).click();
+  await expect(page.getByLabel('Alliance and territory panel')).toContainText(
+    'Mingle',
+  );
+  await expect(page.getByLabel('Alliance and territory panel')).toContainText(
+    'Solace',
+  );
+  await expect(
+    page.getByText('Mingle and Solace formed an alliance.').first(),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Select agent Mingle' }),
+  ).toHaveAttribute('data-effective-color', '#0072B2');
+  await expect(
+    page.getByRole('button', { name: 'Select agent Solace' }),
+  ).toHaveAttribute('data-effective-color', '#0072B2');
   await expect(page.getByLabel('Agent inspector')).toContainText('move →');
 
   let captured = false;
@@ -173,7 +188,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   const exported = experimentExportDocumentSchema.parse(
     JSON.parse(await readFile(downloadedPath!, 'utf8')),
   );
-  expect(exported.schemaVersion).toBe(4);
+  expect(exported.schemaVersion).toBe(5);
   expect(exported.filters.level).toBe('minimal');
   expect(exported.selection.selectedAgentIds).toEqual([EMBER_ID]);
   expect(exported.turns).toEqual([]);
@@ -202,7 +217,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(
     page.getByText(customPersonality, { exact: true }),
   ).toBeVisible();
-  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '61');
+  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '127');
   await expect(worldMap).toHaveAttribute(
     'data-rendered-infected-cell-count',
     '0',
@@ -212,12 +227,12 @@ test('runs the complete deterministic World Lab browser flow', async ({
   );
   await expect(worldMap).toHaveAttribute('data-controller-colors', '');
   await expect(page.getByText('No controller')).toBeVisible();
-  await expect(markers).toHaveCount(6);
-  for (let index = 0; index < 6; index += 1) {
+  await expect(markers).toHaveCount(8);
+  for (let index = 0; index < 8; index += 1) {
     await expect(markers.nth(index)).toBeVisible();
   }
   await expect(
-    page.getByText('Development world loaded with six agents.'),
+    page.getByText('Development world loaded with eight agents.'),
   ).toBeVisible();
   await expect(
     page.getByText('No direct messages for this agent yet.'),
@@ -246,11 +261,11 @@ test('runs the complete deterministic World Lab browser flow', async ({
     page.getByText(MINGLE_PERSONALITY, { exact: true }),
   ).toBeVisible();
   await expect(page.getByText('Turn 2', { exact: true })).toBeVisible();
-  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '61');
+  await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '127');
   await expect(worldMap).toHaveAttribute(
     'data-rendered-infected-cell-count',
     '1',
   );
-  await expect(markers).toHaveCount(6);
+  await expect(markers).toHaveCount(8);
   expect(openRouterRequests).toEqual([]);
 });

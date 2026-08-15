@@ -7,10 +7,10 @@ These instructions apply throughout the repository.
 - Treat “Agentborne” as a working title. Avoid heavy branding, logo, lore, or name-specific design investment.
 - Keep the World Lab as a production developer/admin surface, not a disposable demo.
 - The only initial hex states are `open` and `infected`.
-- The only agent world actions are adjacent move, infect current cell, capture an abandoned infected current cell from another controller, and wait. One optional public or range-limited direct communication may accompany that action.
+- The only agent world actions are adjacent move, infect current cell, capture an abandoned infected current cell from a non-allied controller, and wait. One optional public or range-limited direct communication and one optional formal diplomacy intent may accompany that action.
 - Infection and agent position are independent. Movement does not remove infection.
 - Full agent visibility is deliberate. Do not add fog of war, detection, scanners, or last-known positions.
-- Do not add resources, inventory, structures, combat, terrain bonuses, crafting, formal factions, accounts, GPS validation, player progression, or mobile packaging before the roadmap calls for them.
+- Formal alliances are limited to engine-authoritative proposal, acceptance, and unilateral departure. Do not add leaders, voting, kicking, merging, ranks, custom alliance metadata, shared ownership, resources, inventory, structures, combat, terrain bonuses, crafting, accounts, GPS validation, player progression, or mobile packaging before the roadmap calls for them.
 
 ## Trust and architecture
 

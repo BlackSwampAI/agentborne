@@ -41,6 +41,8 @@ Second focused slice: every infected hex has one individual controller. Infect c
 
 Third focused slice: communication is decoupled from the world action while remaining inside the same provider decision and single inference. Each turn requires move, infect, capture, or wait and may also request one public world-chat message or one proximity-bound direct message. The two results are validated and recorded independently; direct eligibility uses the pre-action snapshot. Observations expose bounded public and private context, World Lab separates both results, and safe exports advance to schema v4 with public/direct and accepted/rejected communication filters. Independent social ticks, automatic replies, relationships, groups, moderation, persistence, and player chat remain deferred.
 
+Fourth focused slice: expand the Toledo development world to 127 cells and eight fixed agents, add engine-authoritative formal proposal/accept/leave alliances, deterministic effective territory colors, alliance-aware capture blocking, bounded alliance observations/events/telemetry, schema-v5 exports, and an exact browser-owned run-to-turn-200 experiment. Individual control remains authoritative, all decision components share one inference, and persistence, server scheduling, leadership, generic relationships, resources, and combat remain deferred.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.

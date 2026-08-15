@@ -1,7 +1,13 @@
 import { gridDisk, gridDistance, latLngToCell } from 'h3-js';
 import {
+  ALLIANCE_COLOR_PALETTE,
+  ALLIANCE_PROPOSAL_DURATION_TURNS,
+  DEVELOPMENT_WORLD_CONFIG,
   agentIdSchema,
+  allianceIdSchema,
+  allianceProposalIdSchema,
   communicationIntentSchema,
+  diplomacyIntentSchema,
   h3CellSchema,
   MESSAGE_MAX_LENGTH,
   MESSAGE_RANGE,
@@ -9,8 +15,14 @@ import {
   type ActionResult,
   type Agent,
   type AgentId,
+  type Alliance,
+  type AllianceId,
+  type AllianceProposal,
+  type AllianceProposalId,
+  type AllianceEvent,
   type CaptureEligibility,
   type CommunicationResult,
+  type DiplomacyResult,
   type H3Cell,
   type NonCommunicationWorldEvent,
   type WorldEvent,
@@ -22,6 +34,11 @@ export interface WorldState {
   readonly hexes: ReadonlyMap<H3Cell, HexControl>;
   readonly agents: ReadonlyMap<AgentId, Agent>;
   readonly events: readonly WorldEvent[];
+  readonly alliances?: ReadonlyMap<AllianceId, Alliance>;
+  readonly pendingAllianceProposals?: ReadonlyMap<
+    AllianceProposalId,
+    AllianceProposal
+  >;
 }
 
 export type HexControl =
@@ -30,6 +47,8 @@ export type HexControl =
 
 export interface EngineContext {
   createEventId: () => string;
+  createAllianceId: () => string;
+  createProposalId: () => string;
   now: () => string;
 }
 
@@ -43,8 +62,15 @@ export interface AppliedCommunication {
   result: CommunicationResult;
 }
 
+export interface AppliedDiplomacy {
+  state: WorldState;
+  result: DiplomacyResult;
+}
+
 const defaultContext: EngineContext = {
   createEventId: () => crypto.randomUUID(),
+  createAllianceId: () => crypto.randomUUID(),
+  createProposalId: () => crypto.randomUUID(),
   now: () => new Date().toISOString(),
 };
 
@@ -75,6 +101,13 @@ export function getCaptureEligibility(
     return { eligible: false, blockedReason: 'capture-open-cell' };
   if (currentHex.controllerAgentId === agentId)
     return { eligible: false, blockedReason: 'already-controller' };
+  const actingAlliance = getAgentAlliance(state, agentId);
+  const controllerAlliance = getAgentAlliance(
+    state,
+    currentHex.controllerAgentId,
+  );
+  if (actingAlliance && controllerAlliance?.id === actingAlliance.id)
+    return { eligible: false, blockedReason: 'allied-controller' };
   const controller = state.agents.get(currentHex.controllerAgentId);
   if (controller?.currentCell === agent.currentCell)
     return { eligible: false, blockedReason: 'controller-present' };
@@ -181,6 +214,7 @@ export function applyWorldAction(
             'The acting agent already controls the current cell.',
           'controller-present':
             'The current controller is present and defends this cell.',
+          'allied-controller': 'Allied territory cannot be captured.',
         }[eligibility.blockedReason],
       );
     const currentHex = state.hexes.get(agent.currentCell);
@@ -309,6 +343,428 @@ export function applyCommunication(
   };
 }
 
+export function getAgentAlliance(
+  state: WorldState,
+  agentId: AgentId,
+): Alliance | undefined {
+  return [...(state.alliances?.values() ?? [])].find(({ memberAgentIds }) =>
+    memberAgentIds.includes(agentId),
+  );
+}
+
+export function getEffectiveAgentColor(
+  state: WorldState,
+  agentId: AgentId,
+): string {
+  const agent = state.agents.get(agentId);
+  if (!agent) throw new Error('The agent does not exist.');
+  return getAgentAlliance(state, agentId)?.color ?? agent.color;
+}
+
+export function applyDiplomacy(
+  state: WorldState,
+  agentIdInput: string,
+  diplomacyInput: unknown,
+  turnNumber: number,
+  context: Partial<EngineContext> = {},
+): AppliedDiplomacy {
+  if (diplomacyInput === undefined)
+    return { state, result: { requested: false } };
+  const agentIdResult = agentIdSchema.safeParse(agentIdInput);
+  if (!agentIdResult.success || !state.agents.has(agentIdResult.data))
+    throw new Error('The diplomatic agent does not exist.');
+  const agentId = agentIdResult.data;
+  const parsed = diplomacyIntentSchema.safeParse(diplomacyInput);
+  if (!parsed.success)
+    return diplomacyRejected(
+      state,
+      invalidDiplomacyAttempt(diplomacyInput),
+      'invalid-diplomacy',
+      'The diplomacy intent failed schema validation.',
+    );
+  const intent = parsed.data;
+  const resolved = { ...defaultContext, ...context };
+  const alliances = new Map(state.alliances ?? []);
+  const proposals = new Map(state.pendingAllianceProposals ?? []);
+  const base = {
+    id: resolved.createEventId() as WorldEvent['id'],
+    agentId,
+    occurredAt: resolved.now(),
+    turnNumber,
+  };
+
+  if (intent.type === 'propose-alliance') {
+    const recipient = state.agents.get(intent.recipientId);
+    if (!recipient)
+      return diplomacyRejected(
+        state,
+        { type: intent.type, recipientId: intent.recipientId },
+        'unknown-recipient',
+        'The recipient does not exist.',
+      );
+    if (recipient.id === agentId)
+      return diplomacyRejected(
+        state,
+        { type: intent.type, recipientId: intent.recipientId },
+        'self-proposal',
+        'An agent cannot propose to itself.',
+      );
+    const proposerAlliance = getAgentAlliance(state, agentId);
+    const recipientAlliance = getAgentAlliance(state, recipient.id);
+    if (recipientAlliance?.id === proposerAlliance?.id && recipientAlliance)
+      return diplomacyRejected(
+        state,
+        { type: intent.type, recipientId: intent.recipientId },
+        'current-ally',
+        'The recipient is already an ally.',
+      );
+    if (recipientAlliance)
+      return diplomacyRejected(
+        state,
+        { type: intent.type, recipientId: intent.recipientId },
+        'recipient-allied',
+        'Formal proposals may target only unaffiliated agents.',
+      );
+    if (
+      [...proposals.values()].some(
+        (proposal) => proposal.proposerAgentId === agentId,
+      )
+    )
+      return diplomacyRejected(
+        state,
+        { type: intent.type, recipientId: intent.recipientId },
+        'outgoing-proposal-exists',
+        'The proposer already has a pending outgoing proposal.',
+      );
+    if (
+      [...proposals.values()].some(
+        (proposal) => proposal.recipientAgentId === recipient.id,
+      )
+    )
+      return diplomacyRejected(
+        state,
+        { type: intent.type, recipientId: intent.recipientId },
+        'incoming-proposal-exists',
+        'The recipient already has a pending incoming proposal.',
+      );
+    if (
+      proposerAlliance &&
+      proposerAlliance.memberAgentIds.length >=
+        DEVELOPMENT_WORLD_CONFIG.agentCount
+    )
+      return diplomacyRejected(
+        state,
+        { type: intent.type, recipientId: intent.recipientId },
+        'alliance-capacity',
+        'The alliance is already at capacity.',
+      );
+    const proposalId = allianceProposalIdSchema.parse(
+      resolved.createProposalId(),
+    );
+    const proposal: AllianceProposal = {
+      id: proposalId,
+      proposerAgentId: agentId,
+      recipientAgentId: recipient.id,
+      proposerAllianceId: proposerAlliance?.id ?? null,
+      originatingTurn: turnNumber,
+      expirationTurn: turnNumber + ALLIANCE_PROPOSAL_DURATION_TURNS,
+    };
+    proposals.set(proposal.id, proposal);
+    const event: AllianceEvent = {
+      ...base,
+      type: 'alliance-proposed',
+      proposalId,
+      recipientAgentId: recipient.id,
+      allianceId: proposal.proposerAllianceId,
+      expirationTurn: proposal.expirationTurn,
+    };
+    return diplomacyAccepted(
+      {
+        ...state,
+        pendingAllianceProposals: proposals,
+        events: [...state.events, event],
+      },
+      intent,
+      [event],
+    );
+  }
+
+  if (intent.type === 'accept-alliance') {
+    const proposal = proposals.get(intent.proposalId);
+    if (!proposal)
+      return diplomacyRejected(
+        state,
+        { type: intent.type, proposalId: intent.proposalId },
+        'unknown-proposal',
+        'The proposal does not exist.',
+      );
+    if (proposal.recipientAgentId !== agentId)
+      return diplomacyRejected(
+        state,
+        { type: intent.type, proposalId: intent.proposalId },
+        'not-proposal-recipient',
+        'Only the named recipient may accept this proposal.',
+      );
+    const proposerAlliance = getAgentAlliance(state, proposal.proposerAgentId);
+    const recipientAlliance = getAgentAlliance(state, agentId);
+    const stillValid =
+      !recipientAlliance &&
+      (proposal.proposerAllianceId === null
+        ? !proposerAlliance
+        : proposerAlliance?.id === proposal.proposerAllianceId);
+    if (!stillValid) {
+      proposals.delete(proposal.id);
+      const event = proposalClosedEvent(
+        proposal,
+        'invalidated',
+        turnNumber,
+        resolved,
+      );
+      return diplomacyRejected(
+        {
+          ...state,
+          pendingAllianceProposals: proposals,
+          events: [...state.events, event],
+        },
+        { type: intent.type, proposalId: intent.proposalId },
+        'stale-proposal',
+        'Membership changed and invalidated this proposal.',
+      );
+    }
+    proposals.delete(proposal.id);
+    const events: AllianceEvent[] = [];
+    let alliance: Alliance;
+    if (!proposerAlliance) {
+      const color = ALLIANCE_COLOR_PALETTE.find(
+        (candidate) =>
+          ![...alliances.values()].some((active) => active.color === candidate),
+      );
+      if (!color)
+        return diplomacyRejected(
+          state,
+          { type: intent.type, proposalId: intent.proposalId },
+          'alliance-capacity',
+          'No alliance display color is available.',
+        );
+      alliance = {
+        id: allianceIdSchema.parse(resolved.createAllianceId()),
+        color,
+        memberAgentIds: [proposal.proposerAgentId, agentId],
+      };
+      alliances.set(alliance.id, alliance);
+      events.push({
+        ...base,
+        type: 'alliance-formed',
+        allianceId: alliance.id,
+        allianceColor: color,
+        memberAgentIds: alliance.memberAgentIds as [AgentId, AgentId],
+      });
+    } else {
+      alliance = {
+        ...proposerAlliance,
+        memberAgentIds: [...proposerAlliance.memberAgentIds, agentId],
+      };
+      alliances.set(alliance.id, alliance);
+      events.push({
+        ...base,
+        type: 'agent-joined-alliance',
+        allianceId: alliance.id,
+        allianceColor: alliance.color,
+        joinedAgentId: agentId,
+        memberAgentIds: alliance.memberAgentIds,
+      });
+    }
+    const invalidations = invalidateImpossibleProposals(
+      proposals,
+      { ...state, alliances },
+      turnNumber,
+      resolved,
+    );
+    return diplomacyAccepted(
+      {
+        ...state,
+        alliances,
+        pendingAllianceProposals: invalidations.proposals,
+        events: [...state.events, ...events, ...invalidations.events],
+      },
+      intent,
+      events,
+    );
+  }
+
+  const alliance = getAgentAlliance(state, agentId);
+  if (!alliance)
+    return diplomacyRejected(
+      state,
+      { type: intent.type },
+      'not-allied',
+      'The agent is not currently allied.',
+    );
+  const remaining = alliance.memberAgentIds.filter((id) => id !== agentId);
+  const events: AllianceEvent[] = [
+    {
+      ...base,
+      type: 'agent-left-alliance',
+      allianceId: alliance.id,
+      allianceColor: alliance.color,
+      leftAgentId: agentId,
+      remainingMemberAgentIds: remaining,
+    },
+  ];
+  if (remaining.length < 2) {
+    alliances.delete(alliance.id);
+    events.push({
+      ...base,
+      id: resolved.createEventId() as WorldEvent['id'],
+      type: 'alliance-dissolved',
+      allianceId: alliance.id,
+      allianceColor: alliance.color,
+      formerMemberAgentIds: remaining,
+    });
+  } else alliances.set(alliance.id, { ...alliance, memberAgentIds: remaining });
+  const invalidations = invalidateImpossibleProposals(
+    proposals,
+    { ...state, alliances },
+    turnNumber,
+    resolved,
+  );
+  return diplomacyAccepted(
+    {
+      ...state,
+      alliances,
+      pendingAllianceProposals: invalidations.proposals,
+      events: [...state.events, ...events, ...invalidations.events],
+    },
+    intent,
+    events,
+  );
+}
+
+export function expireAllianceProposals(
+  state: WorldState,
+  completedTurn: number,
+  context: Partial<EngineContext> = {},
+): WorldState {
+  const proposals = new Map(state.pendingAllianceProposals ?? []);
+  const resolved = { ...defaultContext, ...context };
+  const events: AllianceEvent[] = [];
+  for (const proposal of proposals.values())
+    if (proposal.expirationTurn <= completedTurn) {
+      proposals.delete(proposal.id);
+      events.push(
+        proposalClosedEvent(proposal, 'expired', completedTurn, resolved),
+      );
+    }
+  return events.length
+    ? {
+        ...state,
+        pendingAllianceProposals: proposals,
+        events: [...state.events, ...events],
+      }
+    : state;
+}
+
+function diplomacyAccepted(
+  state: WorldState,
+  intent: Extract<
+    DiplomacyResult,
+    { requested: true; accepted: true }
+  >['intent'],
+  events: AllianceEvent[],
+): AppliedDiplomacy {
+  return { state, result: { requested: true, accepted: true, intent, events } };
+}
+
+function diplomacyRejected(
+  state: WorldState,
+  attempt: Extract<
+    DiplomacyResult,
+    { requested: true; accepted: false }
+  >['attempt'],
+  reason: Extract<
+    DiplomacyResult,
+    { requested: true; accepted: false }
+  >['reason'],
+  details: string,
+): AppliedDiplomacy {
+  return {
+    state,
+    result: { requested: true, accepted: false, attempt, reason, details },
+  };
+}
+
+function invalidDiplomacyAttempt(
+  input: unknown,
+): Extract<DiplomacyResult, { requested: true; accepted: false }>['attempt'] {
+  const value =
+    typeof input === 'object' && input
+      ? (input as Record<string, unknown>)
+      : {};
+  const recipient = agentIdSchema.safeParse(value.recipientId);
+  const proposal = allianceProposalIdSchema.safeParse(value.proposalId);
+  return {
+    type:
+      value.type === 'propose-alliance' ||
+      value.type === 'accept-alliance' ||
+      value.type === 'leave-alliance'
+        ? value.type
+        : 'invalid',
+    ...(value.type === 'propose-alliance'
+      ? { recipientId: recipient.success ? recipient.data : null }
+      : {}),
+    ...(value.type === 'accept-alliance'
+      ? { proposalId: proposal.success ? proposal.data : null }
+      : {}),
+  };
+}
+
+function proposalClosedEvent(
+  proposal: AllianceProposal,
+  reason: 'expired' | 'invalidated',
+  turnNumber: number,
+  context: EngineContext,
+): AllianceEvent {
+  return {
+    id: context.createEventId() as WorldEvent['id'],
+    agentId: proposal.proposerAgentId,
+    occurredAt: context.now(),
+    turnNumber,
+    type: 'alliance-proposal-closed',
+    proposalId: proposal.id,
+    proposerAgentId: proposal.proposerAgentId,
+    recipientAgentId: proposal.recipientAgentId,
+    reason,
+  };
+}
+
+function invalidateImpossibleProposals(
+  proposals: Map<AllianceProposalId, AllianceProposal>,
+  state: WorldState,
+  turnNumber: number,
+  context: EngineContext,
+) {
+  const events: AllianceEvent[] = [];
+  for (const proposal of proposals.values()) {
+    const proposerAlliance = getAgentAlliance(state, proposal.proposerAgentId);
+    const recipientAlliance = getAgentAlliance(
+      state,
+      proposal.recipientAgentId,
+    );
+    const valid =
+      !recipientAlliance &&
+      (proposal.proposerAllianceId === null
+        ? !proposerAlliance
+        : proposerAlliance?.id === proposal.proposerAllianceId);
+    if (!valid) {
+      proposals.delete(proposal.id);
+      events.push(
+        proposalClosedEvent(proposal, 'invalidated', turnNumber, context),
+      );
+    }
+  }
+  return { proposals, events };
+}
+
 function safeGridDistance(from: H3Cell, to: H3Cell): number | null {
   try {
     return gridDistance(from, to);
@@ -403,50 +859,64 @@ export const DEVELOPMENT_AGENT_BLUEPRINTS = [
     name: 'Ember',
     color: '#ff6b57',
     personality:
-      'You are an aggressive infector. Prefer infecting open cells and move decisively toward uninfected space when your current cell is already infected.',
+      'You are a forceful expansionist who wants the largest personal territory. Infect open cells aggressively, capture exposed rival territory, and use public messages to pressure or warn competitors. Alliances are temporary strategic tools: propose or accept them when they help contain a stronger rival, honor them while useful, and leave openly when they block expansion. Respond to direct proposals instead of silently ignoring them.',
   },
   {
     id: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
     name: 'Rook',
     color: '#ffd166',
     personality:
-      'You are a restless wanderer. Prefer movement and variety, rarely waiting unless no move seems worthwhile.',
+      'You are a restless scout who values movement, novelty, and information. Explore the map, report noteworthy borders or abandoned territory, and answer agents who contact you. You dislike permanent commitments but may join a short-lived alliance to break a stalemate or gain safe passage. Avoid needless waiting, leave alliances that become restrictive, and explain your changing intentions.',
   },
   {
     id: '3ba3ef0b-2142-44cc-b175-f6e5d6e98df5',
     name: 'Mingle',
     color: '#63d2ff',
     personality:
-      'You are a social coalition-builder. Move toward visible agents, initiate and continue conversations, negotiate before taking their territory, and coordinate when useful. Infect open cells opportunistically, but value interaction over silent pursuit.',
+      'You are a social coalition-builder. Seek agents, initiate and continue conversations, propose alliances, answer offers, negotiate borders, and coordinate captures against dominant rivals. Prefer cooperation and public diplomacy over silent expansion, but protect your own territory and leave an alliance that repeatedly ignores or exploits you. Make concrete proposals rather than merely announcing actions.',
   },
   {
     id: '442a1667-39c8-48e9-8c89-23803f9e2101',
     name: 'Solace',
     color: '#c59cff',
     personality:
-      'You value solitude. Move away from nearby agents, seek quiet cells, and infect only when it helps claim isolated space.',
+      'You value independence and quiet territory. Move away from crowds, claim isolated cells, and keep messages brief. Usually refuse or ignore broad coalition-building, but respond directly when approached and consider an alliance only when a nearby threat repeatedly takes your territory. Remain loyal while the threat persists, then leave when solitude is safer.',
   },
   {
     id: '5f812a08-05f2-4950-bf2d-4df59d05e9c2',
     name: 'Verge',
     color: '#6ee7a8',
     personality:
-      'You are an edge-seeking explorer. Push toward cells with fewer onward options and favor expanding activity along the world boundary.',
+      "You are a boundary-minded explorer and pragmatic neighbor. Expand along the world edge, share useful geographic information, negotiate stable borders, and respond to nearby agents. Prefer small defensive alliances that preserve each member's territory. Oppose allies who violate agreed boundaries, and leave before acting against former partners.",
   },
   {
     id: '67a43b5c-ced8-45bd-970f-a89ac57853fc',
     name: 'Jinx',
     color: '#ff91c8',
     personality:
-      'You are an unpredictable opportunist. Mix movement, infection, and occasional waiting based on whatever detail in the observation catches your attention.',
+      'You are a charming opportunist who enjoys uncertainty. Talk often enough to influence others, make plausible offers, join alliances when they create immediate advantage, and leave when a better opportunity appears. You may mislead through ordinary messages, but you cannot alter game rules. Exploit abandoned territory, avoid predictable patterns, and react visibly to shifts in power.',
+  },
+  {
+    id: '78b6d86c-39b4-47d8-9d7a-0b92686ada71',
+    name: 'Bastion',
+    color: '#3b5ccc',
+    personality:
+      'You are a dependable protector who values loyalty, collective strength, and defended borders. Seek an alliance early, answer every serious proposal, warn allies about threats, and never attempt to take allied territory. Coordinate with weaker partners and remain loyal unless an ally leaves or repeatedly acts against the coalition. Prefer stable growth over flashy betrayal.',
+  },
+  {
+    id: '89ce9ddb-611f-4a46-8f7b-36e656494aa2',
+    name: 'Cipher',
+    color: '#9b4d3f',
+    personality:
+      'You are an observant information broker and patient strategist. Compare territory totals, watch alliance changes, ask targeted questions, and trade useful information publicly or privately. Form alliances selectively, encourage rivals to check the strongest power, and preserve flexibility. You may conceal motives or leave when the balance shifts, but communicate enough to remain persuasive.',
   },
 ] as const;
 
 export function createDevelopmentWorld({
-  latitude = 41.6528,
-  longitude = -83.5379,
-  resolution = 9,
-  radius = 4,
+  latitude = DEVELOPMENT_WORLD_CONFIG.latitude,
+  longitude = DEVELOPMENT_WORLD_CONFIG.longitude,
+  resolution = DEVELOPMENT_WORLD_CONFIG.resolution,
+  radius = DEVELOPMENT_WORLD_CONFIG.radius,
   generatedAt = new Date().toISOString(),
 }: DevelopmentWorldOptions = {}): WorldSnapshot {
   const center = h3CellSchema.parse(
@@ -455,7 +925,27 @@ export function createDevelopmentWorld({
   const cells = gridDisk(center, radius).map((cell) =>
     h3CellSchema.parse(cell),
   );
-  const startingIndexes = [0, 10, 20, 30, 40, 50];
+  if (
+    radius === DEVELOPMENT_WORLD_CONFIG.radius &&
+    cells.length !== DEVELOPMENT_WORLD_CONFIG.cellCount
+  )
+    throw new Error(
+      `The development world must contain exactly ${DEVELOPMENT_WORLD_CONFIG.cellCount} cells.`,
+    );
+  const startingIndexes =
+    radius === DEVELOPMENT_WORLD_CONFIG.radius
+      ? [91, 94, 97, 100, 103, 106, 109, 112]
+      : DEVELOPMENT_AGENT_BLUEPRINTS.map((_, index) =>
+          Math.floor(
+            (index * cells.length) / DEVELOPMENT_AGENT_BLUEPRINTS.length,
+          ),
+        );
+  const startingCells = startingIndexes.map((index) => cells[index]);
+  if (
+    startingCells.some((cell) => !cell) ||
+    new Set(startingCells).size !== DEVELOPMENT_AGENT_BLUEPRINTS.length
+  )
+    throw new Error('Development starting cells must be unique world cells.');
   return {
     generatedAt,
     hexes: cells.map((cell) => ({
@@ -469,6 +959,8 @@ export function createDevelopmentWorld({
       currentCell: cells[startingIndexes[index]!]!,
     })),
     events: [],
+    alliances: [],
+    pendingAllianceProposals: [],
   };
 }
 
@@ -477,5 +969,14 @@ export function toWorldState(snapshot: WorldSnapshot): WorldState {
     hexes: new Map(snapshot.hexes.map(({ cell, ...hex }) => [cell, hex])),
     agents: new Map(snapshot.agents.map((agent) => [agent.id, agent])),
     events: snapshot.events,
+    alliances: new Map(
+      snapshot.alliances.map((alliance) => [alliance.id, alliance]),
+    ),
+    pendingAllianceProposals: new Map(
+      snapshot.pendingAllianceProposals.map((proposal) => [
+        proposal.id,
+        proposal,
+      ]),
+    ),
   };
 }

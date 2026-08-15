@@ -42,6 +42,146 @@ function exportRequest(level: 'minimal' | 'standard' | 'full-safe' | 'custom') {
 }
 
 describe('SimulationService', () => {
+  it('applies formal diplomacy independently and exposes authoritative alliance observations', async () => {
+    const [emberId, rookId] = DEVELOPMENT_AGENT_BLUEPRINTS.slice(0, 2).map(
+      ({ id }) => agentIdSchema.parse(id),
+    );
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'alliance-test',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        return {
+          decision: {
+            worldAction: {
+              type:
+                observation.currentCell.state === 'open' ? 'infect' : 'wait',
+            },
+            communication: {
+              channel: 'public',
+              message: 'Formal diplomacy accompanies this action.',
+            },
+            diplomacy:
+              observation.agentId === emberId
+                ? { type: 'propose-alliance', recipientId: rookId! }
+                : {
+                    type: 'accept-alliance',
+                    proposalId: observation.inboundAllianceProposals[0]!.id,
+                  },
+            summary: 'Exercise all independent components.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'alliance-test',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    const proposed = await simulation.executeNextTurn();
+    const formed = await simulation.executeNextTurn();
+    expect(proposed).toMatchObject({
+      diplomacyResult: {
+        accepted: true,
+        events: [{ type: 'alliance-proposed' }],
+      },
+    });
+    expect(formed).toMatchObject({
+      diplomacyResult: {
+        accepted: true,
+        events: [{ type: 'alliance-formed' }],
+      },
+    });
+    const snapshot = simulation.getSnapshot();
+    expect(snapshot.world.alliances).toHaveLength(1);
+    expect(snapshot.experiment.currentAlliances[0]).toMatchObject({
+      totalControlledCellCount: 2,
+      members: [{ agentId: emberId }, { agentId: rookId }],
+    });
+    expect(
+      snapshot.experiment.currentTerritory
+        .slice(0, 2)
+        .map(({ effectiveColor }) => effectiveColor),
+    ).toEqual(['#0072B2', '#0072B2']);
+    expect(formed.observation.inboundAllianceProposals).toHaveLength(1);
+    expect(snapshot.experiment.metrics.aggregate).toMatchObject({
+      proposalsCreated: 1,
+      alliancesFormed: 1,
+      alliancesJoined: 2,
+    });
+  });
+
+  it('keeps an exact eight-agent round robin through 200 completed turns', async () => {
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'two-hundred-turn-test',
+      configured: true,
+      async decide(): Promise<ProviderDecision> {
+        return {
+          decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'two-hundred-turn-test',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    for (let turn = 0; turn < 200; turn += 1)
+      await simulation.executeNextTurn();
+    const snapshot = simulation.getSnapshot();
+    expect(snapshot.experiment.totalCompletedTurns).toBe(200);
+    expect(
+      snapshot.experiment.metrics.byAgent.map(
+        ({ metrics }) => metrics.totalTurns,
+      ),
+    ).toEqual(Array(8).fill(25));
+  });
+
+  it('counts rejected diplomacy by sanitized type and reason without cancelling valid siblings', async () => {
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'malformed-diplomacy-test',
+      configured: true,
+      async decide(): Promise<ProviderDecision> {
+        return {
+          decision: {
+            worldAction: { type: 'infect' },
+            communication: { channel: 'public', message: 'Valid sibling.' },
+            diplomacy: { type: 'propose-alliance', recipientId: 'unsafe-id' },
+            summary: 'Reject only diplomacy.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'malformed-diplomacy-test',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    const turn = await simulation.executeNextTurn();
+    expect(turn).toMatchObject({
+      worldActionResult: { accepted: true },
+      communicationResult: { accepted: true },
+      diplomacyResult: {
+        accepted: false,
+        reason: 'invalid-diplomacy',
+        attempt: { type: 'propose-alliance', recipientId: null },
+      },
+    });
+    expect(
+      simulation.getSnapshot().experiment.metrics.aggregate.diplomacyRejections,
+    ).toEqual([
+      { type: 'propose-alliance', reason: 'invalid-diplomacy', count: 1 },
+    ]);
+  });
+
   it('derives authoritative territory, bounded control history, capture metrics, and victim-aware exports', async () => {
     const emberId = agentIdSchema.parse(DEVELOPMENT_AGENT_BLUEPRINTS[0].id);
     const rookId = agentIdSchema.parse(DEVELOPMENT_AGENT_BLUEPRINTS[1].id);
@@ -127,7 +267,7 @@ describe('SimulationService', () => {
         expect.objectContaining({ controllerAgentId: null }),
       ]),
     );
-    expect(capture.observation.territoryScoreboard).toHaveLength(6);
+    expect(capture.observation.territoryScoreboard).toHaveLength(8);
     expect(
       capture.observation.territoryScoreboard.reduce(
         (sum, { controlledCellCount }) => sum + controlledCellCount,
@@ -171,7 +311,7 @@ describe('SimulationService', () => {
     });
 
     const subsequent: AgentTurnRecord[] = [];
-    for (let index = 0; index < 6; index += 1)
+    for (let index = 0; index < 8; index += 1)
       subsequent.push(await simulation.executeNextTurn());
     const emberObservation = subsequent.find(
       ({ agentId }) => agentId === emberId,
@@ -200,7 +340,7 @@ describe('SimulationService', () => {
       actions: ['capture'],
       level: 'minimal',
     });
-    expect(victimExport.schemaVersion).toBe(4);
+    expect(victimExport.schemaVersion).toBe(5);
     expect(victimExport.turns).toHaveLength(0);
     expect(victimExport.selection).toMatchObject({
       matchingTurnCount: 0,
@@ -216,7 +356,7 @@ describe('SimulationService', () => {
       totalTurns: 0,
       territoryLostThroughCapture: 1,
     });
-    expect(victimExport.currentTerritory).toHaveLength(6);
+    expect(victimExport.currentTerritory).toHaveLength(8);
     const unrelatedAgentId = agentIdSchema.parse(
       DEVELOPMENT_AGENT_BLUEPRINTS[2].id,
     );
@@ -310,7 +450,7 @@ describe('SimulationService', () => {
       outcomes: ['rejected'],
       actions: ['capture'],
     });
-    expect(exported.schemaVersion).toBe(4);
+    expect(exported.schemaVersion).toBe(5);
     expect(exported.turns).toMatchObject([
       {
         outcome: 'rejected',
@@ -329,7 +469,7 @@ describe('SimulationService', () => {
     expect(exported.controlChanges).toEqual([]);
   });
 
-  it('resets to the exact deterministic six-agent starting world', async () => {
+  it('resets to the exact deterministic eight-agent starting world', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
         { worldAction: { type: 'infect' }, summary: 'Infect.' },
@@ -341,8 +481,8 @@ describe('SimulationService', () => {
     expect(reset.world).toEqual(initial.world);
     expect(reset.experiment.id).not.toBe(initial.experiment.id);
     expect(reset.experiment.totalCompletedTurns).toBe(0);
-    expect(initial.world.agents).toHaveLength(6);
-    expect(initial.world.hexes).toHaveLength(61);
+    expect(initial.world.agents).toHaveLength(8);
+    expect(initial.world.hexes).toHaveLength(127);
   });
 
   it('retains complete experiment records independently of the 120-turn browser snapshot', async () => {
@@ -627,10 +767,10 @@ describe('SimulationService', () => {
       actions: ['wait'],
     });
 
-    expect(oneAgent.initialWorld?.agents).toHaveLength(6);
-    expect(oneAgent.initialWorld?.hexes).toHaveLength(61);
-    expect(oneAgent.currentWorld?.agents).toHaveLength(6);
-    expect(oneAgent.currentWorld?.hexes).toHaveLength(61);
+    expect(oneAgent.initialWorld?.agents).toHaveLength(8);
+    expect(oneAgent.initialWorld?.hexes).toHaveLength(127);
+    expect(oneAgent.currentWorld?.agents).toHaveLength(8);
+    expect(oneAgent.currentWorld?.hexes).toHaveLength(127);
     expect(oneAgent.initialWorld).not.toHaveProperty('events');
     expect(oneAgent.currentWorld).not.toHaveProperty('events');
     expect(oneAgent.worldEvents).toHaveLength(1);
@@ -881,7 +1021,7 @@ describe('SimulationService', () => {
         controlChanges: false,
       },
     });
-    expect(minimal.schemaVersion).toBe(4);
+    expect(minimal.schemaVersion).toBe(5);
     expect(
       experimentExportDocumentSchema.safeParse({
         ...minimal,
@@ -932,9 +1072,9 @@ describe('SimulationService', () => {
     };
     const simulation = service(provider);
     const order = simulation.getSnapshot().world.agents.map(({ id }) => id);
-    for (let index = 0; index < 7; index += 1)
+    for (let index = 0; index < 9; index += 1)
       await simulation.executeNextTurn();
-    expect(seen).toHaveLength(7);
+    expect(seen).toHaveLength(9);
     expect(seen.map(({ agentId }) => agentId)).toEqual([...order, order[0]]);
   });
 
@@ -1219,12 +1359,17 @@ describe('SimulationService', () => {
     const sender = initial.world.agents[0]!;
     const recipient = initial.world.agents.find(
       (candidate) =>
-        gridDistance(sender.currentCell, candidate.currentCell) === 4,
+        candidate.id !== sender.id &&
+        gridDistance(sender.currentCell, candidate.currentCell) > 3,
     )!;
+    const initialDistance = gridDistance(
+      sender.currentCell,
+      recipient.currentCell,
+    );
     const targetCell = initial.world.hexes.find(
       ({ cell }) =>
         gridDistance(sender.currentCell, cell) === 1 &&
-        gridDistance(cell, recipient.currentCell) === 3,
+        gridDistance(cell, recipient.currentCell) === initialDistance - 1,
     )!.cell;
     const simulation = service(
       new ScriptedAgentProvider([
@@ -1245,7 +1390,7 @@ describe('SimulationService', () => {
       communicationResult: {
         accepted: false,
         reason: 'out-of-range',
-        attempt: { distance: 4 },
+        attempt: { distance: initialDistance },
       },
     });
     expect(simulation.getSnapshot().world.agents[0]?.currentCell).toBe(
@@ -1307,7 +1452,7 @@ describe('SimulationService', () => {
     ]);
     const unrelatedTurn = await simulation.executeNextTurn();
     expect(unrelatedTurn.observation.recentDirectMessages).toEqual([]);
-    for (let index = 0; index < 4; index += 1)
+    for (let index = 0; index < 6; index += 1)
       await simulation.executeNextTurn();
     const senderTurn = simulation.getSnapshot().turns.at(-1)!;
     expect(senderTurn.agentId).toBe(sender.id);
@@ -1617,7 +1762,7 @@ describe('SimulationService', () => {
     );
   });
 
-  it('restores all six defaults without resetting current world progress', async () => {
+  it('restores all eight defaults without resetting current world progress', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
         { worldAction: { type: 'infect' }, summary: 'Infect.' },
@@ -1636,7 +1781,7 @@ describe('SimulationService', () => {
     expect(
       restored.world.agents.find(({ name }) => name === 'Mingle')?.personality,
     ).toBe(
-      'You are a social coalition-builder. Move toward visible agents, initiate and continue conversations, negotiate before taking their territory, and coordinate when useful. Infect open cells opportunistically, but value interaction over silent pursuit.',
+      'You are a social coalition-builder. Seek agents, initiate and continue conversations, propose alliances, answer offers, negotiate borders, and coordinate captures against dominant rivals. Prefer cooperation and public diplomacy over silent expansion, but protect your own territory and leave an alliance that repeatedly ignores or exploits you. Make concrete proposals rather than merely announcing actions.',
     );
     expect(restored.world.hexes).toEqual(before.world.hexes);
     expect(restored.world.events).toEqual(before.world.events);

@@ -9,6 +9,7 @@ import {
   agentObservationSchema,
   agentTurnRecordSchema,
   communicationIntentSchema,
+  diplomacyIntentSchema,
   experimentIdSchema,
   experimentExportDocumentSchema,
   experimentExportPreviewSchema,
@@ -16,6 +17,7 @@ import {
   RECENT_DIRECT_MESSAGE_LIMIT,
   RECENT_PUBLIC_MESSAGE_LIMIT,
   RECENT_CONTROL_CHANGE_LIMIT,
+  RECENT_ALLIANCE_EVENT_LIMIT,
   PERSONALITY_MAX_LENGTH,
   personalitySchema,
   simulationSnapshotSchema,
@@ -32,13 +34,18 @@ import {
   type SimulationSnapshot,
   type SimulationStatus,
   type WorldEvent,
+  type AllianceEvent,
 } from '@agentborne/shared';
 import {
   applyCommunication,
+  applyDiplomacy,
   applyWorldAction,
   createDevelopmentWorld,
   DEVELOPMENT_AGENT_BLUEPRINTS,
   getCaptureEligibility,
+  getAgentAlliance,
+  getEffectiveAgentColor,
+  expireAllianceProposals,
   toWorldState,
   type WorldState,
 } from '@agentborne/world-engine';
@@ -79,6 +86,8 @@ export interface SimulationServiceOptions {
   now?: () => string;
   createEventId?: () => string;
   createExperimentId?: () => string;
+  createAllianceId?: () => string;
+  createProposalId?: () => string;
   experimentRetentionLimit?: number;
 }
 
@@ -87,6 +96,8 @@ export class SimulationService {
   readonly #now: () => string;
   readonly #createEventId: () => string;
   readonly #createExperimentId: () => string;
+  readonly #createAllianceId: () => string;
+  readonly #createProposalId: () => string;
   readonly #experimentRetentionLimit: number;
   #state: WorldState;
   #turns: AgentTurnRecord[] = [];
@@ -108,6 +119,8 @@ export class SimulationService {
     now = () => new Date().toISOString(),
     createEventId = () => crypto.randomUUID(),
     createExperimentId = () => crypto.randomUUID(),
+    createAllianceId = () => crypto.randomUUID(),
+    createProposalId = () => crypto.randomUUID(),
     experimentRetentionLimit = DEFAULT_EXPERIMENT_RETENTION,
   }: SimulationServiceOptions) {
     if (
@@ -119,6 +132,8 @@ export class SimulationService {
     this.#now = now;
     this.#createEventId = createEventId;
     this.#createExperimentId = createExperimentId;
+    this.#createAllianceId = createAllianceId;
+    this.#createProposalId = createProposalId;
     this.#experimentRetentionLimit = experimentRetentionLimit;
     this.#state = toWorldState(
       createDevelopmentWorld({ generatedAt: RESET_GENERATED_AT }),
@@ -161,6 +176,7 @@ export class SimulationService {
         complete: droppedRecords === 0,
         metrics: this.#experimentMetrics.snapshot(agents.map(({ id }) => id)),
         currentTerritory: this.#territoryScoreboard(),
+        currentAlliances: this.#allianceTerritorySummaries(),
       },
     });
   }
@@ -338,6 +354,12 @@ export class SimulationService {
         providerResult = await this.#provider.decide(providerObservation);
       } catch (error) {
         const providerError = asProviderError(error);
+        const expiredState = expireAllianceProposals(this.#state, turnNumber, {
+          now: this.#now,
+          createEventId: this.#createEventId,
+          createAllianceId: this.#createAllianceId,
+          createProposalId: this.#createProposalId,
+        });
         const record = agentTurnRecordSchema.parse({
           turnNumber,
           agentId: agent.id,
@@ -347,8 +369,16 @@ export class SimulationService {
           outcome: 'provider-error',
           failure: providerError.failure,
           provider: providerError.metadata,
+          allianceEvents: allianceEventsSince(this.#state, expiredState),
         });
-        this.#commitCompletedTurn(record, this.#state, agents.length);
+        this.#commitCompletedTurn(
+          record,
+          {
+            ...expiredState,
+            events: expiredState.events.slice(-MAX_WORLD_EVENT_HISTORY),
+          },
+          agents.length,
+        );
         this.#status =
           providerError.failure.code === 'configuration'
             ? 'configuration-error'
@@ -360,14 +390,21 @@ export class SimulationService {
       const occurredAt = this.#now();
       const communicationInput =
         providerResult.decision.communication ?? undefined;
+      const diplomacyInput = providerResult.decision.diplomacy ?? undefined;
       const parsedCommunication =
         communicationIntentSchema.safeParse(communicationInput);
       const communication = parsedCommunication.success
         ? parsedCommunication.data
         : undefined;
+      const parsedDiplomacy = diplomacyIntentSchema.safeParse(diplomacyInput);
+      const diplomacy = parsedDiplomacy.success
+        ? parsedDiplomacy.data
+        : undefined;
       const context = {
         now: () => occurredAt,
         createEventId: this.#createEventId,
+        createAllianceId: this.#createAllianceId,
+        createProposalId: this.#createProposalId,
       };
       const appliedAction = applyWorldAction(
         preActionState,
@@ -382,12 +419,22 @@ export class SimulationService {
         communicationInput,
         context,
       );
+      const appliedDiplomacy = applyDiplomacy(
+        appliedCommunication.state,
+        agent.id,
+        diplomacyInput,
+        turnNumber,
+        context,
+      );
+      const stateAfterExpiration = expireAllianceProposals(
+        appliedDiplomacy.state,
+        turnNumber,
+        context,
+      );
       let record: AgentTurnRecord;
       const candidateState = {
-        ...appliedCommunication.state,
-        events: appliedCommunication.state.events.slice(
-          -MAX_WORLD_EVENT_HISTORY,
-        ),
+        ...stateAfterExpiration,
+        events: stateAfterExpiration.events.slice(-MAX_WORLD_EVENT_HISTORY),
       };
 
       if (appliedAction.result.accepted) {
@@ -400,9 +447,15 @@ export class SimulationService {
           outcome: 'accepted',
           worldAction: providerResult.decision.worldAction,
           communication,
+          diplomacy,
           summary: providerResult.decision.summary,
           worldActionResult: appliedAction.result,
           communicationResult: appliedCommunication.result,
+          diplomacyResult: appliedDiplomacy.result,
+          allianceEvents: allianceEventsSince(
+            preActionState,
+            stateAfterExpiration,
+          ),
           provider: providerResult.metadata,
         });
       } else {
@@ -415,9 +468,15 @@ export class SimulationService {
           outcome: 'rejected',
           worldAction: providerResult.decision.worldAction,
           communication,
+          diplomacy,
           summary: providerResult.decision.summary,
           worldActionResult: appliedAction.result,
           communicationResult: appliedCommunication.result,
+          diplomacyResult: appliedDiplomacy.result,
+          allianceEvents: allianceEventsSince(
+            preActionState,
+            stateAfterExpiration,
+          ),
           provider: providerResult.metadata,
         });
       }
@@ -461,6 +520,10 @@ export class SimulationService {
       hexes: [...this.#state.hexes].map(([cell, hex]) => ({ cell, ...hex })),
       agents: structuredClone([...this.#state.agents.values()]),
       events: structuredClone([...this.#state.events]),
+      alliances: structuredClone([...(this.#state.alliances?.values() ?? [])]),
+      pendingAllianceProposals: structuredClone([
+        ...(this.#state.pendingAllianceProposals?.values() ?? []),
+      ]),
     };
   }
 
@@ -486,7 +549,23 @@ export class SimulationService {
     const stateFor = (cell: H3Cell) => {
       const state = this.#state.hexes.get(cell);
       if (!state) throw new Error('Observation cell is outside the world.');
-      return { cell, ...state };
+      if (state.state === 'open')
+        return {
+          cell,
+          ...state,
+          controllerAllianceId: null,
+          effectiveColor: null,
+        } as const;
+      return {
+        cell,
+        ...state,
+        controllerAllianceId:
+          getAgentAlliance(this.#state, state.controllerAgentId)?.id ?? null,
+        effectiveColor: getEffectiveAgentColor(
+          this.#state,
+          state.controllerAgentId,
+        ),
+      } as const;
     };
     const adjacentCells = gridDisk(agent.currentCell, 1)
       .filter((cell) => cell !== agent.currentCell)
@@ -500,10 +579,11 @@ export class SimulationService {
         name: candidate.name,
         currentCell: candidate.currentCell,
         distance: safeDistance(agent.currentCell, candidate.currentCell),
+        allianceId: getAgentAlliance(this.#state, candidate.id)?.id ?? null,
       }))
       .filter(({ distance }) => distance <= 4)
       .sort((a, b) => a.distance - b.distance || a.id.localeCompare(b.id))
-      .slice(0, 5);
+      .slice(0, 7);
     const recentEvents = this.#state.events
       .filter(
         (
@@ -515,8 +595,10 @@ export class SimulationService {
               'agent-moved' | 'hex-infected' | 'hex-captured' | 'agent-waited';
           }
         > =>
-          event.type !== 'public-message-sent' &&
-          event.type !== 'direct-message-sent',
+          event.type === 'agent-moved' ||
+          event.type === 'hex-infected' ||
+          event.type === 'hex-captured' ||
+          event.type === 'agent-waited',
       )
       .slice(-8)
       .map((event) => ({
@@ -607,6 +689,26 @@ export class SimulationService {
       recentPublicMessages,
       recentDirectMessages,
       territoryScoreboard: this.#territoryScoreboard(),
+      actingAllianceId: getAgentAlliance(this.#state, agent.id)?.id ?? null,
+      actingAlliance:
+        this.#allianceTerritorySummaries().find(
+          ({ allianceId }) =>
+            allianceId === getAgentAlliance(this.#state, agent.id)?.id,
+        ) ?? null,
+      activeAlliances: this.#allianceTerritorySummaries(),
+      inboundAllianceProposals: [
+        ...(this.#state.pendingAllianceProposals?.values() ?? []),
+      ].filter(({ recipientAgentId }) => recipientAgentId === agent.id),
+      outboundAllianceProposals: [
+        ...(this.#state.pendingAllianceProposals?.values() ?? []),
+      ].filter(({ proposerAgentId }) => proposerAgentId === agent.id),
+      recentAllianceEvents: this.#state.events
+        .filter(isAllianceEvent)
+        .slice(-RECENT_ALLIANCE_EVENT_LIMIT)
+        .map((event) => ({
+          event,
+          summary: summarizeAllianceEvent(event, this.#state),
+        })),
       recentControlChanges,
     });
   }
@@ -626,9 +728,52 @@ export class SimulationService {
       agentId: id,
       name,
       color,
+      allianceId: getAgentAlliance(this.#state, id)?.id ?? null,
+      effectiveColor: getEffectiveAgentColor(this.#state, id),
       controlledCellCount: counts.get(id) ?? 0,
     }));
   }
+
+  #allianceTerritorySummaries() {
+    const scoreboard = this.#territoryScoreboard();
+    return [...(this.#state.alliances?.values() ?? [])].map((alliance) => {
+      const members = alliance.memberAgentIds.map((agentId) => {
+        const entry = scoreboard.find(
+          (candidate) => candidate.agentId === agentId,
+        );
+        if (!entry) throw new Error('An alliance member does not exist.');
+        return {
+          agentId,
+          name: entry.name,
+          controlledCellCount: entry.controlledCellCount,
+        };
+      });
+      return {
+        allianceId: alliance.id,
+        color: alliance.color,
+        totalControlledCellCount: members.reduce(
+          (sum, member) => sum + member.controlledCellCount,
+          0,
+        ),
+        members,
+      };
+    });
+  }
+}
+
+function isAllianceEvent(event: WorldEvent): event is AllianceEvent {
+  return (
+    event.type.startsWith('alliance-') ||
+    event.type === 'agent-joined-alliance' ||
+    event.type === 'agent-left-alliance'
+  );
+}
+
+function allianceEventsSince(
+  before: WorldState,
+  after: WorldState,
+): AllianceEvent[] {
+  return after.events.slice(before.events.length).filter(isAllianceEvent);
 }
 
 function safeDistance(from: H3Cell, to: H3Cell): number {
@@ -658,6 +803,23 @@ function summarizeEvent(
     return `${name} captured ${event.cell} from ${previous}.`;
   }
   return `${name} waited.`;
+}
+
+function summarizeAllianceEvent(
+  event: AllianceEvent,
+  state: WorldState,
+): string {
+  const name = (id: AgentId) => state.agents.get(id)?.name ?? 'An agent';
+  if (event.type === 'alliance-proposed')
+    return `${name(event.agentId)} proposed an alliance with ${name(event.recipientAgentId)}.`;
+  if (event.type === 'alliance-formed')
+    return `${event.memberAgentIds.map(name).join(' and ')} formed an alliance.`;
+  if (event.type === 'agent-joined-alliance')
+    return `${name(event.joinedAgentId)} joined the alliance.`;
+  if (event.type === 'agent-left-alliance')
+    return `${name(event.leftAgentId)} left the alliance.`;
+  if (event.type === 'alliance-dissolved') return 'The alliance dissolved.';
+  return `The proposal from ${name(event.proposerAgentId)} to ${name(event.recipientAgentId)} was ${event.reason}.`;
 }
 
 function asProviderError(error: unknown): {

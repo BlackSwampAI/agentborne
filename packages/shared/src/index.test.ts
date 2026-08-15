@@ -23,6 +23,11 @@ import {
   simulationSnapshotSchema,
   updateAgentPersonalityRequestSchema,
   updateAgentPersonalityResponseSchema,
+  allianceSchema,
+  allianceProposalSchema,
+  diplomacyIntentSchema,
+  diplomacyResultSchema,
+  DEVELOPMENT_WORLD_CONFIG,
 } from '.';
 
 const agentId = '128f3f38-6b7d-4db7-9e95-751b4ce2681e';
@@ -35,27 +40,51 @@ const scoreboard = [
   '442a1667-39c8-48e9-8c89-23803f9e2101',
   '5f812a08-05f2-4950-bf2d-4df59d05e9c2',
   '67a43b5c-ced8-45bd-970f-a89ac57853fc',
+  '78b6d86c-39b4-47d8-9d7a-0b92686ada71',
+  '89ce9ddb-611f-4a46-8f7b-36e656494aa2',
 ].map((id, index) => ({
   agentId: id,
   name: `Agent ${index + 1}`,
   color: '#ff6b57',
+  allianceId: null,
+  effectiveColor: '#ff6b57',
   controlledCellCount: 0,
 }));
 const observation = {
   agentId,
   agentName: 'Ember',
   personality: 'Prefer infection.',
-  currentCell: { cell, state: 'open', controllerAgentId: null },
+  currentCell: {
+    cell,
+    state: 'open',
+    controllerAgentId: null,
+    controllerAllianceId: null,
+    effectiveColor: null,
+  },
   captureEligibility: {
     eligible: false,
     blockedReason: 'capture-open-cell',
   },
-  adjacentCells: [{ cell: adjacent, state: 'open', controllerAgentId: null }],
+  adjacentCells: [
+    {
+      cell: adjacent,
+      state: 'open',
+      controllerAgentId: null,
+      controllerAllianceId: null,
+      effectiveColor: null,
+    },
+  ],
   nearbyAgents: [],
   recentEvents: [],
   recentPublicMessages: [],
   recentDirectMessages: [],
   territoryScoreboard: scoreboard,
+  actingAllianceId: null,
+  actingAlliance: null,
+  activeAlliances: [],
+  inboundAllianceProposals: [],
+  outboundAllianceProposals: [],
+  recentAllianceEvents: [],
   recentControlChanges: [],
 };
 const baseTurn = {
@@ -148,10 +177,46 @@ const snapshot = {
       byAgent: [],
     },
     currentTerritory: scoreboard,
+    currentAlliances: [],
   },
 };
 
 describe('agent observation and decision schemas', () => {
+  it('centralizes eight-agent, 127-cell alliance and diplomacy limits', () => {
+    expect(DEVELOPMENT_WORLD_CONFIG).toMatchObject({
+      radius: 6,
+      cellCount: 127,
+      agentCount: 8,
+      resolution: 9,
+    });
+    const allianceId = 'a1111111-1111-4111-8111-111111111111';
+    const proposalId = 'b2222222-2222-4222-8222-222222222222';
+    expect(
+      allianceSchema.safeParse({
+        id: allianceId,
+        color: '#0072B2',
+        memberAgentIds: scoreboard.slice(0, 2).map(({ agentId }) => agentId),
+      }).success,
+    ).toBe(true);
+    expect(
+      allianceProposalSchema.safeParse({
+        id: proposalId,
+        proposerAgentId: scoreboard[0]!.agentId,
+        recipientAgentId: scoreboard[1]!.agentId,
+        proposerAllianceId: null,
+        originatingTurn: 1,
+        expirationTurn: 9,
+      }).success,
+    ).toBe(true);
+    expect(
+      diplomacyIntentSchema.safeParse({ type: 'accept-alliance', proposalId })
+        .success,
+    ).toBe(true);
+    expect(diplomacyResultSchema.safeParse({ requested: false }).success).toBe(
+      true,
+    );
+  });
+
   it('accepts a bounded state-bearing observation', () => {
     expect(agentObservationSchema.parse(observation).currentCell.state).toBe(
       'open',
@@ -163,11 +228,12 @@ describe('agent observation and decision schemas', () => {
     { ...observation, currentCell: { cell, state: 'unknown' } },
     {
       ...observation,
-      nearbyAgents: Array(6).fill({
+      nearbyAgents: Array(8).fill({
         id: agentId,
         name: 'x',
         currentCell: cell,
         distance: 1,
+        allianceId: null,
       }),
     },
   ])('rejects invalid or oversized observations', (value) => {
@@ -480,6 +546,7 @@ describe('turn and snapshot schemas', () => {
       summary: 'Infect.',
       worldActionResult: { accepted: true, event },
       communicationResult: { requested: false },
+      diplomacyResult: { requested: false },
       provider,
     },
     {
@@ -493,6 +560,7 @@ describe('turn and snapshot schemas', () => {
         details: 'No.',
       },
       communicationResult: { requested: false },
+      diplomacyResult: { requested: false },
       provider,
     },
     {
@@ -512,6 +580,7 @@ describe('turn and snapshot schemas', () => {
       summary: 'Infect.',
       worldActionResult: { accepted: true, event },
       communicationResult: { requested: false },
+      diplomacyResult: { requested: false },
       provider,
     };
     expect(simulationSnapshotSchema.safeParse(snapshot).success).toBe(true);
