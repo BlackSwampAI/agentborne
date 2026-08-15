@@ -549,7 +549,8 @@ function filterCommunications(
       communication.channel === 'public'
         ? selected.has(communication.agentId)
         : selected.has(communication.agentId) ||
-          selected.has(communication.recipientId);
+          (communication.recipientId !== null &&
+            selected.has(communication.recipientId));
     const selectedByChannel =
       request.communications.channel === 'all' ||
       request.communications.channel === communication.channel;
@@ -951,6 +952,7 @@ function communicationMetrics(
     (agentId
       ? communication.recipientId === agentId
       : communication.recipientId !== undefined &&
+        communication.recipientId !== null &&
         agentIds.includes(communication.recipientId));
   const publicAuthored = communications.filter(
     (communication) =>

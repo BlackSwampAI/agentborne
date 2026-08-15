@@ -1116,6 +1116,100 @@ describe('SimulationService', () => {
     );
   });
 
+  it('counts and exports malformed direct recipients as rejected direct attempts', async () => {
+    const invalidDirectCommunications = [
+      { channel: 'direct', recipientId: 'Verge', message: 'Malformed ID.' },
+      { channel: 'direct', message: 'Missing ID.' },
+    ];
+    let call = 0;
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'invalid-direct-recipient-test',
+      configured: true,
+      async decide(): Promise<ProviderDecision> {
+        return {
+          decision: {
+            worldAction: { type: 'wait' },
+            communication: invalidDirectCommunications[call++],
+            summary: 'Keep the malformed attempt safe.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'invalid-direct-recipient-test',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = service(provider);
+    const turns = [
+      await simulation.executeNextTurn(),
+      await simulation.executeNextTurn(),
+    ];
+    expect(
+      turns.map((turn) =>
+        turn.outcome === 'provider-error'
+          ? undefined
+          : turn.communicationResult,
+      ),
+    ).toMatchObject([
+      {
+        accepted: false,
+        reason: 'invalid-communication',
+        attempt: { channel: 'direct', recipientId: null, distance: null },
+      },
+      {
+        accepted: false,
+        reason: 'invalid-communication',
+        attempt: { channel: 'direct', recipientId: null, distance: null },
+      },
+    ]);
+    expect(simulation.getSnapshot().experiment.metrics.aggregate).toMatchObject(
+      {
+        publicMessagesRequested: 0,
+        publicMessagesRejected: 0,
+        directMessagesRequested: 2,
+        directMessagesRejected: 2,
+      },
+    );
+
+    const exported = simulation.generateExperimentExport({
+      ...exportRequest('minimal'),
+      communications: { channel: 'direct', status: 'rejected' },
+    });
+    expect(exported.communications).toMatchObject([
+      {
+        originatingTurn: 1,
+        channel: 'direct',
+        recipientId: null,
+        message: 'Malformed ID.',
+        status: 'rejected',
+        rejectionReason: 'invalid-communication',
+      },
+      {
+        originatingTurn: 2,
+        channel: 'direct',
+        recipientId: null,
+        message: 'Missing ID.',
+        status: 'rejected',
+        rejectionReason: 'invalid-communication',
+      },
+    ]);
+    expect(exported.metrics?.aggregate).toMatchObject({
+      publicMessagesRequested: 0,
+      publicMessagesRejected: 0,
+      directMessagesRequested: 2,
+      directMessagesRejected: 2,
+    });
+    expect(
+      simulation.generateExperimentExport({
+        ...exportRequest('minimal'),
+        communications: { channel: 'public', status: 'rejected' },
+      }).communications,
+    ).toEqual([]);
+  });
+
   it('uses pre-action positions for direct-message range', async () => {
     const initial = service(
       new ScriptedAgentProvider([

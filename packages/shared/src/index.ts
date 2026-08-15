@@ -235,7 +235,8 @@ export const communicationAttemptSchema = z.discriminatedUnion('channel', [
   communicationAttemptBaseSchema.extend({ channel: z.literal('public') }),
   communicationAttemptBaseSchema.extend({
     channel: z.literal('direct'),
-    ...directMessageFields,
+    recipientId: agentIdSchema.nullable(),
+    distance: z.number().int().nonnegative().nullable(),
   }),
 ]);
 export type CommunicationAttempt = z.infer<typeof communicationAttemptSchema>;
@@ -871,7 +872,7 @@ export const exportedCommunicationSchema = z
     id: eventIdSchema,
     agentId: agentIdSchema,
     channel: z.enum(['public', 'direct']),
-    recipientId: agentIdSchema.optional(),
+    recipientId: agentIdSchema.nullable().optional(),
     message: messageContentSchema,
     distance: z.number().int().nonnegative().nullable().optional(),
     occurredAt: z.iso.datetime(),
@@ -883,11 +884,21 @@ export const exportedCommunicationSchema = z
   .superRefine((communication, context) => {
     if (
       communication.channel === 'direct' &&
-      (!communication.recipientId || communication.distance === undefined)
+      (communication.recipientId === undefined ||
+        communication.distance === undefined)
     )
       context.addIssue({
         code: 'custom',
         message: 'Direct communication requires a recipient and distance.',
+      });
+    if (
+      communication.channel === 'direct' &&
+      communication.status === 'accepted' &&
+      (communication.recipientId === null || communication.distance === null)
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Accepted direct communication requires a valid recipient.',
       });
     if (
       communication.channel === 'public' &&

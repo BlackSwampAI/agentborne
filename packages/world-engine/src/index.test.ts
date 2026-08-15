@@ -407,6 +407,32 @@ describe('nearby messaging', () => {
     expect(result.state.events).toHaveLength(0);
   });
 
+  it.each([
+    { channel: 'direct', recipientId: 'Verge', message: 'Hello.' },
+    { channel: 'direct', message: 'Hello.' },
+  ])('preserves a malformed direct attempt as direct', (communication) => {
+    const before = stateWithRecipientAt(1);
+    const result = applyCommunication(
+      before,
+      before,
+      agentId,
+      communication,
+      context,
+    );
+    expect(result.state).toBe(before);
+    expect(result.result).toMatchObject({
+      requested: true,
+      accepted: false,
+      reason: 'invalid-communication',
+      attempt: {
+        channel: 'direct',
+        recipientId: null,
+        message: 'Hello.',
+        distance: null,
+      },
+    });
+  });
+
   it('publishes trimmed world chat without a recipient or range check', () => {
     const before = stateWithRecipientAt(4);
     const result = applyCommunication(

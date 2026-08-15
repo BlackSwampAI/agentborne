@@ -361,13 +361,15 @@ function invalidCommunicationAttempt(
     message,
   };
   const recipientId = agentIdSchema.safeParse(input?.recipientId);
-  if (input?.channel === 'direct' && recipientId.success) {
+  if (input?.channel === 'direct') {
     const sender = eligibilityState.agents.get(agentId)!;
-    const recipient = eligibilityState.agents.get(recipientId.data);
+    const recipient = recipientId.success
+      ? eligibilityState.agents.get(recipientId.data)
+      : undefined;
     return {
       ...base,
       channel: 'direct',
-      recipientId: recipientId.data,
+      recipientId: recipientId.success ? recipientId.data : null,
       distance: recipient
         ? safeGridDistance(sender.currentCell, recipient.currentCell)
         : null,

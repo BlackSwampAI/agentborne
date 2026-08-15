@@ -7,8 +7,10 @@ import {
   agentDecisionSchema,
   agentObservationSchema,
   agentTurnRecordSchema,
+  communicationResultSchema,
   directMessageEventSchema,
   captureEligibilitySchema,
+  exportedCommunicationSchema,
   experimentExportWorldStateSchema,
   hexCapturedWorldEventSchema,
   hexSchema,
@@ -315,6 +317,43 @@ describe('agent observation and decision schemas', () => {
           summary: 'Send.',
         }).success,
       ).toBe(false);
+  });
+
+  it('preserves rejected direct attempts with a safely nullable recipient', () => {
+    const attempt = {
+      id: '67aa21b9-fc78-4b04-9f92-9862bf346f96',
+      agentId,
+      occurredAt: '2026-08-13T12:00:01.000Z',
+      channel: 'direct' as const,
+      recipientId: null,
+      message: 'Hello.',
+      distance: null,
+    };
+    expect(
+      communicationResultSchema.parse({
+        requested: true,
+        accepted: false,
+        attempt,
+        reason: 'invalid-communication',
+        details: 'The communication failed schema validation.',
+      }),
+    ).toMatchObject({ attempt: { channel: 'direct', recipientId: null } });
+    expect(
+      exportedCommunicationSchema.safeParse({
+        ...attempt,
+        originatingTurn: 1,
+        status: 'rejected',
+        rejectionReason: 'invalid-communication',
+        rejectionDetails: 'The communication failed schema validation.',
+      }).success,
+    ).toBe(true);
+    expect(
+      exportedCommunicationSchema.safeParse({
+        ...attempt,
+        originatingTurn: 1,
+        status: 'accepted',
+      }).success,
+    ).toBe(false);
   });
 
   it('validates typed messages and caps directional conversation context at six', () => {
