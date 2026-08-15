@@ -53,6 +53,8 @@ import {
   PERSONALITY_PRESETS,
 } from './personality-presets';
 import { WorldMap } from './world-map';
+import { buildModelOptions } from './model-options';
+import { resolveAgentColor } from './ui-color';
 
 const latitude = Number(process.env.NEXT_PUBLIC_DEV_MAP_LATITUDE ?? 41.6528);
 const longitude = Number(process.env.NEXT_PUBLIC_DEV_MAP_LONGITUDE ?? -83.5379);
@@ -60,13 +62,17 @@ const resolution = Number(process.env.NEXT_PUBLIC_DEV_MAP_H3_RESOLUTION ?? 9);
 const apiBase =
   process.env.NEXT_PUBLIC_GAME_API_BASE_URL ?? '/api/game/simulation';
 const followTurnStorageKey = 'agentborne.world-lab.follow-turn';
+const runTargetStorageKey = 'agentborne.world-lab.run-target';
+export const runTargets = [25, 50, 100, 200, 500, 1000] as const;
 
 export function WorldLab() {
   const [snapshot, setSnapshot] = useState<SimulationSnapshot | null>(null);
   const [selectedCell, setSelectedCell] = useState<H3Cell | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId | null>(null);
   const [running, setRunning] = useState(false);
-  const [runToTurn200, setRunToTurn200] = useState(false);
+  const [runTarget, setRunTarget] = useState<(typeof runTargets)[number]>(200);
+  const [runTargetLoaded, setRunTargetLoaded] = useState(false);
+  const [boundedRunTarget, setBoundedRunTarget] = useState<number | null>(null);
   const [inFlight, setInFlight] = useState(false);
   const [reconciling, setReconciling] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -80,6 +86,7 @@ export function WorldLab() {
   const [exportAgentIds, setExportAgentIds] = useState<AgentId[]>([]);
   const [catalog, setCatalog] = useState<ModelCatalogResponse | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [configurationPending, setConfigurationPending] = useState(false);
   const [modelVerifications, setModelVerifications] = useState<
     Record<string, ModelVerification>
   >({});
@@ -89,15 +96,32 @@ export function WorldLab() {
   const [followTurn, setFollowTurn] = useState(true);
   const [followPreferenceLoaded, setFollowPreferenceLoaded] = useState(false);
   const inFlightRef = useRef(false);
-  const runToTurn200Ref = useRef(false);
+  const boundedRunTargetRef = useRef<number | null>(null);
   const completedTurnsRef = useRef(0);
   const mutationSequenceRef = useRef(0);
+  const configurationPendingRef = useRef(false);
   const exportInitializedRef = useRef(false);
   const exportTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    runToTurn200Ref.current = runToTurn200;
-  }, [runToTurn200]);
+    boundedRunTargetRef.current = boundedRunTarget;
+  }, [boundedRunTarget]);
+
+  useEffect(() => {
+    const stored = Number(window.sessionStorage.getItem(runTargetStorageKey));
+    const hydrationTask = window.setTimeout(() => {
+      if (runTargets.includes(stored as (typeof runTargets)[number])) {
+        setRunTarget(stored as (typeof runTargets)[number]);
+      }
+      setRunTargetLoaded(true);
+    }, 0);
+    return () => window.clearTimeout(hydrationTask);
+  }, []);
+
+  useEffect(() => {
+    if (!runTargetLoaded) return;
+    window.sessionStorage.setItem(runTargetStorageKey, String(runTarget));
+  }, [runTarget, runTargetLoaded]);
 
   useEffect(() => {
     const storedFollowTurn =
@@ -123,13 +147,13 @@ export function WorldLab() {
       next.status === 'provider-error' ||
       next.status === 'configuration-error' ||
       next.world.hexes.every(({ state }) => state === 'infected') ||
-      (runToTurn200Ref.current && next.experiment.totalCompletedTurns >= 200)
+      (boundedRunTargetRef.current !== null &&
+        next.experiment.totalCompletedTurns >= boundedRunTargetRef.current)
     ) {
       setRunning(false);
-      setRunToTurn200(false);
-      runToTurn200Ref.current = false;
+      setBoundedRunTarget(null);
+      boundedRunTargetRef.current = null;
     }
-    setSelectedCell((current) => current ?? next.world.hexes[0]!.cell);
     setSelectedAgentId((current) => current ?? next.world.agents[0]!.id);
   }, []);
 
@@ -223,6 +247,9 @@ export function WorldLab() {
   const updateModels = async (
     configuration: Omit<ExperimentModelConfiguration, 'locked'>,
   ): Promise<boolean> => {
+    if (configurationPendingRef.current) return false;
+    configurationPendingRef.current = true;
+    setConfigurationPending(true);
     setUiError(null);
     try {
       const response = await fetch(`${apiBase}/experiment/models`, {
@@ -246,12 +273,18 @@ export function WorldLab() {
     } catch {
       setUiError('The model assignment could not be saved.');
       return false;
+    } finally {
+      configurationPendingRef.current = false;
+      setConfigurationPending(false);
     }
   };
 
   const updateBehavior = async (
     configuration: Omit<BehaviorConfiguration, 'registryVersion' | 'locked'>,
   ): Promise<boolean> => {
+    if (configurationPendingRef.current) return false;
+    configurationPendingRef.current = true;
+    setConfigurationPending(true);
     setUiError(null);
     try {
       const response = await fetch(`${apiBase}/experiment/behavior`, {
@@ -270,6 +303,9 @@ export function WorldLab() {
         'Behavior assignments could not be saved. They may be locked after turn one.',
       );
       return false;
+    } finally {
+      configurationPendingRef.current = false;
+      setConfigurationPending(false);
     }
   };
 
@@ -336,10 +372,13 @@ export function WorldLab() {
   const executeTurn = useCallback(
     async (operation: 'turn' | 'retry' = 'turn') => {
       if (inFlightRef.current) return;
-      if (runToTurn200Ref.current && completedTurnsRef.current >= 200) {
+      if (
+        boundedRunTargetRef.current !== null &&
+        completedTurnsRef.current >= boundedRunTargetRef.current
+      ) {
         setRunning(false);
-        setRunToTurn200(false);
-        runToTurn200Ref.current = false;
+        setBoundedRunTarget(null);
+        boundedRunTargetRef.current = null;
         return;
       }
       inFlightRef.current = true;
@@ -356,8 +395,8 @@ export function WorldLab() {
         if (response.status === 409) {
           setUiError('Another turn is already in progress.');
           setRunning(false);
-          setRunToTurn200(false);
-          runToTurn200Ref.current = false;
+          setBoundedRunTarget(null);
+          boundedRunTargetRef.current = null;
           return;
         }
         if (!response.ok) throw new Error('turn request failed');
@@ -372,8 +411,8 @@ export function WorldLab() {
         applySnapshot(payload.snapshot);
         if (payload.turn.outcome === 'provider-error') {
           setRunning(false);
-          setRunToTurn200(false);
-          runToTurn200Ref.current = false;
+          setBoundedRunTarget(null);
+          boundedRunTargetRef.current = null;
           const failedAgent = payload.snapshot.world.agents.find(
             ({ id }) => id === payload.turn.agentId,
           );
@@ -384,8 +423,8 @@ export function WorldLab() {
       } catch {
         setUiError('The response was lost. Reconciling with the Game API…');
         setRunning(false);
-        setRunToTurn200(false);
-        runToTurn200Ref.current = false;
+        setBoundedRunTarget(null);
+        boundedRunTargetRef.current = null;
         try {
           await reconcileAuthoritativeSnapshot();
           setUiError(null);
@@ -423,8 +462,8 @@ export function WorldLab() {
   const cancelCurrentRequest = async () => {
     setCancelling(true);
     setRunning(false);
-    setRunToTurn200(false);
-    runToTurn200Ref.current = false;
+    setBoundedRunTarget(null);
+    boundedRunTargetRef.current = null;
     try {
       const response = await fetch(`${apiBase}/turn/cancel`, {
         method: 'POST',
@@ -447,7 +486,11 @@ export function WorldLab() {
 
   useEffect(() => {
     if (!running || inFlight || resetting) return;
-    if (runToTurn200Ref.current && completedTurnsRef.current >= 200) return;
+    if (
+      boundedRunTargetRef.current !== null &&
+      completedTurnsRef.current >= boundedRunTargetRef.current
+    )
+      return;
     const timer = window.setTimeout(() => void executeTurn(), speed);
     return () => window.clearTimeout(timer);
   }, [executeTurn, inFlight, resetting, running, snapshot?.turnNumber, speed]);
@@ -476,8 +519,8 @@ export function WorldLab() {
     )
       return;
     setRunning(false);
-    setRunToTurn200(false);
-    runToTurn200Ref.current = false;
+    setBoundedRunTarget(null);
+    boundedRunTargetRef.current = null;
     setResetting(true);
     setUiError(null);
     try {
@@ -493,7 +536,7 @@ export function WorldLab() {
       completedTurnsRef.current =
         payload.snapshot.experiment.totalCompletedTurns;
       setSnapshot(payload.snapshot);
-      setSelectedCell(payload.snapshot.world.hexes[0]!.cell);
+      setSelectedCell(null);
       setSelectedAgentId(payload.snapshot.world.agents[0]!.id);
     } catch {
       setUiError('Reset failed safely. The existing world was left intact.');
@@ -604,8 +647,6 @@ export function WorldLab() {
   const selectAgentForInspection = (agentId: AgentId) => {
     setFollowTurn(false);
     setSelectedAgentId(agentId);
-    const agent = snapshot.world.agents.find(({ id }) => id === agentId);
-    if (agent) setSelectedCell(agent.currentCell);
   };
   const selectedHex = snapshot.world.hexes.find(
     ({ cell }) => cell === selectedCell,
@@ -667,46 +708,98 @@ export function WorldLab() {
     <main
       className={`world-lab-shell${chatCollapsed ? ' chat-collapsed' : ''}`}
     >
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Developer simulation interface</p>
-          <h1>World Lab</h1>
-        </div>
-        <div className="status-group">
-          <p className={`status ${status}`}>
-            <span aria-hidden="true" /> {status.replaceAll('-', ' ')}
-          </p>
-          <p className="provider-badge">
-            {snapshot.providerMode === 'openrouter'
-              ? 'Genuine model · OpenRouter'
-              : 'Automated-test provider'}
-          </p>
-        </div>
-      </header>
-
-      <section className="command-bar" aria-label="Experiment command bar">
-        <div className="command-summary">
-          <strong>Turn {snapshot.turnNumber}</strong>
-          <span>{status.replaceAll('-', ' ')}</span>
-          {reconciling && <span>Reconciling request…</span>}
-          <span>
-            {formatCost(snapshot.experiment.metrics.aggregate.knownCostCredits)}
+      <header className="command-navbar" aria-label="World Lab command bar">
+        <div className="command-brand">
+          <span className="project-mark" aria-hidden="true">
+            WL
           </span>
+          <div>
+            <p className="eyebrow">Developer simulation</p>
+            <h1>World Lab</h1>
+          </div>
         </div>
-        <div className="control-row command-controls">
+        <div className="status-popover">
+          <button
+            type="button"
+            aria-label={`Experiment details. Turn ${snapshot.turnNumber}, ${status.replaceAll('-', ' ')}`}
+          >
+            <span className={`status-dot ${status}`} aria-hidden="true" />
+            <strong>
+              Turn {snapshot.experiment.totalCompletedTurns}
+              {boundedRunTarget !== null && ` / ${boundedRunTarget}`}
+            </strong>
+            <span className="navbar-cost">
+              {formatCost(
+                snapshot.experiment.metrics.aggregate.knownCostCredits,
+              )}
+            </span>
+          </button>
+          <div className="command-popover experiment-details">
+            <h2>Current experiment</h2>
+            <dl>
+              <div>
+                <dt>State</dt>
+                <dd>{status.replaceAll('-', ' ')}</dd>
+              </div>
+              <div>
+                <dt>Retained turns</dt>
+                <dd>{snapshot.experiment.retainedTurns}</dd>
+              </div>
+              <div>
+                <dt>Public messages</dt>
+                <dd>
+                  {snapshot.experiment.metrics.aggregate.publicMessagesSent}
+                </dd>
+              </div>
+              <div>
+                <dt>Direct messages</dt>
+                <dd>
+                  {snapshot.experiment.metrics.aggregate.directMessagesSent}
+                </dd>
+              </div>
+              <div>
+                <dt>Known credits</dt>
+                <dd>
+                  {formatCost(
+                    snapshot.experiment.metrics.aggregate.knownCostCredits,
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>Tokens</dt>
+                <dd>
+                  {snapshot.experiment.metrics.aggregate.tokens.totalTokens ??
+                    'Unknown'}
+                </dd>
+              </div>
+            </dl>
+            <ExperimentUsageMeter snapshot={snapshot} />
+          </div>
+        </div>
+        <nav
+          className="command-controls"
+          aria-label="Simulation execution controls"
+        >
           {running ? (
             <button
+              className="icon-button primary-command"
+              aria-label="Pause"
+              title="Pause simulation"
               type="button"
               onClick={() => {
                 setRunning(false);
-                setRunToTurn200(false);
-                runToTurn200Ref.current = false;
+                setBoundedRunTarget(null);
+                boundedRunTargetRef.current = null;
               }}
             >
-              Pause
+              <CommandIcon name="pause" />
+              <span className="sr-only">Pause</span>
             </button>
           ) : (
             <button
+              className="icon-button primary-command"
+              aria-label="Start"
+              title="Start simulation"
               disabled={
                 inFlight ||
                 personalityPending ||
@@ -718,10 +811,15 @@ export function WorldLab() {
               type="button"
               onClick={() => setRunning(true)}
             >
-              Start
+              <CommandIcon name="play" />
+              <span className="sr-only">Start</span>
             </button>
           )}
           <button
+            className="icon-button"
+            aria-label="Single turn"
+            aria-busy={inFlight}
+            title="Advance one turn"
             disabled={
               inFlight ||
               running ||
@@ -733,36 +831,91 @@ export function WorldLab() {
             type="button"
             onClick={() => void executeTurn()}
           >
-            Single turn
+            {inFlight ? <Spinner /> : <CommandIcon name="step" />}
+            <span className="sr-only">Single turn</span>
           </button>
           <button
+            className="icon-button destructive-command"
+            aria-label="Reset world"
+            aria-busy={resetting}
+            title="Reset world"
             disabled={inFlight || resetting || personalityPending}
             type="button"
             onClick={() => void reset()}
           >
-            Reset world
+            {resetting ? <Spinner /> : <CommandIcon name="reset" />}
+            <span className="sr-only">Reset world</span>
           </button>
-          <button
-            disabled={
-              running ||
-              inFlight ||
-              resetting ||
-              personalityPending ||
-              !snapshot.providerConfigured ||
-              !modelsReady ||
-              fullyInfected ||
-              snapshot.pendingFailedTurn !== null ||
-              snapshot.experiment.totalCompletedTurns >= 200
-            }
-            type="button"
-            onClick={() => {
-              runToTurn200Ref.current = true;
-              setRunToTurn200(true);
-              setRunning(true);
-            }}
-          >
-            Run to turn 200
-          </button>
+          <label className="run-target-control">
+            <span className="sr-only">Run target</span>
+            <CommandIcon name="target" />
+            <select
+              aria-label="Run target"
+              value={runTarget}
+              disabled={boundedRunTarget !== null || running || inFlight}
+              onChange={(event) =>
+                setRunTarget(
+                  Number(event.target.value) as (typeof runTargets)[number],
+                )
+              }
+            >
+              {runTargets.map((target) => (
+                <option
+                  key={target}
+                  value={target}
+                  disabled={target <= snapshot.experiment.totalCompletedTurns}
+                >
+                  {target}
+                </option>
+              ))}
+            </select>
+          </label>
+          {boundedRunTarget === null ? (
+            <button
+              className="run-command"
+              disabled={
+                running ||
+                inFlight ||
+                resetting ||
+                personalityPending ||
+                !snapshot.providerConfigured ||
+                !modelsReady ||
+                fullyInfected ||
+                snapshot.pendingFailedTurn !== null ||
+                snapshot.experiment.totalCompletedTurns >= runTarget
+              }
+              type="button"
+              onClick={() => {
+                boundedRunTargetRef.current = runTarget;
+                setBoundedRunTarget(runTarget);
+                setRunning(true);
+              }}
+            >
+              Run to {runTarget}
+            </button>
+          ) : (
+            <button
+              className="cancel-run-command"
+              type="button"
+              disabled={cancelling}
+              aria-busy={cancelling}
+              onClick={() => {
+                setRunning(false);
+                setBoundedRunTarget(null);
+                boundedRunTargetRef.current = null;
+                if (inFlight || snapshot.activeAgentId !== null)
+                  void cancelCurrentRequest();
+              }}
+            >
+              {cancelling ? (
+                <>
+                  <Spinner /> Cancelling…
+                </>
+              ) : (
+                'Cancel run'
+              )}
+            </button>
+          )}
           <span
             className={`cancel-request-slot${
               inFlight || snapshot.activeAgentId !== null ? '' : ' inactive'
@@ -816,6 +969,9 @@ export function WorldLab() {
             </button>
           </span>
           <button
+            className="icon-button"
+            aria-label="Export"
+            title="Export"
             data-export-trigger
             ref={exportTriggerRef}
             type="button"
@@ -827,9 +983,10 @@ export function WorldLab() {
               setExportOpen(true);
             }}
           >
-            Export
+            <CommandIcon name="export" />
+            <span className="sr-only">Export</span>
           </button>
-        </div>
+        </nav>
         {snapshot.providerMode === 'openrouter' ? (
           <ModelConsole
             catalog={catalog}
@@ -840,7 +997,8 @@ export function WorldLab() {
               inFlight ||
               resetting ||
               snapshot.activeAgentId !== null ||
-              verifyingModelId !== null
+              verifyingModelId !== null ||
+              configurationPending
             }
             verifications={modelVerifications}
             verifyingModelId={verifyingModelId}
@@ -851,43 +1009,37 @@ export function WorldLab() {
             onImport={importExperiment}
           />
         ) : (
-          <p className="provider-badge">Model: deterministic test provider</p>
+          <p className="test-provider-summary">Deterministic test model</p>
         )}
-        <div className="command-secondary">
-          <span>
-            Experiment progress:{' '}
-            {Math.min(snapshot.experiment.totalCompletedTurns, 200)}/200
-            {runToTurn200 ? ' · bounded run active' : ''}
-          </span>
-          {!running && (inFlight || snapshot.activeAgentId !== null) && (
-            <span role="status">
-              Playback is paused; the current provider request is still
-              finishing.
-            </span>
-          )}
-          <label className="speed-control">
-            Playback speed
-            <select
-              aria-label="Playback speed"
-              value={speed}
-              onChange={(event) => setSpeed(Number(event.target.value))}
+        <details className="overflow-menu">
+          <summary aria-label="More World Lab actions" title="More actions">
+            <CommandIcon name="more" />
+          </summary>
+          <div className="command-popover overflow-content">
+            <label className="speed-control">
+              Playback speed
+              <select
+                aria-label="Playback speed"
+                value={speed}
+                onChange={(event) => setSpeed(Number(event.target.value))}
+              >
+                <option value={2_000}>Slow · 2s</option>
+                <option value={1_000}>Normal · 1s</option>
+                <option value={250}>Fast · 0.25s</option>
+              </select>
+            </label>
+            <button
+              disabled={personalityControlsDisabled}
+              type="button"
+              onClick={() => void restoreDefaultPersonalities()}
             >
-              <option value={2_000}>Slow · 2s</option>
-              <option value={1_000}>Normal · 1s</option>
-              <option value={250}>Fast · 0.25s</option>
-            </select>
-          </label>
-          <button
-            className="secondary-action"
-            disabled={personalityControlsDisabled}
-            type="button"
-            onClick={() => void restoreDefaultPersonalities()}
-          >
-            Restore default personalities
-          </button>
-          <ExperimentUsageMeter snapshot={snapshot} />
-        </div>
-      </section>
+              {personalityPending
+                ? 'Restoring…'
+                : 'Restore default personalities'}
+            </button>
+          </div>
+        </details>
+      </header>
       <div className="command-alerts">
         {(!modelsReady || uiError || fullyInfected || personalityNotice) && (
           <div className="command-alert" role="alert">
@@ -933,13 +1085,23 @@ export function WorldLab() {
             hexes={snapshot.world.hexes}
             agents={snapshot.world.agents}
             alliances={snapshot.world.alliances}
-            selectedCell={selectedCell ?? snapshot.world.hexes[0]!.cell}
+            selectedCell={selectedCell}
             selectedAgentId={inspectionAgentId}
             onSelectCell={setSelectedCell}
+            onClearCellSelection={() => setSelectedCell(null)}
             onSelectAgent={(agentId) => {
+              setSelectedCell(null);
               selectAgentForInspection(agentId);
             }}
           />
+          {selectedHex && (
+            <HexMapPopup
+              hex={selectedHex}
+              controller={selectedHexController}
+              alliance={selectedHexAlliance}
+              onClose={() => setSelectedCell(null)}
+            />
+          )}
           <div className="map-caption">
             <span>Development location: Toledo, Ohio</span>
             <span>
@@ -997,92 +1159,16 @@ export function WorldLab() {
                   (event.controllerAgentId === selectedAgent.id ||
                     event.previousControllerAgentId === selectedAgent.id),
               )}
-              onExportAgent={(agentId) => {
-                setRunning(false);
-                exportInitializedRef.current = true;
-                setExportAgentIds([agentId]);
-                setExportOpen(true);
-              }}
             />
           )}
 
           <TerritoryScoreboard entries={snapshot.experiment.currentTerritory} />
           <AlliancePanel snapshot={snapshot} />
-
-          {selectedHex && (
-            <section
-              className="panel selected-panel"
-              aria-label="Selected hex inspector"
-            >
-              <p className="panel-kicker">Selected hex</p>
-              <h2>{selectedHex.state === 'infected' ? 'Infected' : 'Open'}</h2>
-              <dl>
-                <div>
-                  <dt>H3 index</dt>
-                  <dd>{selectedHex.cell}</dd>
-                </div>
-                <div>
-                  <dt>Controlled by</dt>
-                  <dd>
-                    {selectedHex.state === 'infected' ? (
-                      <>
-                        <span
-                          className="agent-swatch"
-                          style={{
-                            background:
-                              selectedHexAlliance?.color ??
-                              selectedHexController?.color,
-                          }}
-                        />
-                        {selectedHexController?.name ??
-                          selectedHex.controllerAgentId}
-                      </>
-                    ) : (
-                      'No controller'
-                    )}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Base color</dt>
-                  <dd>{selectedHexController?.color ?? 'None'}</dd>
-                </div>
-                <div>
-                  <dt>Alliance</dt>
-                  <dd>
-                    {selectedHexAlliance
-                      ? selectedHexAlliance.memberAgentIds
-                          .map(
-                            (id) =>
-                              snapshot.world.agents.find(
-                                (agent) => agent.id === id,
-                              )?.name,
-                          )
-                          .join(', ')
-                      : 'Unaffiliated'}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Effective territory color</dt>
-                  <dd>
-                    {selectedHexAlliance?.color ??
-                      selectedHexController?.color ??
-                      'None'}
-                  </dd>
-                </div>
-                <div>
-                  <dt>State</dt>
-                  <dd>
-                    <span className={`state-dot ${selectedHex.state}`} />
-                    {selectedHex.state}
-                  </dd>
-                </div>
-              </dl>
-            </section>
-          )}
         </aside>
       </div>
       <div className="bottom-dock">
         <PublicWorldChat
+          snapshot={snapshot}
           agents={snapshot.world.agents}
           events={publicMessages}
           turns={snapshot.turns}
@@ -1090,6 +1176,7 @@ export function WorldLab() {
           onCollapsedChange={setChatCollapsed}
         />
         <EventLog
+          snapshot={snapshot}
           turns={snapshot.turns}
           agents={snapshot.world.agents}
           collapsed={chatCollapsed}
@@ -1097,6 +1184,93 @@ export function WorldLab() {
         />
       </div>
     </main>
+  );
+}
+
+function Spinner() {
+  return <span className="spinner" aria-hidden="true" />;
+}
+
+function HexMapPopup({
+  hex,
+  controller,
+  alliance,
+  onClose,
+}: {
+  hex: SimulationSnapshot['world']['hexes'][number];
+  controller?: SimulationSnapshot['world']['agents'][number];
+  alliance?: SimulationSnapshot['world']['alliances'][number];
+  onClose: () => void;
+}) {
+  const effectiveColor = alliance?.color ?? controller?.color;
+  return (
+    <section className="hex-map-popup" aria-label="Selected hex details">
+      <div className="hex-popup-heading">
+        <div>
+          <p className="panel-kicker">Selected hex</p>
+          <h2>{hex.state === 'infected' ? 'Infected' : 'Open'}</h2>
+        </div>
+        <button type="button" aria-label="Close hex details" onClick={onClose}>
+          ×
+        </button>
+      </div>
+      <dl>
+        <div>
+          <dt>H3 index</dt>
+          <dd>{hex.cell}</dd>
+        </div>
+        <div>
+          <dt>Controller</dt>
+          <dd>
+            {hex.state === 'infected' ? (
+              <>
+                <span
+                  className="agent-swatch"
+                  style={{ background: effectiveColor }}
+                />
+                {controller?.name ?? hex.controllerAgentId}
+              </>
+            ) : (
+              'Uncontrolled'
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>Alliance</dt>
+          <dd>
+            {alliance
+              ? `${alliance.memberAgentIds.length} members`
+              : 'Unaffiliated'}
+          </dd>
+        </div>
+        <div>
+          <dt>Effective color</dt>
+          <dd>{effectiveColor ?? 'None'}</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+function CommandIcon({
+  name,
+}: {
+  name: 'play' | 'pause' | 'step' | 'reset' | 'target' | 'export' | 'more';
+}) {
+  const path = {
+    play: 'M8 5v14l11-7z',
+    pause: 'M7 5h4v14H7zm6 0h4v14h-4z',
+    step: 'M6 5v14l9-7zm10 0h3v14h-3z',
+    reset: 'M6.3 7.8A7 7 0 1 1 5 14h2a5 5 0 1 0 1-3l3 3H4V7z',
+    target:
+      'M12 2v3m0 14v3M2 12h3m14 0h3m-5 0a5 5 0 1 1-10 0 5 5 0 0 1 10 0zm-3 0a2 2 0 1 1-4 0 2 2 0 0 1 4 0z',
+    export: 'M12 3v12m-5-5 5 5 5-5M5 17v3h14v-3',
+    more: 'M5 12h.01M12 12h.01M19 12h.01',
+  }[name];
+  return (
+    <svg className="command-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d={path} />
+    </svg>
   );
 }
 
@@ -1220,32 +1394,17 @@ function ModelConsole({
   const [tab, setTab] = useState<'overview' | 'models' | 'behavior'>('models');
   const toggleRef = useRef<HTMLButtonElement>(null);
   const [search, setSearch] = useState('');
-  const [sort, setSort] = useState<'name' | 'price' | 'context' | 'newest'>(
-    'name',
-  );
   const models = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return [...(catalog?.models ?? [])]
-      .filter(
-        ({ id, name, author }) =>
-          !query ||
-          id.toLowerCase().includes(query) ||
-          name.toLowerCase().includes(query) ||
-          author.toLowerCase().includes(query),
-      )
-      .sort((left, right) => {
-        if (sort === 'price')
-          return (
-            Number(left.inputPricePerToken) -
-              Number(right.inputPricePerToken) ||
-            Number(left.outputPricePerToken) - Number(right.outputPricePerToken)
-          );
-        if (sort === 'context') return right.contextLength - left.contextLength;
-        if (sort === 'newest')
-          return (right.createdAt ?? '').localeCompare(left.createdAt ?? '');
-        return left.name.localeCompare(right.name);
-      });
-  }, [catalog, search, sort]);
+    return (catalog?.models ?? []).filter(
+      ({ id, name, author }) =>
+        !query ||
+        id.toLowerCase().includes(query) ||
+        name.toLowerCase().includes(query) ||
+        author.toLowerCase().includes(query),
+    );
+  }, [catalog, search]);
+  const modelOptions = useMemo(() => buildModelOptions(models), [models]);
   const configuration = snapshot.modelConfiguration;
   const selected = catalog?.models.find(
     ({ id }) => id === configuration.globalModelId,
@@ -1269,19 +1428,17 @@ function ModelConsole({
         className="agent-setup-trigger"
         ref={toggleRef}
         type="button"
+        title={`Agent setup · ${selected?.name ?? configuration.globalModelId ?? 'model needed'}`}
+        aria-label={`Open Agent Controller. ${snapshot.resolvedModels.filter(({ available }) => available).length} of 8 agents ready. Global model ${selected?.name ?? configuration.globalModelId ?? 'not selected'}.`}
         onClick={() => (open ? close() : setOpen(true))}
       >
-        Model: {selected?.name ?? configuration.globalModelId ?? 'not selected'}
-        <span>
-          Agent setup ·{' '}
+        <span className="setup-label">
+          Agent setup ·
           {snapshot.resolvedModels.filter(({ available }) => available).length}
-          /8 ready ·{' '}
-          {selected?.name ??
-            configuration.globalModelId ??
-            'model needed'} ·{' '}
-          {snapshot.behaviorConfiguration.assignmentMode === 'balanced-random'
-            ? 'balanced behavior'
-            : snapshot.behaviorConfiguration.assignmentMode}
+          /8 ready
+        </span>
+        <span className="setup-model">
+          Model: {selected?.name ?? configuration.globalModelId ?? 'needed'}
         </span>
       </button>
       <DialogShell
@@ -1397,20 +1554,6 @@ function ModelConsole({
                   placeholder="Name, slug, or author"
                 />
               </label>
-              <label>
-                Sort
-                <select
-                  value={sort}
-                  onChange={(event) =>
-                    setSort(event.target.value as typeof sort)
-                  }
-                >
-                  <option value="name">Name</option>
-                  <option value="price">Lowest input price</option>
-                  <option value="context">Largest context</option>
-                  <option value="newest">Newest</option>
-                </select>
-              </label>
             </div>
             <section
               className="model-global-section"
@@ -1437,11 +1580,17 @@ function ModelConsole({
                         {configuration.globalModelId} — unavailable
                       </option>
                     )}
-                    {models.map((model) => (
-                      <option value={model.id} key={model.id}>
-                        {model.name} ·{' '}
-                        {formatPerMillion(model.inputPricePerToken)} in /{' '}
-                        {formatPerMillion(model.outputPricePerToken)} out
+                    {selected &&
+                      !modelOptions.some(
+                        ({ value }) => value === selected.id,
+                      ) && (
+                        <option value={selected.id}>
+                          {buildModelOptions([selected])[0]!.label}
+                        </option>
+                      )}
+                    {modelOptions.map((option) => (
+                      <option value={option.value} key={option.value}>
+                        {option.label}
                       </option>
                     ))}
                   </select>
@@ -1589,11 +1738,13 @@ function ModelConsole({
                               {override.modelId} — unavailable
                             </option>
                           )}
-                        {(catalog?.models ?? []).map((model) => (
-                          <option value={model.id} key={model.id}>
-                            {model.name}
-                          </option>
-                        ))}
+                        {buildModelOptions(catalog?.models ?? []).map(
+                          (option) => (
+                            <option value={option.value} key={option.value}>
+                              {option.label}
+                            </option>
+                          ),
+                        )}
                       </select>
                     </label>
                     <label>
@@ -1954,12 +2105,14 @@ function AgentRoster({
 }
 
 function PublicWorldChat({
+  snapshot,
   agents,
   events,
   turns,
   collapsed,
   onCollapsedChange,
 }: {
+  snapshot: SimulationSnapshot;
   agents: SimulationSnapshot['world']['agents'];
   events: Array<
     Extract<
@@ -2064,9 +2217,23 @@ function PublicWorldChat({
                     turn.communicationResult.event.id === event.id,
                 )?.turnNumber;
                 return (
-                  <li key={event.id} style={{ borderLeftColor: sender?.color }}>
+                  <li
+                    key={event.id}
+                    style={{
+                      borderLeftColor: resolveAgentColor(
+                        snapshot,
+                        event.agentId,
+                      ),
+                    }}
+                  >
                     <div>
-                      <strong>{sender?.name ?? event.agentId}</strong>
+                      <strong
+                        style={{
+                          color: resolveAgentColor(snapshot, event.agentId),
+                        }}
+                      >
+                        {sender?.name ?? event.agentId}
+                      </strong>
                       <small>
                         Turn {turnNumber ?? '—'} ·{' '}
                         {formatTimestamp(event.occurredAt)}
@@ -2230,7 +2397,6 @@ function AgentInspector({
   metrics,
   controlledCellCount,
   controlChanges,
-  onExportAgent,
 }: {
   agent: SimulationSnapshot['world']['agents'][number];
   snapshot: SimulationSnapshot;
@@ -2258,7 +2424,6 @@ function AgentInspector({
       { type: 'hex-captured' }
     >
   >;
-  onExportAgent: (agentId: AgentId) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(agent.personality);
@@ -2418,9 +2583,6 @@ function AgentInspector({
           })}
         </ol>
       )}
-      <button type="button" onClick={() => onExportAgent(agent.id)}>
-        Export this agent
-      </button>
       <h3>Direct-message history</h3>
       {directMessages.length === 0 ? (
         <p className="muted">No direct messages for this agent yet.</p>
@@ -2449,7 +2611,15 @@ function AgentInspector({
                 turn.communicationResult.event.id === communication.id,
             )?.turnNumber;
             return (
-              <li key={communication.id}>
+              <li
+                key={communication.id}
+                style={{
+                  borderLeftColor: resolveAgentColor(
+                    snapshot,
+                    communication.agentId,
+                  ),
+                }}
+              >
                 <div>
                   <strong>{direction}</strong>{' '}
                   <span>
@@ -2858,8 +3028,11 @@ function ExperimentExportPanel({
   const [generatedRequestJson, setGeneratedRequestJson] = useState<
     string | null
   >(null);
-  const [pending, setPending] = useState(false);
+  const [operation, setOperation] = useState<
+    'preview' | 'generate' | 'copy' | 'download' | null
+  >(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const downloadPendingRef = useRef(false);
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
 
   const requestInput = {
@@ -2884,16 +3057,19 @@ function ExperimentExportPanel({
     ...(level === 'custom' ? { custom } : {}),
   };
   const parsedRequest = experimentExportRequestSchema.safeParse(requestInput);
+  const pending = operation !== null;
   const generationDisabled = disabled || pending || !parsedRequest.success;
   const currentRequestJson = parsedRequest.success
     ? JSON.stringify(parsedRequest.data)
     : null;
   const documentIsCurrent =
     document !== null && generatedRequestJson === currentRequestJson;
+  const generatedArtifactIsStale = document !== null && !documentIsCurrent;
 
   const requestExport = async (previewOnly: boolean) => {
     if (!parsedRequest.success) return;
-    setPending(true);
+    if (operation !== null) return;
+    setOperation(previewOnly ? 'preview' : 'generate');
     setNotice(null);
     try {
       const response = await fetch(
@@ -2913,37 +3089,54 @@ function ExperimentExportPanel({
       if (!response.ok) throw new Error('export request failed');
       if (previewOnly) {
         setPreview(experimentExportPreviewSchema.parse(await response.json()));
-        setDocument(null);
-        setGeneratedRequestJson(null);
-        setNotice('Export preview updated.');
+        setNotice(
+          'Export preview updated. Generate export to enable copy and download.',
+        );
       } else {
         const payload = experimentExportResponseSchema.parse(
           await response.json(),
         );
         setDocument(payload.document);
         setGeneratedRequestJson(JSON.stringify(parsedRequest.data));
-        setNotice('Export JSON generated and schema-validated.');
+        const bytes = new TextEncoder().encode(
+          serializeExportDocument(payload.document),
+        ).byteLength;
+        setNotice(
+          `Export ready · schema v${payload.document.schemaVersion} · ${bytes.toLocaleString()} bytes.`,
+        );
       }
     } catch {
       setNotice('Export failed safely. Review the selection and try again.');
     } finally {
-      setPending(false);
+      setOperation(null);
     }
   };
 
   const copyJson = async () => {
-    if (!document || !documentIsCurrent) return;
+    if (!document || !documentIsCurrent || operation !== null) return;
+    setOperation('copy');
     try {
       await navigator.clipboard.writeText(serializeExportDocument(document));
       setNotice('Export JSON copied to the clipboard.');
     } catch {
       setNotice('Copy failed. Clipboard permission may be unavailable.');
+    } finally {
+      setOperation(null);
     }
   };
 
-  const downloadJson = () => {
-    if (!document || !documentIsCurrent) return;
+  const downloadJson = async () => {
+    if (
+      !document ||
+      !documentIsCurrent ||
+      operation !== null ||
+      downloadPendingRef.current
+    )
+      return;
+    downloadPendingRef.current = true;
+    setOperation('download');
     try {
+      await Promise.resolve();
       const json = serializeExportDocument(document);
       const url = URL.createObjectURL(
         new Blob([json], { type: 'application/json' }),
@@ -2968,6 +3161,9 @@ function ExperimentExportPanel({
       setNotice('Export JSON download started.');
     } catch {
       setNotice('Download failed safely.');
+    } finally {
+      downloadPendingRef.current = false;
+      setOperation(null);
     }
   };
 
@@ -2993,32 +3189,36 @@ function ExperimentExportPanel({
           </button>
           <button
             disabled={generationDisabled}
+            aria-busy={operation === 'preview'}
             type="button"
             onClick={() => void requestExport(true)}
           >
-            Preview
+            {operation === 'preview' ? 'Previewing…' : 'Preview'}
           </button>
           <button
             className="primary-action"
             disabled={generationDisabled}
+            aria-busy={operation === 'generate'}
             type="button"
             onClick={() => void requestExport(false)}
           >
-            Generate
+            {operation === 'generate' ? 'Generating…' : 'Generate export'}
           </button>
           <button
-            disabled={!documentIsCurrent}
+            disabled={!documentIsCurrent || pending}
+            aria-busy={operation === 'copy'}
             type="button"
             onClick={() => void copyJson()}
           >
-            Copy
+            {operation === 'copy' ? 'Copying…' : 'Copy JSON'}
           </button>
           <button
-            disabled={!documentIsCurrent}
+            disabled={!documentIsCurrent || pending}
+            aria-busy={operation === 'download'}
             type="button"
-            onClick={downloadJson}
+            onClick={() => void downloadJson()}
           >
-            Download
+            {operation === 'download' ? 'Downloading…' : 'Download JSON'}
           </button>
         </div>
       }
@@ -3271,6 +3471,11 @@ function ExperimentExportPanel({
           {notice}
         </p>
       )}
+      {generatedArtifactIsStale && (
+        <p className="callout stale-export" role="status">
+          Options changed — regenerate export.
+        </p>
+      )}
     </DialogShell>
   );
 }
@@ -3369,11 +3574,13 @@ function serializeExportDocument(document: ExperimentExportDocument): string {
 }
 
 function EventLog({
+  snapshot,
   turns,
   agents,
   collapsed,
   onCollapsedChange,
 }: {
+  snapshot: SimulationSnapshot;
   turns: AgentTurnRecord[];
   agents: SimulationSnapshot['world']['agents'];
   collapsed: boolean;
@@ -3413,7 +3620,7 @@ function EventLog({
                   data-outcome={turn.outcome}
                   key={turn.turnNumber}
                   style={{
-                    borderLeft: `3px solid ${agents.find(({ id }) => id === turn.agentId)?.color ?? '#82938e'}`,
+                    borderLeft: `3px solid ${resolveAgentColor(snapshot, turn.agentId)}`,
                     paddingLeft: 8,
                   }}
                 >

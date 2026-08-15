@@ -44,13 +44,15 @@ The command reads only `OPENROUTER_API_KEY` from the repository-root `.env`; its
 
 ## Development map source
 
-The map centers on Toledo, Ohio (`41.6528, -83.5379`) at H3 resolution 9 and renders a deterministic radius-six disk of exactly 127 cells with eight fixed perimeter starts. MapLibre uses the public OpenStreetMap raster tile endpoint with attribution for light local development only. A public deployment must choose a compliant production tile source.
+The map centers on Toledo, Ohio (`41.6528, -83.5379`) at H3 resolution 9 and renders a deterministic radius-six disk of exactly 127 cells with eight fixed perimeter starts. MapLibre uses CARTO Dark Matter's tokenless raster tiles with `© OpenStreetMap contributors © CARTO` attribution. Public deployments remain responsible for confirming provider usage requirements for their traffic.
 
 Alliance leadership, merging, custom metadata, combat systems, relationship scores, group chat, persistent memory, player mechanics, persistence, and autonomous scheduling remain deferred.
 
 When every development cell is infected, World Lab automatically pauses playback and disables Start to avoid accidental provider calls. Reset and export remain available, and Single turn remains an explicitly manual diagnostic action.
 
-World Lab also provides a browser-owned **Run to turn 200** control. It continues the existing sequential loop only for the remaining turns, displays progress, and pauses immediately after total completed turn 200 unless full infection stops it first.
+World Lab provides browser-owned absolute run targets of **25, 50, 100, 200, 500, and 1,000**. The session-selected target defaults to 200, past/current targets are unavailable, and a bounded run pauses at the authoritative completed-turn target unless cancellation, failure, or full infection stops it first.
+
+The compact command navbar keeps execution controls and current known cost in one persistent row and moves detailed experiment telemetry, playback speed, and infrequent actions into accessible hover/focus popovers. Its control slots remain stable while async state changes. Explicit agent-marker selection drives the inspector, while explicit H3 selection opens a dismissible map-local details card. Blackberry/teal/mint/celadon/vanilla semantic tokens define the dark application chrome without replacing domain-owned agent and alliance colors.
 
 The agent roster defaults to browser-local **Follow turn** behavior: the inspector follows the active request, or the next scheduled agent while paused. Selecting an agent manually disables following without hiding the roster's textual Acting/Next marker; the preference remains in that browser and is never exported. Public world chat and the event log are newest-first bounded feeds, and the shared Model and Export dialogs keep their headers/actions fixed while their bodies scroll within the viewport.
 
