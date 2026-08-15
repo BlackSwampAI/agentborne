@@ -30,6 +30,12 @@ const observation = agentObservationSchema.parse({
     eligible: false,
     blockedReason: 'capture-open-cell',
   },
+  actionAvailability: {
+    moveTargetCellIds: ['892a1072883ffff'],
+    infect: { available: true },
+    capture: { available: false, reason: 'capture-open-cell' },
+    wait: { available: true },
+  },
   adjacentCells: [
     {
       cell: '892a1072883ffff',
@@ -146,17 +152,20 @@ function errorResponse({
   code,
   message,
   requestId = 'safe-request-id',
+  retryAfter,
 }: {
   status: number;
   code?: string | number;
   message?: string;
   requestId?: string;
+  retryAfter?: string;
 }) {
   return new Response(JSON.stringify({ error: { code, message } }), {
     status,
     headers: {
       'Content-Type': 'application/json',
       'x-request-id': requestId,
+      ...(retryAfter === undefined ? {} : { 'retry-after': retryAfter }),
     },
   });
 }
@@ -181,7 +190,13 @@ describe('OpenRouterAgentProvider', () => {
       'All decisions are independently validated',
     );
     expect(request.messages[0]!.content).toContain(
-      'captureEligibility.eligible is true',
+      'actionAvailability.capture.available is true',
+    );
+    expect(request.messages[0]!.content).toContain(
+      'move there this turn and infect it on a later turn',
+    );
+    expect(request.messages[0]!.content).toContain(
+      'Infect affects only the current cell',
     );
     expect(request.messages[0]!.content).toContain(
       'Return exactly one plain JSON object',
@@ -202,6 +217,22 @@ describe('OpenRouterAgentProvider', () => {
     expect(request.messages[0]!.content).toContain('worldActionType');
     expect(request.messages[0]!.content).toContain('communicationType');
     expect(request.messages[0]!.content).toContain('diplomacyType');
+  });
+
+  it('adds only bounded validation codes to a fresh corrective request', () => {
+    const request = buildOpenRouterRequest(
+      observation,
+      TEST_MODEL,
+      'provider-default',
+      ['contradictory-fields', 'invalid-recipient-sentinel'],
+    );
+    const user = JSON.parse(request.messages[1]!.content);
+    expect(user.correction).toEqual({
+      instruction:
+        'Correct only the flat JSON format or decision-contract problem and return one replacement object.',
+      validationCodes: ['contradictory-fields', 'invalid-recipient-sentinel'],
+    });
+    expect(request.messages[1]!.content).not.toContain('raw invalid');
   });
 
   it('preserves an explicit model override', () => {
@@ -264,6 +295,32 @@ describe('OpenRouterAgentProvider', () => {
       });
     },
   );
+
+  it.each([
+    ['1.5', 1_500],
+    ['not-a-delay', undefined],
+  ])('normalizes Retry-After %s safely', async (retryAfter, expectedMs) => {
+    const provider = new OpenRouterAgentProvider({
+      apiKey: 'secret-test-key',
+      fetchImplementation: vi.fn(async () =>
+        errorResponse({
+          status: 429,
+          code: 'rate_limited',
+          message: 'Try later.',
+          retryAfter,
+        }),
+      ),
+    });
+    await expect(
+      provider.decide(observation, TEST_MODEL),
+    ).rejects.toMatchObject({
+      failure: {
+        code: 'provider-http',
+        httpStatus: 429,
+        ...(expectedMs === undefined ? {} : { retryAfterMs: expectedMs }),
+      },
+    });
+  });
 
   it.each([
     JSON.stringify({ worldAction: { type: 'wait' }, summary: 'Nested.' }),

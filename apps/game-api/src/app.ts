@@ -71,6 +71,28 @@ export function createApp(options: AppOptions = {}) {
     options.catalog ??
     new OpenRouterModelCatalog({ apiKey: process.env.OPENROUTER_API_KEY });
   const modelVerifications = new Map<string, ModelVerification>();
+  const turnMutations = new Map<string, Promise<unknown>>();
+  const mutationPromise = <T>(
+    context: Context,
+    operation: 'turn' | 'retry',
+    execute: () => Promise<T>,
+  ): Promise<T> => {
+    const supplied =
+      context.req.header('x-agentborne-mutation-id') ??
+      context.req.query('mutationId');
+    const mutationId =
+      supplied && /^[A-Za-z0-9_-]{8,80}$/.test(supplied) ? supplied : undefined;
+    if (!mutationId) return execute();
+    const key = `${operation}:${mutationId}`;
+    const existing = turnMutations.get(key) as Promise<T> | undefined;
+    if (existing) return existing;
+    const pending = execute();
+    turnMutations.set(key, pending);
+    if (turnMutations.size > 200)
+      turnMutations.delete(turnMutations.keys().next().value!);
+    pending.catch(() => turnMutations.delete(key));
+    return pending;
+  };
 
   app.use(
     '/api/*',
@@ -247,7 +269,9 @@ export function createApp(options: AppOptions = {}) {
 
   app.post('/api/simulation/turn', async (context) => {
     try {
-      const turn = await service.executeNextTurn();
+      const turn = await mutationPromise(context, 'turn', () =>
+        service.executeNextTurn(),
+      );
       return context.json(
         singleTurnResponseSchema.parse({
           snapshot: service.getSnapshot(),
@@ -317,7 +341,9 @@ export function createApp(options: AppOptions = {}) {
     try {
       const turn =
         operation === 'retry'
-          ? await service.retryFailedTurn()
+          ? await mutationPromise(context, 'retry', () =>
+              service.retryFailedTurn(),
+            )
           : service.skipFailedTurn();
       return context.json(
         singleTurnResponseSchema.parse({

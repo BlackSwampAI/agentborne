@@ -23,15 +23,23 @@ pnpm test:e2e
 
 ## Coverage
 
-Deterministic service and component coverage includes manual Retry/Skip state,
-attempt-history export, mutually exclusive intervention controls, and model and
-export modal dismissal. Retry never implies an automatic or hidden billable
-request.
+Deterministic service and component coverage includes engine-derived action
+availability, one-slot automatic repair/transport recovery under a shared
+deadline, exact one-call manual Retry/Skip state, attempt-history export,
+idempotent mutation delivery, ambiguous-response reconciliation, mutually
+exclusive intervention controls, and model and export modal dismissal.
 
-Attempt-accounting coverage verifies that schema-v7 metrics count every initial
-and manual-retry call exactly once, reconcile logical outcomes independently,
+Attempt-accounting coverage verifies that schema-v7 metrics count every initial,
+automatic-repair, automatic-transport-retry, and manual-retry call exactly once,
+reconcile logical outcomes independently,
 fall back once to top-level provider metadata for legacy records, and preserve
 schema-v6 model-configuration import compatibility.
+
+Partial-accounting fixtures verify independent known token-field sums,
+unknown-token attempt disclosure, exact known-cost accumulation, and distinct
+unknown-cost attempt versus logical-turn counts. Fake-timer transport tests cover
+valid `Retry-After`, the bounded missing/invalid-header fallback, shared-deadline
+consumption, cancellation during backoff, and the unchanged two-call ceiling.
 
 - Centralized development-contract tests prove radius 6 produces exactly 127 unique open/uncontrolled cells, eight unique deterministic starts, stable IDs/default personalities, and an eight-entry scoreboard with up to seven other-agent observations.
 - Alliance engine tests cover free-agent formation, recruitment, recipient-only acceptance, proposal conflicts and one-round expiry, stale invalidation, one-alliance membership, unilateral departure/dissolution, unchanged individual control, deterministic color reuse, and allied-capture rejection.

@@ -46,7 +46,17 @@ again from current operator configuration. Operator Skip commits an explicit
 diplomacy, then advances the cursor once. Neither path schedules an automatic
 retry.
 
-The development world is a deterministic H3 resolution-nine radius-six disk (127 cells) around Toledo with eight fixed profiles and unique perimeter starts. One agent acts per turn in stable array order, so 200 completed turns give every agent exactly 25 turns. The service makes exactly one text completion request and asks for one flat JSON object containing a required world action, zero or one communication, and zero or one diplomacy intent (`propose-alliance`, `accept-alliance`, or `leave-alliance`). Required sentinel-bearing fields normalize into the internal unions before existing Zod and engine validation. There are no social ticks, background inference calls, or automatic replies.
+For a new logical turn, the service owns one 75-second deadline and permits at
+most two provider calls: initial plus either one contract repair or one transient
+transport retry. Both calls receive the same immutable observation, resolved
+model, and reasoning profile. Repair prompts are fresh universal flat-JSON
+requests containing only allowlisted validation codes; raw invalid output is
+discarded. Structurally normalized decisions enter the normal engine path once,
+and engine rejection is never an automatic retry condition. Manual Retry makes
+exactly one request per click, may include the latest safe feedback, and cannot
+trigger nested recovery.
+
+The development world is a deterministic H3 resolution-nine radius-six disk (127 cells) around Toledo with eight fixed profiles and unique perimeter starts. One agent acts per turn in stable array order, so 200 completed turns give every agent exactly 25 turns. Each provider call asks for one flat JSON object containing a required world action, zero or one communication, and zero or one diplomacy intent (`propose-alliance`, `accept-alliance`, or `leave-alliance`). Required sentinel-bearing fields normalize into the internal unions before existing Zod and engine validation. There are no social ticks, background inference calls, or automatic replies.
 
 Names, colors, stable IDs, and starting cells remain fixed. Personality text is mutable session configuration, but each observation copies the active value at turn start. Completed observations and turn records remain immutable, so a newly edited active personality can intentionally differ from the latest historical observation until that agent acts again.
 
@@ -83,6 +93,23 @@ The catalog has an eight-second timeout and five-minute in-memory TTL. A success
 Every agent resolves an explicit global assignment or per-agent override before execution, including its reasoning profile. The acting agent's resolved slug and profile are passed to its request. Assignments may change while playback is paused and no provider/reset mutation is active. Each change is exported with timestamp, scope, prior/new slug, prior/new reasoning profile, and effective next-turn boundary. No unavailable model/profile or missing model is substituted.
 
 The centralized 75-second provider abort timeout covers the complete response lifecycle, including body reading, response decoding, bounded JSON extraction/repair, normalization, and schema validation, and is cleared after every outcome. The same AbortController supports an explicit non-turn-consuming operator cancellation. Safe records expose only bounded status/code/message/request ID/model/finish-reason/latency/usage fields. Scripted providers are explicit deterministic seams selected only by tests or `AGENTBORNE_PROVIDER=scripted`; there is no automatic fallback. Manual probes use the exact text/flat-JSON contract and selected reasoning profile, never mutate or advance the world, may incur a small charge, and are cached only for the current server session by model ID, reasoning profile, and contract version.
+
+The deadline is shared by both permitted automatic attempts rather than renewed
+per call. Turn and Retry browser mutations carry bounded client operation IDs,
+and repeated delivery is coalesced server-side. When a proxy connection resets
+or a response is otherwise lost, the World Lab clears its local guard, refetches
+the authoritative snapshot, and shows a height-stable reconciling state while
+polling an active request. It never resubmits merely because a response was
+ambiguous.
+
+Attempt aggregation is field-wise: known prompt, completion, total, reasoning,
+cache-read, and cache-write values remain visible even when another attempt has
+no usage metadata. Completeness and unknown-token-attempt counts prevent partial
+totals from appearing complete. Known cost remains an exact sum; unknown cost is
+reported separately by provider attempt and by distinct logical turn. Missing or
+unusable 429 `Retry-After` metadata uses a centralized 1.5-second fallback only
+when it fits the original deadline, and the active cancellation signal aborts
+the wait.
 
 The rationale and deferrals are recorded in [ADR 0002](adr/0002-first-visible-llm-invasion.md).
 Personality ownership and reset semantics are recorded in [ADR 0003](adr/0003-session-personality-configuration.md).
