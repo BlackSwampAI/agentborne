@@ -47,6 +47,8 @@ Fifth focused slice: replace environment-selected models with a server-owned cap
 
 Sixth focused slice: harden each logical model turn with engine-derived legal-action affordances, at most one bounded automatic contract repair or transient transport retry inside the existing shared 75-second deadline, complete schema-v7 attempt accounting, exact one-call manual Retry, mutation idempotency, and browser reconciliation after ambiguous proxy failures. The universal text/flat-JSON contract remains the portability layer; engine-rejected game decisions are never automatically retried.
 
+Seventh focused slice: polish the production World Lab with newest-first bounded public chat, browser-local follow-turn inspection, a shared accessible responsive dialog shell for model assignment and export, and stable complete headers in the collapsible communication dock. Simulation behavior, provider execution, API contracts, telemetry, and export documents remain unchanged.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.

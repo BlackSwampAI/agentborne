@@ -52,11 +52,13 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(worldMap).toBeVisible();
   for (const viewport of [
     { width: 1920, height: 1080 },
-    { width: 1920, height: 900 },
     { width: 1440, height: 900 },
+    { width: 1024, height: 768 },
   ]) {
     await page.setViewportSize(viewport);
-    await expect(page.getByLabel('Public world chat')).toBeVisible();
+    await expect(
+      page.getByRole('region', { name: 'Public world chat' }),
+    ).toBeVisible();
     const layout = await page.evaluate(() => ({
       viewportHeight: window.innerHeight,
       htmlOverflow: getComputedStyle(document.documentElement).overflow,
@@ -92,6 +94,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
     await page.mouse.wheel(0, 1_000);
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
   }
+  await page.setViewportSize({ width: 1440, height: 900 });
   const desktopMapBox = await worldMap.boundingBox();
   const desktopDockBox = await page.locator('.bottom-dock').boundingBox();
   expect(desktopMapBox?.width ?? 0).toBeGreaterThan(450);
@@ -116,12 +119,27 @@ test('runs the complete deterministic World Lab browser flow', async ({
     'Mingle0',
   );
 
+  const followTurn = page.getByRole('checkbox', { name: 'Follow turn' });
+  await expect(followTurn).toBeChecked();
+  await expect(page.getByLabel('Agent roster').getByText('Next')).toBeVisible();
+
+  await page
+    .getByRole('button', { name: 'Collapse Public world chat' })
+    .click();
+  await expect(
+    page.getByRole('heading', { name: 'Public world chat' }),
+  ).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Event log' })).toBeVisible();
+  await expect(page.locator('.bottom-dock')).toHaveCSS('height', '54px');
+  await page.getByRole('button', { name: 'Expand Event log' }).click();
+
   const markers = page.getByRole('button', { name: /Select agent/ });
   await expect(markers).toHaveCount(8);
   for (let index = 0; index < 8; index += 1) {
     await expect(markers.nth(index)).toBeVisible();
   }
   await page.getByRole('button', { name: 'Select agent Ember' }).click();
+  await expect(followTurn).not.toBeChecked();
   await expect(page.getByRole('heading', { name: /Ember/ })).toBeVisible();
   const defaultPersonality =
     'You are a forceful expansionist who wants the largest personal territory. Infect open cells aggressively, capture exposed rival territory, and use public messages to pressure or warn competitors. Alliances are temporary strategic tools: propose or accept them when they help contain a stronger rival, honor them while useful, and leave openly when they block expansion. Respond to direct proposals instead of silently ignoring them.';
@@ -141,7 +159,12 @@ test('runs the complete deterministic World Lab browser flow', async ({
     page.getByText(customPersonality, { exact: true }),
   ).toBeVisible();
 
+  await followTurn.check();
+  await expect(page.getByLabel('Agent roster').getByText('Next')).toBeVisible();
   await page.getByRole('button', { name: 'Single turn' }).click();
+  await expect(page.getByRole('heading', { name: /Rook/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Select agent Ember' }).click();
+  await expect(followTurn).not.toBeChecked();
   await expect(
     page.getByText(/Infection .* direct message accepted/),
   ).toBeVisible();
@@ -219,16 +242,39 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(
     page.getByRole('checkbox', { name: 'Ember', exact: true }),
   ).toBeChecked();
+  const exportDialog = page.getByRole('dialog', { name: 'Experiment export' });
+  const exportGeometry = await exportDialog.evaluate((dialog) => ({
+    right: dialog.getBoundingClientRect().right,
+    bottom: dialog.getBoundingClientRect().bottom,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    bodyScrollWidth: document.body.scrollWidth,
+    bodyClientWidth: document.body.clientWidth,
+    bodyOverflow: getComputedStyle(document.body).overflow,
+    dialogScrollWidth: dialog.scrollWidth,
+    dialogClientWidth: dialog.clientWidth,
+  }));
+  expect(exportGeometry.right).toBeLessThanOrEqual(
+    exportGeometry.viewportWidth,
+  );
+  expect(exportGeometry.bottom).toBeLessThanOrEqual(
+    exportGeometry.viewportHeight,
+  );
+  expect(exportGeometry.dialogScrollWidth).toBe(
+    exportGeometry.dialogClientWidth,
+  );
+  expect(exportGeometry.bodyScrollWidth).toBe(exportGeometry.bodyClientWidth);
+  expect(exportGeometry.bodyOverflow).toBe('hidden');
   for (const action of ['move', 'infect', 'wait']) {
     await page.getByRole('checkbox', { name: action, exact: true }).click();
   }
-  await page.getByRole('button', { name: 'Preview export' }).click();
+  await page.getByRole('button', { name: 'Preview' }).click();
   await expect(page.getByLabel('Export preview')).toContainText('0 turns');
   await expect(page.getByLabel('Export preview')).toContainText('1 matched');
-  await page.getByRole('button', { name: 'Generate JSON' }).click();
+  await page.getByRole('button', { name: 'Generate' }).click();
   await expect(page.getByText(/schema-validated/)).toBeVisible();
   const downloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Download JSON' }).click();
+  await page.getByRole('button', { name: 'Download' }).click();
   const download = await downloadPromise;
   const downloadedPath = await download.path();
   expect(downloadedPath).not.toBeNull();
@@ -322,12 +368,14 @@ test('runs the complete deterministic World Lab browser flow', async ({
     '1',
   );
   await expect(markers).toHaveCount(8);
-  await page.setViewportSize({ width: 760, height: 820 });
+  await page.setViewportSize({ width: 768, height: 900 });
   await expect(worldMap).toBeVisible();
   const narrowMapBox = await worldMap.boundingBox();
   expect(narrowMapBox?.width ?? 0).toBeGreaterThan(700);
   expect(narrowMapBox?.height ?? 0).toBeGreaterThan(350);
   await expect(page.getByLabel('Agent roster')).toBeVisible();
-  await expect(page.getByLabel('Public world chat')).toBeVisible();
+  await expect(
+    page.getByRole('region', { name: 'Public world chat' }),
+  ).toBeVisible();
   expect(openRouterRequests).toEqual([]);
 });
