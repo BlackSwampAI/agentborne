@@ -31,6 +31,7 @@ import {
   experimentModelConfigurationSchema,
   reasoningProfilesForModel,
   type CompatibleModel,
+  assignBehavior,
 } from '.';
 
 const agentId = '128f3f38-6b7d-4db7-9e95-751b4ce2681e';
@@ -136,6 +137,40 @@ const snapshot = {
     hexes: [{ cell, state: 'open', controllerAgentId: null }],
     agents: worldAgents,
     events: [],
+  },
+  scenario: {
+    scenarioVersion: 'world-scenario-v1',
+    center: { latitude: 41.6528, longitude: -83.5379 },
+    resolution: 9,
+    radius: 6,
+    worldSeed: 'world',
+    rosterSeed: 'roster',
+    spawnSeed: 'spawn',
+    minimumSpawnSeparation: 0,
+    roster: worldAgents.map(({ currentCell: _currentCell, ...agent }) => agent),
+    modelConfiguration: {
+      globalModelId: 'author/compatible-model',
+      globalReasoningProfile: 'provider-default',
+      overrides: [],
+      locked: false,
+    },
+    behaviorConfiguration: {
+      registryVersion: 1,
+      assignmentMode: 'balanced-random',
+      seed: 'behavior',
+      assignments: assignBehavior(
+        worldAgents.map(({ id }) => id as never),
+        'behavior',
+        'balanced-random',
+      ),
+      locked: false,
+    },
+    objectiveVersion: 'durable-influence-v1',
+    capabilities: { communication: true, diplomacy: true },
+    exactCellCount: 1,
+    areaSquareKilometers: 0.1,
+    startingCells: worldAgents.map(() => cell),
+    setupWarnings: [],
   },
   turnNumber: 0,
   nextAgentId: agentId,

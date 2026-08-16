@@ -283,7 +283,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   const exported = experimentExportDocumentSchema.parse(
     JSON.parse(await readFile(downloadedPath!, 'utf8')),
   );
-  expect(exported.schemaVersion).toBe(8);
+  expect(exported.schemaVersion).toBe(9);
   expect(exported.filters.level).toBe('minimal');
   expect(exported.selection.selectedAgentIds).toEqual([EMBER_ID]);
   expect(exported.turns).toEqual([]);
@@ -335,7 +335,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
     await expect(markers.nth(index)).toBeVisible();
   }
   await expect(
-    page.getByText('Development world loaded with eight agents.'),
+    page.getByText('Development world loaded with 8 agents.'),
   ).toBeVisible();
   await expect(
     page.getByText('No direct messages for this agent yet.'),

@@ -11,12 +11,19 @@ import { gridDisk } from 'h3-js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   experimentExportDocumentSchema,
+  assignBehavior,
   modelCatalogResponseSchema,
   agentTurnRecordSchema,
   simulationSnapshotSchema,
   type SimulationSnapshot,
 } from '@agentborne/shared';
-import { createDevelopmentWorld } from '@agentborne/world-engine';
+import {
+  createDefaultAppliedScenario,
+  createDevelopmentWorld,
+  defaultWorldSetupRequest,
+  generateDeterministicRoster,
+  previewWorldSetup,
+} from '@agentborne/world-engine';
 import { WorldLab } from './world-lab';
 import { PERSONALITY_PRESETS } from './personality-presets';
 
@@ -197,6 +204,7 @@ const emptyTerritory = world.agents.map(({ id, name, color }) => ({
 }));
 const initial = simulationSnapshotSchema.parse({
   world,
+  scenario: createDefaultAppliedScenario('2026-08-13T12:00:00.000Z'),
   turnNumber: 0,
   nextAgentId: world.agents[0]!.id,
   activeAgentId: null,
@@ -829,6 +837,70 @@ function openRouterSnapshot(
   });
 }
 
+function twelveAgentSnapshot(readyCount = 12): SimulationSnapshot {
+  const roster = generateDeterministicRoster(12, 'world-lab-twelve');
+  const request = defaultWorldSetupRequest();
+  const modelConfiguration = {
+    globalModelId:
+      'example/alpha' as SimulationSnapshot['modelConfiguration']['globalModelId'],
+    globalReasoningProfile: 'provider-default' as const,
+    overrides: [],
+    locked: false,
+  };
+  const behaviorConfiguration = {
+    ...request.behaviorConfiguration,
+    assignments: assignBehavior(
+      roster.map(({ id }) => id),
+      request.behaviorConfiguration.seed,
+      'balanced-random',
+    ),
+  };
+  const preview = previewWorldSetup({
+    ...request,
+    radius: 12,
+    roster,
+    modelConfiguration,
+    behaviorConfiguration,
+  });
+  if (!preview.feasible) throw new Error('Expected a feasible test scenario.');
+  return simulationSnapshotSchema.parse({
+    ...initial,
+    world: preview.world,
+    scenario: preview.scenario,
+    nextAgentId: preview.world.agents[0]!.id,
+    providerMode: 'openrouter',
+    modelConfiguration,
+    behaviorConfiguration,
+    resolvedModels: preview.world.agents.map(({ id }, index) => ({
+      agentId: id,
+      modelId: index < readyCount ? 'example/alpha' : null,
+      reasoningProfile: 'provider-default',
+      source: index < readyCount ? 'global' : 'missing',
+      available: index < readyCount,
+      ...(index < readyCount ? {} : { issue: 'missing' }),
+    })),
+    experiment: {
+      ...initial.experiment,
+      metrics: {
+        aggregate: emptyMetrics(),
+        byAgent: preview.world.agents.map(({ id }) => ({
+          agentId: id,
+          metrics: emptyMetrics(),
+        })),
+      },
+      currentTerritory: preview.world.agents.map(({ id, name, color }) => ({
+        agentId: id,
+        name,
+        color,
+        allianceId: null,
+        effectiveColor: color,
+        controlledCellCount: 0,
+      })),
+      currentAlliances: [],
+    },
+  });
+}
+
 function withPersonality(
   snapshot: SimulationSnapshot,
   agentId: string,
@@ -922,6 +994,186 @@ describe('WorldLab', () => {
       await screen.findAllByRole('button', { name: /Select agent/ }),
     ).toHaveLength(8);
     expect(screen.getByText('Deterministic test model')).toBeInTheDocument();
+  });
+
+  it('opens World setup only from the top-right overflow menu with map semantics', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await screen.findByRole('button', { name: 'Start' });
+    const executionControls = screen.getByRole('navigation', {
+      name: 'Simulation execution controls',
+    });
+    expect(
+      within(executionControls).queryByRole('button', { name: /world setup/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /gps|locate|location|crosshair/i }),
+    ).not.toBeInTheDocument();
+
+    const overflowTrigger = screen.getByLabelText('More World Lab actions');
+    await user.click(overflowTrigger);
+    const setupTrigger = screen.getByRole('button', { name: 'World setup' });
+    expect(setupTrigger.querySelector('[data-icon="map"]')).not.toBeNull();
+    await user.click(setupTrigger);
+
+    expect(
+      screen.getByRole('dialog', { name: 'World Setup' }),
+    ).toBeInTheDocument();
+    expect(overflowTrigger.closest('details')).not.toHaveAttribute('open');
+  });
+
+  it('exposes opt-in bounded unattended recovery with provider-cost guidance', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await screen.findByRole('button', { name: 'Start' });
+    await user.click(screen.getByLabelText('More World Lab actions'));
+    const toggle = screen.getByRole('checkbox', {
+      name: 'Enable for continuous playback',
+    });
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByLabelText('Unattended retry limit')).toHaveValue('2');
+    expect(
+      screen.getByText(/Each retry may incur provider cost/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/World Lab tab must remain open/),
+    ).toBeInTheDocument();
+    await user.click(toggle);
+    await user.selectOptions(
+      screen.getByLabelText('Unattended retry limit'),
+      '3',
+    );
+    expect(toggle).toBeChecked();
+    expect(screen.getByLabelText('Unattended retry limit')).toHaveValue('3');
+  });
+
+  it.each([
+    {
+      snapshot: openRouterSnapshot('example/alpha'),
+      expected: '8/8 ready',
+      accessible: /8 of 8 agents ready/,
+    },
+    {
+      snapshot: twelveAgentSnapshot(),
+      expected: '12/12 ready',
+      accessible: /12 of 12 agents ready/,
+    },
+    {
+      snapshot: twelveAgentSnapshot(10),
+      expected: '10/12 ready',
+      accessible: /10 of 12 agents ready/,
+    },
+  ])(
+    'reports authoritative active-roster readiness as $expected',
+    async ({ snapshot, expected, accessible }) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL) =>
+          String(input).endsWith('/models')
+            ? jsonResponse(compatibleCatalog)
+            : jsonResponse(snapshot),
+        ),
+      );
+      render(<WorldLab />);
+      const trigger = await screen.findByRole('button', { name: accessible });
+      expect(trigger.querySelector('.setup-label')).toHaveTextContent(expected);
+    },
+  );
+
+  it('does not count unapplied roster edits and reconciles readiness after reset without reload', async () => {
+    const twelve = twelveAgentSnapshot();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/models')) return jsonResponse(compatibleCatalog);
+        if (url.endsWith('/reset'))
+          return jsonResponse({
+            snapshot: openRouterSnapshot('example/alpha'),
+          });
+        return jsonResponse(twelve);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    let setupStatus = await screen.findByRole('button', {
+      name: /12 of 12 agents ready/,
+    });
+    expect(setupStatus.querySelector('.setup-label')).toHaveTextContent(
+      '12/12 ready',
+    );
+    await user.click(screen.getByLabelText('More World Lab actions'));
+    await user.click(screen.getByRole('button', { name: 'World setup' }));
+    await user.clear(screen.getByLabelText('Desired agent count'));
+    await user.type(screen.getByLabelText('Desired agent count'), '20');
+    setupStatus = screen.getByRole('button', {
+      name: /12 of 12 agents ready/,
+    });
+    expect(setupStatus.querySelector('.setup-label')).toHaveTextContent(
+      '12/12 ready',
+    );
+    await user.click(screen.getByRole('button', { name: 'Close World Setup' }));
+    await user.click(screen.getByRole('button', { name: 'Reset world' }));
+    setupStatus = await screen.findByRole('button', {
+      name: /8 of 8 agents ready/,
+    });
+    expect(setupStatus.querySelector('.setup-label')).toHaveTextContent(
+      '8/8 ready',
+    );
+  });
+
+  it('updates readiness from the authoritative applied scenario response without reload', async () => {
+    const eight = openRouterSnapshot('example/alpha');
+    const twelve = twelveAgentSnapshot();
+    const generatedRoster = twelve.scenario.roster;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/models')) return jsonResponse(compatibleCatalog);
+        if (url.endsWith('/roster/generate'))
+          return jsonResponse({ roster: generatedRoster });
+        if (url.endsWith('/setup/preview')) {
+          const preview = previewWorldSetup(JSON.parse(String(init?.body)));
+          return jsonResponse(preview);
+        }
+        if (url.endsWith('/experiment/setup'))
+          return jsonResponse({ snapshot: twelve });
+        return jsonResponse(eight);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    let setupStatus = await screen.findByRole('button', {
+      name: /8 of 8 agents ready/,
+    });
+    expect(setupStatus.querySelector('.setup-label')).toHaveTextContent(
+      '8/8 ready',
+    );
+    await user.click(screen.getByLabelText('More World Lab actions'));
+    await user.click(screen.getByRole('button', { name: 'World setup' }));
+    await user.clear(screen.getByLabelText('Desired agent count'));
+    await user.type(screen.getByLabelText('Desired agent count'), '12');
+    await user.click(
+      screen.getByRole('button', { name: 'Generate desired roster' }),
+    );
+    setupStatus = screen.getByRole('button', {
+      name: /8 of 8 agents ready/,
+    });
+    expect(setupStatus.querySelector('.setup-label')).toHaveTextContent(
+      '8/8 ready',
+    );
+    await user.click(screen.getByRole('button', { name: 'Preview' }));
+    await screen.findByText(/12 valid spawns/);
+    await user.click(
+      screen.getByRole('button', { name: 'Apply / Create Experiment' }),
+    );
+    setupStatus = await screen.findByRole('button', {
+      name: /12 of 12 agents ready/,
+    });
+    expect(setupStatus.querySelector('.setup-label')).toHaveTextContent(
+      '12/12 ready',
+    );
   });
 
   it('runs exactly 194 additional turns from turn 6 and never schedules turn 201', async () => {
@@ -1543,7 +1795,7 @@ describe('WorldLab', () => {
     );
     await waitFor(() =>
       expect(
-        screen.getByText('Development world loaded with eight agents.'),
+        screen.getByText('Development world loaded with 8 agents.'),
       ).toBeInTheDocument(),
     );
     expect(screen.getByText('Turn 0')).toBeInTheDocument();
@@ -2531,7 +2783,7 @@ function minimalExportDocument(snapshot: SimulationSnapshot) {
   const turn = snapshot.turns[0]!;
   const agent = snapshot.world.agents[0]!;
   return {
-    schemaVersion: 8 as const,
+    schemaVersion: 9 as const,
     generatedAt: '2026-08-13T12:00:02.000Z',
     experiment: {
       id: snapshot.experiment.id,

@@ -10,6 +10,10 @@ World Lab → Game API / simulation service → agent runtime → one decision
 
 The Game API also owns one process-local experiment record. Each completed safe turn is captured once, independently from the browser snapshot, and server-side export levels filter that record without affecting provider requests.
 
+World Setup uses `world-scenario-v1`. Pure preview computes the actual H3 disk, exact count, summed cell area, deterministic roster/spawns, feasibility, and warnings. Apply recomputes and atomically replaces world and experiment state. Reset reconstructs the current scenario; the Toledo default preserves legacy starts. Explicit location search crosses a replaceable server-owned adapter with no autocomplete, a one-request-per-second Nominatim limit, bounded cache/timeout, normalized results, and OpenStreetMap attribution. Manual coordinates bypass that network boundary.
+
+World Lab may opt into browser-driven unattended recovery for continuous Start or Run-to sessions. After the existing initial call and at most one internal repair/transport retry, the browser serially requests one-call unattended retries up to a local limit of one through three, then commits one attributed unattended skip. Every mutation has a fresh idempotency key and uses the authoritative pending turn. Pausing, cancellation, ineligible failures, or failed reconciliation stops the loop. The tab must remain open; this is not scheduling, simultaneous ticks, or a production recovery service.
+
 ## Applications
 
 `apps/world-lab` is a Next.js App Router developer/admin surface. It fetches runtime-validated simulation snapshots through a local rewrite, controls one turn at a time, and updates MapLibre's existing H3 GeoJSON source without recreating the map. Agent markers are fully visible and use deterministic offsets when sharing cells.
@@ -78,7 +82,7 @@ Snapshots keep the newest 120 turn records and 120 world events. Observations ex
 
 ## Experiment telemetry and export
 
-The active experiment has a runtime-validated UUID, start time, initial eight-agent configuration, immutable personality-change events, initial world, and up to 5,000 complete safe turns. The existing browser snapshot and world-event list remain capped at 120. Absolute numbering, first/last retained turns, dropped count, and completeness disclose truncation. Reset creates a new experiment and clears telemetry/cost while preserving active personalities; no previous experiments survive reset or process restart.
+The active experiment has a runtime-validated UUID, start time, versioned authoritative scenario and ordered initial roster, immutable configuration events, initial world, and up to 5,000 complete safe turns. The browser snapshot and world-event list remain capped at 120. Reset creates a new experiment from the current scenario and clears telemetry/cost; no previous experiments survive reset or process restart.
 
 Metrics and filtering are deterministic Game API responsibilities. Schema version 7 adds attempt-aware Retry/Skip accounting to the model and reasoning-profile assignments introduced in schema version 6. A turn's top-level provider metadata records the final attempt, while `modelAttempts` is canonical for call, token, and cost totals. Imports preserve recorded slugs and profiles; schema-v6 documents remain supported and missing profiles migrate to Provider default, while legacy schema-v5 documents have no assignment and remain blocked until the operator selects one.
 
@@ -86,7 +90,7 @@ The agent runtime follows [OpenRouter's usage-accounting contract](https://openr
 
 ## Packages
 
-`packages/shared` owns centralized development limits and all public schemas, including the model capability contract, typed catalog data, behavior assignments, alliances/proposals/diplomacy/results/events, metrics, and schema-v8 exports. Schema v8 extends rather than redefines v7 attempt accounting. Types are inferred from Zod.
+`packages/shared` owns centralized scenario limits and all public schemas, including model capabilities, behavior assignments, alliances, metrics, and schema-v9 exports. Other-agent observations remain deterministically capped at seven for larger rosters. Types are inferred from Zod.
 
 `packages/world-engine` remains deterministic and has no model, HTTP, UI, storage, or credential dependency. It validates world action, communication, and diplomacy independently and is the sole alliance mutation authority. Direct proximity is derived from a separately supplied pre-action state.
 

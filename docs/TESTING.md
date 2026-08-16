@@ -1,5 +1,9 @@
 # Testing
 
+Configurable-scenario coverage is deterministic and offline: `world-scenario-v1`, temporary roster/world limits, actual H3 count and area, radius presets, seeded identities and separated spawns, default compatibility, infeasibility, pure preview, atomic apply/current-scenario reset, dynamic assignment reconciliation, density warnings, and schema-v9 attribution. Geocoding uses injected fakes; browser coverage retains the default flow and adds a 469-cell/12-agent scenario flow.
+
+Unattended-recovery coverage uses deterministic providers and timers to distinguish initial/internal/manual/unattended attempts, successful recovery, bounded exhaustion and one skip, run-target preservation, pause/cancel behavior, ineligible failures, reconciliation, idempotency, and browser-local controls. No live provider call is made.
+
 Default validation is deterministic and offline except dependency/browser installation and optional basemap requests during browser rendering. No default test or GitHub Actions job contacts OpenRouter.
 
 The repository owner runs local validation. Coding agents write tests and inspect GitHub CI but do not run local formatting, linting, type checking, tests, builds, Playwright, or real-provider calls unless explicitly asked.

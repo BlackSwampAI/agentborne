@@ -50,12 +50,20 @@ import {
   type SimulationStatus,
   type WorldEvent,
   type AllianceEvent,
+  worldSetupRequestSchema,
+  type AppliedScenario,
+  type WorldSetupPreviewResponse,
+  type WorldSetupRequest,
 } from '@agentborne/shared';
 import {
   applyCommunication,
   applyDiplomacy,
   applyWorldAction,
   createDevelopmentWorld,
+  createDefaultAppliedScenario,
+  createWorldFromScenario,
+  defaultWorldSetupRequest,
+  previewWorldSetup,
   DEVELOPMENT_AGENT_BLUEPRINTS,
   getCaptureEligibility,
   getAgentAlliance,
@@ -155,6 +163,7 @@ export class SimulationService {
   #experimentMetrics: ExperimentMetricAccumulator;
   #modelConfiguration: ExperimentModelConfiguration;
   #behaviorConfiguration: BehaviorConfiguration;
+  #scenario: AppliedScenario;
   #availableModelIds = new Set<ModelId>();
   #availableModels = new Map<ModelId, CompatibleModel>();
 
@@ -215,6 +224,11 @@ export class SimulationService {
       ),
       locked: false,
     });
+    this.#scenario = {
+      ...createDefaultAppliedScenario(RESET_GENERATED_AT),
+      modelConfiguration: structuredClone(this.#modelConfiguration),
+      behaviorConfiguration: structuredClone(this.#behaviorConfiguration),
+    };
   }
 
   getSnapshot(): SimulationSnapshot {
@@ -225,6 +239,7 @@ export class SimulationService {
       this.#completedTurnCount - this.#experimentTurns.length;
     return simulationSnapshotSchema.parse({
       world: this.#worldSnapshot(),
+      scenario: this.#scenario,
       turnNumber: this.#completedTurnCount,
       nextAgentId: next.id,
       activeAgentId: this.#activeAgentId,
@@ -267,24 +282,9 @@ export class SimulationService {
       );
     }
     this.#status = 'resetting';
-    const activePersonalities = new Map(
-      [...this.#state.agents].map(([id, agent]) => [id, agent.personality]),
+    this.#state = toWorldState(
+      createWorldFromScenario(this.#scenario, RESET_GENERATED_AT),
     );
-    const resetState = toWorldState(
-      createDevelopmentWorld({ generatedAt: RESET_GENERATED_AT }),
-    );
-    this.#state = {
-      ...resetState,
-      agents: new Map(
-        [...resetState.agents].map(([id, agent]) => [
-          id,
-          {
-            ...agent,
-            personality: activePersonalities.get(id) ?? agent.personality,
-          },
-        ]),
-      ),
-    };
     this.#turns = [];
     this.#completedTurnCount = 0;
     this.#cursor = 0;
@@ -304,20 +304,138 @@ export class SimulationService {
       ...this.#state.agents.keys(),
     ]);
     this.#modelConfiguration = {
-      ...this.#modelConfiguration,
+      ...structuredClone(this.#scenario.modelConfiguration),
       locked: false,
     };
-    this.#behaviorConfiguration = behaviorConfigurationSchema.parse({
-      registryVersion: 1,
-      assignmentMode: 'balanced-random',
-      seed: this.#experimentId,
-      assignments: assignBehavior(
-        [...this.#state.agents.keys()],
-        this.#experimentId,
-        'balanced-random',
-      ),
+    this.#behaviorConfiguration = {
+      ...structuredClone(this.#scenario.behaviorConfiguration),
+      locked: false,
+    };
+    this.#status = this.#provider.configured ? 'paused' : 'configuration-error';
+    return this.getSnapshot();
+  }
+
+  previewWorldSetup(input: unknown): WorldSetupPreviewResponse {
+    const parsed = worldSetupRequestSchema.safeParse(input);
+    if (!parsed.success) {
+      const field = String(parsed.error.issues[0]?.path[0] ?? 'roster');
+      const code =
+        field === 'center'
+          ? 'invalid-coordinates'
+          : field === 'resolution'
+            ? 'unsupported-resolution'
+            : field === 'radius'
+              ? 'invalid-radius'
+              : field === 'modelConfiguration'
+                ? 'model-agent-mismatch'
+                : field === 'behaviorConfiguration'
+                  ? 'behavior-coverage-mismatch'
+                  : 'invalid-roster';
+      return {
+        feasible: false,
+        errors: [
+          {
+            code,
+            field,
+            message:
+              parsed.error.issues[0]?.message ??
+              'The scenario request is invalid.',
+          },
+        ],
+        warnings: [],
+      };
+    }
+    const selected = [
+      parsed.data.modelConfiguration.globalModelId,
+      ...parsed.data.modelConfiguration.overrides.map(({ modelId }) => modelId),
+    ].filter((modelId): modelId is ModelId => modelId !== null);
+    if (selected.some((modelId) => !this.#availableModelIds.has(modelId)))
+      return {
+        feasible: false,
+        errors: [
+          {
+            code: 'model-agent-mismatch',
+            message: 'The scenario contains an unavailable model assignment.',
+          },
+        ],
+        warnings: [],
+      };
+    return previewWorldSetup(parsed.data, RESET_GENERATED_AT);
+  }
+
+  getDefaultWorldSetup(): WorldSetupRequest {
+    const request = defaultWorldSetupRequest();
+    const ids = new Set(request.roster.map(({ id }) => id));
+    return {
+      ...request,
+      modelConfiguration: {
+        ...structuredClone(this.#modelConfiguration),
+        overrides: this.#modelConfiguration.overrides.filter(({ agentId }) =>
+          ids.has(agentId),
+        ),
+        locked: false,
+      },
+    };
+  }
+
+  applyWorldSetup(input: unknown): SimulationSnapshot {
+    if (this.#busy || this.#verificationBusy || this.#status === 'resetting')
+      throw new SimulationConflictError(
+        'World setup is unavailable while another mutation is active.',
+      );
+    const parsed = worldSetupRequestSchema.safeParse(input);
+    if (!parsed.success)
+      throw new SimulationValidationError(
+        'invalid_behavior_configuration',
+        'The scenario request is invalid.',
+      );
+    const checked = this.previewWorldSetup(parsed.data);
+    if (!checked.feasible)
+      throw new SimulationValidationError(
+        'invalid_model_configuration',
+        checked.errors[0]?.message ?? 'The scenario is infeasible.',
+      );
+    const preview = previewWorldSetup(parsed.data, RESET_GENERATED_AT);
+    if (!preview.feasible)
+      throw new SimulationValidationError(
+        'invalid_behavior_configuration',
+        preview.errors[0]?.message ?? 'The scenario is infeasible.',
+      );
+    const nextState = toWorldState(preview.world);
+    const nextModels = experimentModelConfigurationSchema.parse({
+      ...preview.scenario.modelConfiguration,
       locked: false,
     });
+    const nextBehavior = behaviorConfigurationSchema.parse({
+      ...preview.scenario.behaviorConfiguration,
+      locked: false,
+    });
+    this.#state = nextState;
+    this.#scenario = {
+      ...preview.scenario,
+      modelConfiguration: nextModels,
+      behaviorConfiguration: nextBehavior,
+    };
+    this.#modelConfiguration = nextModels;
+    this.#behaviorConfiguration = nextBehavior;
+    this.#turns = [];
+    this.#completedTurnCount = 0;
+    this.#cursor = 0;
+    this.#activeAgentId = null;
+    this.#activeRequestController = null;
+    this.#cancellationRequested = false;
+    this.#pendingFailedTurn = null;
+    this.#experimentId = experimentIdSchema.parse(this.#createExperimentId());
+    this.#experimentStartedAt = this.#now();
+    this.#experimentTurns = [];
+    this.#configurationEvents = [];
+    this.#initialExperimentAgents = structuredClone([
+      ...this.#state.agents.values(),
+    ]);
+    this.#initialExperimentWorld = this.#worldSnapshot();
+    this.#experimentMetrics = new ExperimentMetricAccumulator([
+      ...this.#state.agents.keys(),
+    ]);
     this.#status = this.#provider.configured ? 'paused' : 'configuration-error';
     return this.getSnapshot();
   }
@@ -382,6 +500,10 @@ export class SimulationService {
       nextConfiguration,
     );
     this.#modelConfiguration = nextConfiguration;
+    this.#scenario = {
+      ...this.#scenario,
+      modelConfiguration: structuredClone(nextConfiguration),
+    };
     return this.getSnapshot();
   }
 
@@ -422,6 +544,10 @@ export class SimulationService {
       assignments,
       locked: false,
     });
+    this.#scenario = {
+      ...this.#scenario,
+      behaviorConfiguration: structuredClone(this.#behaviorConfiguration),
+    };
     return this.getSnapshot();
   }
 
@@ -445,10 +571,16 @@ export class SimulationService {
       );
     const root = document as Record<string, unknown>;
     const version = root.schemaVersion;
-    if (version !== 5 && version !== 6 && version !== 7 && version !== 8)
+    if (
+      version !== 5 &&
+      version !== 6 &&
+      version !== 7 &&
+      version !== 8 &&
+      version !== 9
+    )
       throw new SimulationValidationError(
         'invalid_model_configuration',
-        'Only schema-version 5, 6, 7, or 8 experiment exports can be imported.',
+        'Only schema-version 5 through 9 experiment exports can be imported.',
       );
     if (version === 5) {
       const legacyConfiguration: ExperimentModelConfiguration = {
@@ -497,7 +629,10 @@ export class SimulationService {
       overrides: structuredClone(configuration.data.overrides),
       locked: false,
     };
-    if (version === 8 && experiment?.behaviorConfiguration !== undefined) {
+    if (
+      (version === 8 || version === 9) &&
+      experiment?.behaviorConfiguration !== undefined
+    ) {
       const importedBehavior = behaviorConfigurationSchema.safeParse(
         experiment.behaviorConfiguration,
       );
@@ -567,6 +702,14 @@ export class SimulationService {
     const agents = new Map(this.#state.agents);
     agents.set(agent.id, updated);
     this.#state = { ...this.#state, agents };
+    this.#scenario = {
+      ...this.#scenario,
+      roster: this.#scenario.roster.map((entry) =>
+        entry.id === updated.id
+          ? { ...entry, personality: updated.personality }
+          : entry,
+      ),
+    };
     if (agent.personality !== updated.personality) {
       this.#configurationEvents = [
         ...this.#configurationEvents,
@@ -616,6 +759,12 @@ export class SimulationService {
       ...this.#configurationEvents,
       ...configurationEvents,
     ];
+    this.#scenario = {
+      ...this.#scenario,
+      roster: [...this.#state.agents.values()].map(
+        ({ currentCell: _currentCell, ...agent }) => agent,
+      ),
+    };
     return this.getSnapshot();
   }
 
@@ -692,15 +841,19 @@ export class SimulationService {
     return this.#executeTurnAttempt('initial');
   }
 
-  async retryFailedTurn(): Promise<AgentTurnRecord> {
+  async retryFailedTurn(
+    kind: 'manual-retry' | 'unattended-retry' = 'manual-retry',
+  ): Promise<AgentTurnRecord> {
     if (!this.#pendingFailedTurn)
       throw new SimulationConflictError(
         'There is no failed turn awaiting a manual retry.',
       );
-    return this.#executeTurnAttempt('manual-retry');
+    return this.#executeTurnAttempt(kind);
   }
 
-  skipFailedTurn(): AgentTurnRecord {
+  skipFailedTurn(
+    skipKind: 'manual' | 'unattended' = 'manual',
+  ): AgentTurnRecord {
     if (this.#busy || this.#verificationBusy)
       throw new SimulationConflictError('A model request is still active.');
     const pending = this.#pendingFailedTurn;
@@ -717,6 +870,7 @@ export class SimulationService {
       observation: pending.observation,
       behavior: this.#behaviorFor(pending.agentId),
       outcome: 'operator-skipped',
+      skipKind,
       failure: pending.failure,
       provider: pending.attempts.at(-1)?.provider,
       modelAttempts: pending.attempts,
@@ -729,7 +883,7 @@ export class SimulationService {
   }
 
   async #executeTurnAttempt(
-    attemptKind: 'initial' | 'manual-retry',
+    attemptKind: 'initial' | 'manual-retry' | 'unattended-retry',
   ): Promise<AgentTurnRecord> {
     if (this.#busy || this.#verificationBusy) {
       throw new SimulationConflictError('A model turn is already in progress.');
@@ -1167,6 +1321,7 @@ export class SimulationService {
       currentWorld: this.#worldSnapshot(),
       modelConfiguration: this.#modelConfiguration,
       behaviorConfiguration: this.#behaviorConfiguration,
+      scenario: this.#scenario,
     };
   }
 
@@ -1411,14 +1566,17 @@ export class SimulationService {
     );
     const eligibleRecipientAgentIds = hasOutgoing
       ? []
-      : [...this.#state.agents.keys()].filter(
-          (candidateId) =>
-            candidateId !== agentId &&
-            !getAgentAlliance(this.#state, candidateId) &&
-            !proposals.some(
-              ({ recipientAgentId }) => recipientAgentId === candidateId,
-            ),
-        );
+      : [...this.#state.agents.keys()]
+          .filter(
+            (candidateId) =>
+              candidateId !== agentId &&
+              !getAgentAlliance(this.#state, candidateId) &&
+              !proposals.some(
+                ({ recipientAgentId }) => recipientAgentId === candidateId,
+              ),
+          )
+          .toSorted()
+          .slice(0, 7);
     const acceptableProposalIds = actingAlliance
       ? []
       : proposals

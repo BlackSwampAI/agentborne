@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { cellToBoundary, cellToLatLng } from 'h3-js';
-import { DEVELOPMENT_WORLD_CONFIG } from '@agentborne/shared';
 import {
   AttributionControl,
   LngLatBounds,
@@ -42,7 +41,6 @@ interface WorldMapProps {
 const sourceId = 'development-hexes';
 const fillLayerId = 'development-hex-fills';
 const lineLayerId = 'development-hex-lines';
-const expectedWorldCellCount = DEVELOPMENT_WORLD_CONFIG.cellCount;
 
 setWorkerUrl('/maplibre-worker/maplibre-gl-worker.mjs');
 
@@ -132,6 +130,7 @@ export function WorldMap(props: WorldMapProps) {
   const initialAlliances = useRef(alliances);
   const initialSelectedCell = useRef(selectedCell);
   const currentHexesRef = useRef(hexes);
+  const fittedWorldRef = useRef(hexes.map(({ cell }) => cell).join(','));
   const scheduleOverlayInspectionRef = useRef<(() => void) | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [overlayDiagnostics, setOverlayDiagnostics] = useState(
@@ -212,8 +211,8 @@ export function WorldMap(props: WorldMapProps) {
           (state) => state === 'infected',
         ).length;
         const ready =
-          expectedCells.size === expectedWorldCellCount &&
-          renderedCellCount === expectedWorldCellCount &&
+          expectedCells.size === currentHexesRef.current.length &&
+          renderedCellCount === currentHexesRef.current.length &&
           [...expectedCells].every((cell) => renderedCells.has(cell));
         setOverlayDiagnostics({
           status: ready ? 'ready' : 'incomplete',
@@ -221,7 +220,7 @@ export function WorldMap(props: WorldMapProps) {
           renderedInfectedCellCount,
           detail: ready
             ? 'All expected H3 cells were returned by MapLibre.'
-            : `MapLibre rendered ${renderedCellCount} of ${expectedWorldCellCount} expected H3 cells.`,
+            : `MapLibre rendered ${renderedCellCount} of ${currentHexesRef.current.length} expected H3 cells.`,
         });
       } catch {
         setOverlayDiagnostics({
@@ -371,6 +370,19 @@ export function WorldMap(props: WorldMapProps) {
       GeoJSONSource | undefined;
     if (!source) return;
     source.setData(asGeoJson(hexes, agents, alliances, selectedCell));
+    const signature = hexes.map(({ cell }) => cell).join(',');
+    if (signature !== fittedWorldRef.current && mapRef.current) {
+      fittedWorldRef.current = signature;
+      const bounds = new LngLatBounds();
+      for (const { cell } of hexes)
+        for (const [lat, lng] of cellToBoundary(cell))
+          bounds.extend([lng, lat]);
+      mapRef.current.fitBounds(bounds, {
+        padding: 56,
+        maxZoom: 14,
+        duration: 0,
+      });
+    }
     scheduleOverlayInspectionRef.current?.();
   }, [agents, alliances, hexes, selectedCell]);
 
@@ -460,7 +472,7 @@ export function WorldMap(props: WorldMapProps) {
       />
       <p className="map-ready" role="status" title={overlayDiagnostics.detail}>
         H3 overlay {overlayLabel} · {overlayDiagnostics.renderedCellCount}/
-        {expectedWorldCellCount} rendered cells · {agents.length} agents ·{' '}
+        {hexes.length} rendered cells · {agents.length} agents ·{' '}
         <span data-testid="infected-count">
           {overlayDiagnostics.renderedInfectedCellCount} rendered infected
         </span>

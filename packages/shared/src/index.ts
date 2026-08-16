@@ -1,5 +1,7 @@
 import { z } from 'zod';
 export * from './behavior';
+export * from './limits';
+import { WORLD_SCENARIO_LIMITS } from './limits';
 import {
   assignBehavior,
   behaviorAssignmentSchema,
@@ -22,6 +24,7 @@ export const OPENROUTER_MAX_OUTPUT_TOKENS = 4_096;
 export const OPENROUTER_PROVIDER_TIMEOUT_MS = 75_000;
 export const OPENROUTER_429_FALLBACK_BACKOFF_MS = 1_500;
 export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v1';
+export const OBJECTIVE_PROMPT_VERSION = 'durable-influence-v1';
 export const OPENROUTER_REQUIRED_PARAMETERS = ['max_tokens'] as const;
 export const DEVELOPMENT_WORLD_CONFIG = {
   latitude: 41.6528,
@@ -144,7 +147,7 @@ export const allianceSchema = z.object({
   memberAgentIds: z
     .array(agentIdSchema)
     .min(2)
-    .max(DEVELOPMENT_WORLD_CONFIG.agentCount)
+    .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers)
     .refine((ids) => new Set(ids).size === ids.length, {
       message: 'Alliance members must be unique.',
     }),
@@ -264,7 +267,7 @@ export const agentJoinedAllianceEventSchema = allianceEventBaseSchema.extend({
   memberAgentIds: z
     .array(agentIdSchema)
     .min(2)
-    .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+    .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers),
 });
 export const agentLeftAllianceEventSchema = allianceEventBaseSchema.extend({
   type: z.literal('agent-left-alliance'),
@@ -273,7 +276,7 @@ export const agentLeftAllianceEventSchema = allianceEventBaseSchema.extend({
   leftAgentId: agentIdSchema,
   remainingMemberAgentIds: z
     .array(agentIdSchema)
-    .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+    .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers),
 });
 export const allianceDissolvedEventSchema = allianceEventBaseSchema.extend({
   type: z.literal('alliance-dissolved'),
@@ -282,7 +285,7 @@ export const allianceDissolvedEventSchema = allianceEventBaseSchema.extend({
   formerMemberAgentIds: z
     .array(agentIdSchema)
     .min(1)
-    .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+    .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers),
 });
 export const allianceEventSchema = z.discriminatedUnion('type', [
   allianceProposedEventSchema,
@@ -457,13 +460,19 @@ export type DiplomacyResult = z.infer<typeof diplomacyResultSchema>;
 
 const worldSnapshotObjectSchema = z.object({
   generatedAt: z.iso.datetime(),
-  hexes: z.array(hexSchema),
-  agents: z.array(agentSchema),
+  hexes: z
+    .array(hexSchema)
+    .min(1)
+    .max(WORLD_SCENARIO_LIMITS.maximumGeneratedCells),
+  agents: z
+    .array(agentSchema)
+    .min(WORLD_SCENARIO_LIMITS.minimumAgents)
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents),
   events: z.array(worldEventSchema).max(120),
   alliances: z.array(allianceSchema).max(4).default([]),
   pendingAllianceProposals: z
     .array(allianceProposalSchema)
-    .max(DEVELOPMENT_WORLD_CONFIG.agentCount)
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents)
     .default([]),
 });
 
@@ -659,15 +668,15 @@ export const territoryScoreboardEntrySchema = z.object({
     .number()
     .int()
     .nonnegative()
-    .max(DEVELOPMENT_WORLD_CONFIG.cellCount),
+    .max(WORLD_SCENARIO_LIMITS.maximumGeneratedCells),
 });
 export const territoryScoreboardSchema = z
   .array(territoryScoreboardEntrySchema)
-  .length(DEVELOPMENT_WORLD_CONFIG.agentCount)
+  .min(WORLD_SCENARIO_LIMITS.minimumAgents)
+  .max(WORLD_SCENARIO_LIMITS.maximumAgents)
   .refine(
     (entries) =>
-      new Set(entries.map(({ agentId }) => agentId)).size ===
-      DEVELOPMENT_WORLD_CONFIG.agentCount,
+      new Set(entries.map(({ agentId }) => agentId)).size === entries.length,
     { message: 'Territory scoreboard agent IDs must be unique.' },
   );
 export type TerritoryScoreboard = z.infer<typeof territoryScoreboardSchema>;
@@ -690,7 +699,7 @@ export const allianceTerritorySummarySchema = z
       .number()
       .int()
       .nonnegative()
-      .max(DEVELOPMENT_WORLD_CONFIG.cellCount),
+      .max(WORLD_SCENARIO_LIMITS.maximumGeneratedCells),
     members: z
       .array(
         z.object({
@@ -700,11 +709,11 @@ export const allianceTerritorySummarySchema = z
             .number()
             .int()
             .nonnegative()
-            .max(DEVELOPMENT_WORLD_CONFIG.cellCount),
+            .max(WORLD_SCENARIO_LIMITS.maximumGeneratedCells),
         }),
       )
       .min(2)
-      .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+      .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers),
   })
   .refine(
     ({ totalControlledCellCount, members }) =>
@@ -807,7 +816,7 @@ const agentObservationObjectSchema = z.object({
   adjacentCells: z.array(cellObservationSchema).min(1).max(6),
   nearbyAgents: z
     .array(nearbyAgentObservationSchema)
-    .max(DEVELOPMENT_WORLD_CONFIG.agentCount - 1),
+    .max(WORLD_SCENARIO_LIMITS.observedOtherAgents),
   recentEvents: z.array(publicEventObservationSchema).max(8),
   recentPublicMessages: z
     .array(observedPublicMessageSchema)
@@ -1002,7 +1011,7 @@ export const experimentModelConfigurationSchema = z
     globalReasoningProfile: reasoningProfileSchema.default('provider-default'),
     overrides: z
       .array(modelOverrideSchema)
-      .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
     /** Retained for version-6 import compatibility; runtime selection is never turn-locked. */
     locked: z.boolean().default(false),
   })
@@ -1063,7 +1072,7 @@ export const updateExperimentModelsRequestSchema = z
     globalReasoningProfile: reasoningProfileSchema.default('provider-default'),
     overrides: z
       .array(modelOverrideSchema)
-      .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
   })
   .strict();
 export const updateExperimentModelsResponseSchema = z.object({
@@ -1075,7 +1084,8 @@ export const updateExperimentBehaviorRequestSchema = z
     seed: z.string().trim().min(1).max(80),
     assignments: z
       .array(behaviorAssignmentSchema)
-      .length(DEVELOPMENT_WORLD_CONFIG.agentCount),
+      .min(WORLD_SCENARIO_LIMITS.minimumAgents)
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
   })
   .strict();
 export const updateExperimentBehaviorResponseSchema = z.object({
@@ -1208,6 +1218,7 @@ export const modelAttemptSchema = z.object({
     'automatic-repair',
     'automatic-transport-retry',
     'manual-retry',
+    'unattended-retry',
   ]),
   startedAt: z.iso.datetime(),
   completedAt: z.iso.datetime(),
@@ -1265,6 +1276,7 @@ export const agentTurnRecordSchema = z
     }),
     turnRecordBaseSchema.extend({
       outcome: z.literal('operator-skipped'),
+      skipKind: z.enum(['manual', 'unattended']).default('manual'),
       failure: providerFailureSchema,
       provider: providerMetadataSchema.optional(),
     }),
@@ -1282,6 +1294,199 @@ export const agentTurnRecordSchema = z
   });
 export type AgentTurnRecord = z.infer<typeof agentTurnRecordSchema>;
 
+export const scenarioContractVersionSchema = z.literal('world-scenario-v1');
+export const setupIssueCodeSchema = z.enum([
+  'invalid-coordinates',
+  'unsupported-resolution',
+  'invalid-radius',
+  'cell-limit-exceeded',
+  'invalid-roster',
+  'duplicate-agent-id',
+  'duplicate-agent-name',
+  'invalid-color',
+  'spawn-infeasible',
+  'behavior-coverage-mismatch',
+  'model-agent-mismatch',
+  'high-agent-density',
+  'geocoder-unavailable',
+]);
+export const setupIssueSchema = z.object({
+  code: setupIssueCodeSchema,
+  message: z.string().trim().min(1).max(240),
+  field: z.string().trim().min(1).max(80).optional(),
+});
+export type SetupIssue = z.infer<typeof setupIssueSchema>;
+
+export const scenarioRosterEntrySchema = z.object({
+  id: agentIdSchema,
+  name: z.string().trim().min(1).max(80),
+  color: colorSchema,
+  personality: personalitySchema,
+});
+export type ScenarioRosterEntry = z.infer<typeof scenarioRosterEntrySchema>;
+
+const scenarioRosterSchema = z
+  .array(scenarioRosterEntrySchema)
+  .min(WORLD_SCENARIO_LIMITS.minimumAgents)
+  .max(WORLD_SCENARIO_LIMITS.maximumAgents)
+  .superRefine((roster, context) => {
+    const ids = new Set<string>();
+    const names = new Set<string>();
+    roster.forEach((entry, index) => {
+      if (ids.has(entry.id))
+        context.addIssue({
+          code: 'custom',
+          path: [index, 'id'],
+          message: 'Agent IDs must be unique.',
+        });
+      ids.add(entry.id);
+      const name = entry.name.toLocaleLowerCase();
+      if (names.has(name))
+        context.addIssue({
+          code: 'custom',
+          path: [index, 'name'],
+          message: 'Agent names must be unique.',
+        });
+      names.add(name);
+    });
+  });
+
+export const worldSetupRequestSchema = z
+  .object({
+    scenarioVersion: scenarioContractVersionSchema.default('world-scenario-v1'),
+    locationLabel: z.string().trim().min(1).max(120).optional(),
+    center: z.object({
+      latitude: z.number().finite().min(-90).max(90),
+      longitude: z.number().finite().min(-180).max(180),
+    }),
+    resolution: z
+      .number()
+      .int()
+      .min(WORLD_SCENARIO_LIMITS.minimumResolution)
+      .max(WORLD_SCENARIO_LIMITS.maximumResolution),
+    radius: z.number().int().min(0).max(WORLD_SCENARIO_LIMITS.maximumRadius),
+    worldSeed: z.string().trim().min(1).max(80),
+    rosterSeed: z.string().trim().min(1).max(80),
+    spawnSeed: z.string().trim().min(1).max(80),
+    minimumSpawnSeparation: z
+      .number()
+      .int()
+      .min(0)
+      .max(WORLD_SCENARIO_LIMITS.maximumRadius * 2),
+    roster: scenarioRosterSchema,
+    modelConfiguration: experimentModelConfigurationSchema,
+    behaviorConfiguration: behaviorConfigurationSchema,
+    objectiveVersion: z
+      .literal(OBJECTIVE_PROMPT_VERSION)
+      .default(OBJECTIVE_PROMPT_VERSION),
+    capabilities: z
+      .object({ communication: z.boolean(), diplomacy: z.boolean() })
+      .strict(),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    const ids = new Set(request.roster.map(({ id }) => id));
+    if (
+      request.behaviorConfiguration.assignments.length !== ids.size ||
+      request.behaviorConfiguration.assignments.some(
+        ({ agentId }) => !ids.has(agentId),
+      )
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['behaviorConfiguration', 'assignments'],
+        message: 'Behavior assignments must cover the roster exactly.',
+      });
+    if (
+      request.modelConfiguration.overrides.some(
+        ({ agentId }) => !ids.has(agentId),
+      )
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['modelConfiguration', 'overrides'],
+        message: 'Model overrides may reference only roster agents.',
+      });
+  });
+export type WorldSetupRequest = z.infer<typeof worldSetupRequestSchema>;
+export const defaultWorldSetupResponseSchema = z.object({
+  request: worldSetupRequestSchema,
+});
+
+export const appliedScenarioSchema = worldSetupRequestSchema
+  .safeExtend({
+    exactCellCount: z
+      .number()
+      .int()
+      .min(1)
+      .max(WORLD_SCENARIO_LIMITS.maximumGeneratedCells),
+    areaSquareKilometers: z.number().finite().positive(),
+    startingCells: z
+      .array(h3CellSchema)
+      .min(1)
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
+    setupWarnings: z.array(setupIssueSchema),
+  })
+  .superRefine((scenario, context) => {
+    if (scenario.startingCells.length !== scenario.roster.length)
+      context.addIssue({
+        code: 'custom',
+        path: ['startingCells'],
+        message: 'Every roster agent requires one starting cell.',
+      });
+  });
+export type AppliedScenario = z.infer<typeof appliedScenarioSchema>;
+
+export const worldSetupPreviewResponseSchema = z.discriminatedUnion(
+  'feasible',
+  [
+    z.object({
+      feasible: z.literal(true),
+      scenario: appliedScenarioSchema,
+      world: worldSnapshotSchema,
+    }),
+    z.object({
+      feasible: z.literal(false),
+      errors: z.array(setupIssueSchema).min(1),
+      warnings: z.array(setupIssueSchema).default([]),
+    }),
+  ],
+);
+export type WorldSetupPreviewResponse = z.infer<
+  typeof worldSetupPreviewResponseSchema
+>;
+export const applyWorldSetupResponseSchema = z.object({
+  snapshot: z.lazy(() => simulationSnapshotSchema),
+});
+
+export const generatedAgentRequestSchema = z.object({
+  count: z
+    .number()
+    .int()
+    .min(WORLD_SCENARIO_LIMITS.minimumAgents)
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents),
+  seed: z.string().trim().min(1).max(80),
+});
+export const generatedAgentResponseSchema = z.object({
+  roster: scenarioRosterSchema,
+});
+export const locationSearchRequestSchema = z
+  .object({ query: z.string().trim().min(2).max(120) })
+  .strict();
+export const locationSearchResultSchema = z.object({
+  label: z.string().trim().min(1).max(240),
+  latitude: z.number().finite().min(-90).max(90),
+  longitude: z.number().finite().min(-180).max(180),
+});
+export const locationSearchResponseSchema = z.object({
+  results: z.array(locationSearchResultSchema).max(5),
+  attribution: z.literal('© OpenStreetMap contributors'),
+  warning: setupIssueSchema.optional(),
+});
+export type LocationSearchResponse = z.infer<
+  typeof locationSearchResponseSchema
+>;
+
 export const simulationStatusSchema = z.enum([
   'paused',
   'running',
@@ -1295,6 +1500,7 @@ export type SimulationStatus = z.infer<typeof simulationStatusSchema>;
 export const simulationSnapshotSchema = z
   .object({
     world: worldSnapshotSchema,
+    scenario: appliedScenarioSchema,
     turnNumber: z.number().int().nonnegative(),
     nextAgentId: agentIdSchema,
     activeAgentId: agentIdSchema.nullable(),
@@ -1315,7 +1521,8 @@ export const simulationSnapshotSchema = z
     behaviorConfiguration: behaviorConfigurationSchema.optional(),
     resolvedModels: z
       .array(resolvedAgentModelSchema)
-      .length(DEVELOPMENT_WORLD_CONFIG.agentCount),
+      .min(WORLD_SCENARIO_LIMITS.minimumAgents)
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
     turns: z.array(agentTurnRecordSchema).max(120),
     experiment: z.object({
       id: z.uuid().brand<'ExperimentId'>(),
@@ -1332,6 +1539,39 @@ export const simulationSnapshotSchema = z
     }),
   })
   .superRefine((snapshot, context) => {
+    const rosterIds = new Set(snapshot.world.agents.map(({ id }) => id));
+    if (
+      snapshot.experiment.currentTerritory.length !== rosterIds.size ||
+      snapshot.experiment.currentTerritory.some(
+        ({ agentId }) => !rosterIds.has(agentId),
+      )
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['experiment', 'currentTerritory'],
+        message: 'Territory entries must cover the current roster exactly.',
+      });
+    if (
+      snapshot.resolvedModels.length !== rosterIds.size ||
+      snapshot.resolvedModels.some(({ agentId }) => !rosterIds.has(agentId))
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['resolvedModels'],
+        message: 'Resolved models must cover the current roster exactly.',
+      });
+    if (
+      snapshot.behaviorConfiguration &&
+      (snapshot.behaviorConfiguration.assignments.length !== rosterIds.size ||
+        snapshot.behaviorConfiguration.assignments.some(
+          ({ agentId }) => !rosterIds.has(agentId),
+        ))
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['behaviorConfiguration'],
+        message: 'Behavior assignments must cover the current roster exactly.',
+      });
     const authoritative = new Map<AgentId, number>(
       snapshot.world.agents.map(({ id }) => [id, 0]),
     );
@@ -1585,9 +1825,11 @@ export const experimentManifestSchema = z.object({
   providerMode: providerModeSchema,
   modelConfiguration: experimentModelConfigurationSchema.optional(),
   behaviorConfiguration: behaviorConfigurationSchema.optional(),
+  scenario: appliedScenarioSchema.optional(),
   initialAgents: z
     .array(agentProfileSchema)
-    .length(DEVELOPMENT_WORLD_CONFIG.agentCount)
+    .min(WORLD_SCENARIO_LIMITS.minimumAgents)
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents)
     .optional(),
 });
 export type ExperimentManifest = z.infer<typeof experimentManifestSchema>;
@@ -1625,6 +1867,11 @@ export const metricCountsSchema = z
     automaticRepairAttempts: z.number().int().nonnegative().default(0),
     automaticTransportRetries: z.number().int().nonnegative().default(0),
     manualRetryAttempts: z.number().int().nonnegative().default(0),
+    unattendedRetryAttempts: z.number().int().nonnegative().default(0),
+    manualSkips: z.number().int().nonnegative().default(0),
+    unattendedSkips: z.number().int().nonnegative().default(0),
+    recoveredByUnattendedRetry: z.number().int().nonnegative().default(0),
+    skippedAfterUnattendedRecovery: z.number().int().nonnegative().default(0),
     retriedTurns: z.number().int().nonnegative().default(0),
     recoveredAutomatically: z.number().int().nonnegative().default(0),
     recoveredManually: z.number().int().nonnegative().default(0),
@@ -1811,7 +2058,7 @@ const exportSelectionSchema = z.discriminatedUnion('mode', [
       agentIds: z
         .array(agentIdSchema)
         .min(1)
-        .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+        .max(WORLD_SCENARIO_LIMITS.maximumAgents),
     })
     .strict()
     .refine((value) => new Set(value.agentIds).size === value.agentIds.length, {
@@ -1892,7 +2139,7 @@ export const experimentExportPreviewSchema = z.object({
     .number()
     .int()
     .positive()
-    .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents),
   firstMatchingTurn: z.number().int().positive().optional(),
   lastMatchingTurn: z.number().int().positive().optional(),
   retention: experimentRetentionSchema,
@@ -1997,7 +2244,7 @@ export type ExperimentExportWorldState = z.infer<
 
 export const experimentExportDocumentSchema = z
   .object({
-    schemaVersion: z.literal(8),
+    schemaVersion: z.literal(9),
     generatedAt: z.iso.datetime(),
     experiment: experimentManifestSchema,
     retention: experimentRetentionSchema,
@@ -2006,7 +2253,7 @@ export const experimentExportDocumentSchema = z
       selectedAgentIds: z
         .array(agentIdSchema)
         .min(1)
-        .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+        .max(WORLD_SCENARIO_LIMITS.maximumAgents),
       matchingTurnCount: z.number().int().nonnegative(),
       matchingCommunicationCount: z.number().int().nonnegative(),
       matchingControlChangeCount: z.number().int().nonnegative(),
@@ -2021,7 +2268,7 @@ export const experimentExportDocumentSchema = z
         }),
       )
       .min(1)
-      .max(DEVELOPMENT_WORLD_CONFIG.agentCount),
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
     configurationEvents: z.array(experimentConfigurationEventSchema).optional(),
     metrics: experimentMetricsSchema.optional(),
     currentTerritory: territoryScoreboardSchema.optional(),

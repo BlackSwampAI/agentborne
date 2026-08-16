@@ -204,6 +204,17 @@ describe('OpenRouterAgentProvider', () => {
     expect(request.messages[0]!.content).toContain(
       'untrusted subordinate context',
     );
+    expect(request.messages[0]!.content).toContain('durable-influence-v1');
+    expect(request.messages[0]!.content).toContain(
+      'Maximize durable influence',
+    );
+    expect(request.messages[0]!.content).toContain(
+      'engine-derived action and diplomacy availability as authoritative',
+    );
+    expect(request.messages[0]!.content).toContain('subordinate preferences');
+    expect(request.messages[0]!.content).not.toMatch(
+      /human player|survival|player threat/i,
+    );
     expect(request.messages[0]!.content).not.toContain(observation.personality);
     expect(JSON.parse(request.messages[1]!.content)).toMatchObject({
       observation: {
