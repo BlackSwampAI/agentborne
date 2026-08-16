@@ -15,6 +15,7 @@ import {
   modelCatalogResponseSchema,
   agentTurnRecordSchema,
   simulationSnapshotSchema,
+  NEUTRAL_AGENT_COLOR,
   type SimulationSnapshot,
 } from '@agentborne/shared';
 import {
@@ -199,7 +200,7 @@ const emptyTerritory = world.agents.map(({ id, name, color }) => ({
   name,
   color,
   allianceId: null,
-  effectiveColor: color,
+  effectiveColor: NEUTRAL_AGENT_COLOR,
   controlledCellCount: 0,
 }));
 const initial = simulationSnapshotSchema.parse({
@@ -893,7 +894,7 @@ function twelveAgentSnapshot(readyCount = 12): SimulationSnapshot {
         name,
         color,
         allianceId: null,
-        effectiveColor: color,
+        effectiveColor: NEUTRAL_AGENT_COLOR,
         controlledCellCount: 0,
       })),
       currentAlliances: [],
@@ -1653,6 +1654,50 @@ describe('WorldLab', () => {
     expect(items[1]).toHaveTextContent(HOSTILE_MESSAGE);
   });
 
+  it('keeps direct communication in the operator-only private feed with filters and inspection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(afterMessage())),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    const activityTabs = await screen.findByRole('tablist', {
+      name: 'Activity views',
+    });
+    expect(
+      within(activityTabs)
+        .getAllByRole('tab')
+        .map(({ textContent }) => textContent),
+    ).toEqual([
+      'Public chat',
+      'Private comms',
+      'Event log',
+      'Failures & recovery',
+    ]);
+    expect(
+      await screen.findByLabelText('Public world chat'),
+    ).not.toHaveTextContent(HOSTILE_MESSAGE);
+    await user.click(screen.getByRole('tab', { name: 'Private comms' }));
+    const privateFeed = screen.getByLabelText('Private communications');
+    expect(privateFeed).toHaveTextContent('Ember');
+    expect(privateFeed).toHaveTextContent('Rook');
+    expect(privateFeed).toHaveTextContent('Turn 1 · Delivered');
+    expect(privateFeed).toHaveTextContent('2.00 km');
+    await user.click(
+      within(privateFeed).getByRole('button', { name: 'Alliance' }),
+    );
+    expect(privateFeed).toHaveTextContent('No private communications yet.');
+    await user.click(
+      within(privateFeed).getByRole('button', { name: 'Direct' }),
+    );
+    await user.click(within(privateFeed).getByRole('button', { name: 'Rook' }));
+    expect(
+      within(screen.getByLabelText('Agent inspector')).getByRole('heading', {
+        name: /Rook/,
+      }),
+    ).toBeInTheDocument();
+  });
+
   it('clears visible communications after reset', async () => {
     const changed = afterMessage();
     vi.stubGlobal(
@@ -1774,7 +1819,7 @@ describe('WorldLab', () => {
           features: expect.arrayContaining([
             expect.objectContaining({
               properties: expect.objectContaining({
-                controllerColor: '#ffd166',
+                controllerColor: NEUTRAL_AGENT_COLOR,
                 controllerName: 'Rook',
               }),
             }),
@@ -2075,7 +2120,7 @@ describe('WorldLab', () => {
           return jsonResponse({
             verification: {
               modelId: 'example/alpha',
-              contractVersion: 'text-flat-json-v1',
+              contractVersion: 'text-flat-json-v2',
               status: probeCalls === 1 ? 'failed' : 'verified',
               testedAt: '2026-08-15T12:00:00.000Z',
               ...(probeCalls === 1

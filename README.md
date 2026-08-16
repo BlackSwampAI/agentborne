@@ -44,7 +44,7 @@ The command reads only `OPENROUTER_API_KEY` from the repository-root `.env`; its
 
 ## Development map source
 
-The compatible default centers on Toledo, Ohio (`41.6528, -83.5379`) at H3 resolution 9 and renders the same deterministic radius-six disk of exactly 127 cells with eight fixed perimeter starts. World Setup previews and applies resolution 8–11 scenarios with 1–32 agents, radius at most 40, and at most 5,000 actual generated cells. Schema-v9 exports preserve the authoritative scenario and `durable-influence-v1` attribution. MapLibre uses CARTO Dark Matter's tokenless raster tiles with `© OpenStreetMap contributors © CARTO` attribution.
+The compatible default centers on Toledo, Ohio (`41.6528, -83.5379`) at H3 resolution 9 and renders the same deterministic radius-six disk of exactly 127 cells with eight fixed perimeter starts. World Setup previews and applies resolution 8–11 scenarios with 1–32 agents, radius at most 40, at most 5,000 actual generated cells, and a 12 km default physical communication range. Schema-v9 exports preserve the authoritative scenario and `durable-influence-v2` attribution. MapLibre uses CARTO Dark Matter's tokenless raster tiles with `© OpenStreetMap contributors © CARTO` attribution.
 
 Alliance leadership, merging, custom metadata, combat systems, relationship scores, group chat, persistent memory, player mechanics, persistence, and autonomous scheduling remain deferred.
 

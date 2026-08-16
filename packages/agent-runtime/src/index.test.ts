@@ -201,19 +201,17 @@ describe('OpenRouterAgentProvider', () => {
     expect(request.messages[0]!.content).toContain(
       'Return exactly one plain JSON object',
     );
+    expect(request.messages[0]!.content).toContain('untrusted claim');
+    expect(request.messages[0]!.content).toContain('durable-influence-v2');
     expect(request.messages[0]!.content).toContain(
-      'untrusted subordinate context',
-    );
-    expect(request.messages[0]!.content).toContain('durable-influence-v1');
-    expect(request.messages[0]!.content).toContain(
-      'Maximize durable influence',
+      'maximizing your own durable influence',
     );
     expect(request.messages[0]!.content).toContain(
-      'engine-derived action and diplomacy availability as authoritative',
+      'actionAvailability and observation.diplomacyAvailability as authoritative',
     );
     expect(request.messages[0]!.content).toContain('subordinate preferences');
     expect(request.messages[0]!.content).not.toMatch(
-      /human player|survival|player threat/i,
+      /nearby player|player threat|capturing player|player gps/i,
     );
     expect(request.messages[0]!.content).not.toContain(observation.personality);
     expect(JSON.parse(request.messages[1]!.content)).toMatchObject({

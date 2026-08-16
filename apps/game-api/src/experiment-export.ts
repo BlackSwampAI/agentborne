@@ -183,6 +183,9 @@ interface MutableMetrics {
   publicMessagesAccepted: number;
   publicMessagesRejected: number;
   directMessagesRequested: number;
+  allianceMessagesRequested: number;
+  allianceMessagesDelivered: number;
+  allianceMessagesRejected: number;
   directMessagesDelivered: number;
   directMessagesRejected: number;
   publicMessagesSent: number;
@@ -264,6 +267,9 @@ function mutableMetrics(): MutableMetrics {
     publicMessagesAccepted: 0,
     publicMessagesRejected: 0,
     directMessagesRequested: 0,
+    allianceMessagesRequested: 0,
+    allianceMessagesDelivered: 0,
+    allianceMessagesRejected: 0,
     directMessagesDelivered: 0,
     directMessagesRejected: 0,
     publicMessagesSent: 0,
@@ -336,19 +342,22 @@ function addToMutable(
         ? turn.communicationResult.event.channel
         : turn.communicationResult.attempt.channel;
       if (channel === 'public') metrics.publicMessagesRequested += 1;
-      else metrics.directMessagesRequested += 1;
+      else if (channel === 'direct') metrics.directMessagesRequested += 1;
+      else metrics.allianceMessagesRequested += 1;
       if (turn.communicationResult.accepted) {
         if (turn.communicationResult.event.channel === 'public') {
           metrics.publicMessagesAccepted += 1;
           metrics.publicMessagesSent += 1;
-        } else {
+        } else if (turn.communicationResult.event.channel === 'direct') {
           metrics.directMessagesDelivered += 1;
           metrics.directMessagesSent += 1;
           if (aggregate) metrics.directMessagesReceived += 1;
-        }
+        } else metrics.allianceMessagesDelivered += 1;
       } else if (turn.communicationResult.attempt.channel === 'public') {
         metrics.publicMessagesRejected += 1;
-      } else metrics.directMessagesRejected += 1;
+      } else if (turn.communicationResult.attempt.channel === 'direct')
+        metrics.directMessagesRejected += 1;
+      else metrics.allianceMessagesRejected += 1;
     }
     if (turn.diplomacyResult.requested) {
       const type = turn.diplomacyResult.accepted
@@ -541,6 +550,9 @@ function finalizeMutable(metrics: MutableMetrics) {
     directMessagesRequested: metrics.directMessagesRequested,
     directMessagesDelivered: metrics.directMessagesDelivered,
     directMessagesRejected: metrics.directMessagesRejected,
+    allianceMessagesRequested: metrics.allianceMessagesRequested,
+    allianceMessagesDelivered: metrics.allianceMessagesDelivered,
+    allianceMessagesRejected: metrics.allianceMessagesRejected,
     publicMessagesSent: metrics.publicMessagesSent,
     directMessagesSent: metrics.directMessagesSent,
     directMessagesReceived: metrics.directMessagesReceived,
@@ -877,7 +889,7 @@ function filterCommunications(
     const result = turn.communicationResult;
     const communication = result.accepted ? result.event : result.attempt;
     const selectedByParticipant =
-      communication.channel === 'public'
+      communication.channel !== 'direct'
         ? selected.has(communication.agentId)
         : selected.has(communication.agentId) ||
           (communication.recipientId !== null &&
@@ -1199,13 +1211,15 @@ function summarizeEvent(
 }
 
 function summarizeCommunication(
-  channel: 'public' | 'direct',
+  channel: 'public' | 'direct' | 'alliance',
   recipientId?: AgentId,
   distance?: number,
 ): string {
   return channel === 'public'
     ? 'Published to world chat.'
-    : `Delivered directly to ${recipientId} from distance ${distance}.`;
+    : channel === 'alliance'
+      ? 'Delivered to current alliance members.'
+      : `Delivered directly to ${recipientId} from distance ${distance}.`;
 }
 
 export function calculateExperimentMetrics(
@@ -1261,6 +1275,7 @@ export function calculateExperimentMetrics(
     const retriedTurns = records.filter((turn) =>
       usageAttempts(turn).some(({ kind }) => kind !== 'initial'),
     );
+    const movement = movementMetrics(records);
     return {
       totalTurns: records.length,
       accepted: records.filter(({ outcome }) => outcome === 'accepted').length,
@@ -1371,6 +1386,15 @@ export function calculateExperimentMetrics(
         agentId,
       ),
       uniqueVisitedCells: visited.size,
+      eligibleNearbyAgentObservations: records.reduce(
+        (sum, turn) =>
+          sum +
+          turn.observation.nearbyAgents.filter(
+            ({ directMessageLegal }) => directMessageLegal,
+          ).length,
+        0,
+      ),
+      ...movement,
       ...(latencies.length > 0
         ? {
             averageLatencyMs:
@@ -1485,6 +1509,26 @@ function diplomacyMetrics(
     requested(type).filter(
       (turn) => turn.diplomacyResult.requested && turn.diplomacyResult.accepted,
     ).length;
+  const formed = relevantEvents.filter(
+    (event): event is Extract<AllianceEvent, { type: 'alliance-formed' }> =>
+      event.type === 'alliance-formed',
+  );
+  const completedDurations = formed.flatMap((created) => {
+    const dissolved = relevantEvents.find(
+      (event) =>
+        event.type === 'alliance-dissolved' &&
+        event.allianceId === created.allianceId &&
+        event.turnNumber >= created.turnNumber,
+    );
+    return dissolved ? [dissolved.turnNumber - created.turnNumber] : [];
+  });
+  const allianceSizes = relevantEvents.flatMap((event) =>
+    event.type === 'alliance-formed'
+      ? [event.memberAgentIds.length]
+      : event.type === 'agent-joined-alliance'
+        ? [event.memberAgentIds.length]
+        : [],
+  );
   return {
     diplomacyProposalsRequested: requested('propose-alliance').length,
     diplomacyAcceptancesRequested: requested('accept-alliance').length,
@@ -1544,6 +1588,18 @@ function diplomacyMetrics(
     alliancesDissolved: relevantEvents.filter(
       (event) => event.type === 'alliance-dissolved',
     ).length,
+    firstAllianceTurn: formed.length
+      ? Math.min(...formed.map(({ turnNumber }) => turnNumber))
+      : null,
+    maximumAllianceSize: Math.max(0, ...allianceSizes),
+    completedAllianceDurationTurnsTotal: completedDurations.reduce(
+      (sum, duration) => sum + duration,
+      0,
+    ),
+    completedAllianceDurationTurnsAverage: completedDurations.length
+      ? completedDurations.reduce((sum, duration) => sum + duration, 0) /
+        completedDurations.length
+      : 0,
     alliedCaptureAttempts: records.filter(
       (turn) =>
         turn.outcome !== 'provider-error' &&
@@ -1560,6 +1616,69 @@ function diplomacyMetrics(
         !turn.worldActionResult.accepted &&
         turn.worldActionResult.reason === 'allied-controller',
     ).length,
+  };
+}
+
+function movementMetrics(records: readonly AgentTurnRecord[]) {
+  const moves = records.flatMap((turn) => {
+    if (
+      turn.outcome !== 'accepted' ||
+      turn.worldActionResult.event.type !== 'agent-moved'
+    )
+      return [];
+    const moved = turn.worldActionResult.event;
+    const option = turn.observation.actionAvailability.moveOptions.find(
+      ({ targetCell }) => targetCell === moved.toCell,
+    );
+    return option
+      ? [{ turn, direction: option.direction, toCell: option.targetCell }]
+      : [];
+  });
+  const counts = new Map<(typeof moves)[number]['direction'], number>();
+  let longest = 0;
+  let streak = 0;
+  let previousDirection: (typeof moves)[number]['direction'] | undefined;
+  let previousMoveAt: string | undefined;
+  let directionChangesAfterCommunication = 0;
+  const visited = new Set<string>(
+    records[0] ? [records[0].observation.currentCell.cell] : [],
+  );
+  let recentCellRevisits = 0;
+  for (const { turn, direction, toCell } of moves) {
+    const priorMoveAt = previousMoveAt;
+    counts.set(direction, (counts.get(direction) ?? 0) + 1);
+    streak = direction === previousDirection ? streak + 1 : 1;
+    longest = Math.max(longest, streak);
+    if (
+      previousDirection &&
+      priorMoveAt &&
+      direction !== previousDirection &&
+      (turn.observation.recentDirectMessages.some(
+        ({ direction: messageDirection, occurredAt }) =>
+          messageDirection === 'inbound' &&
+          occurredAt > priorMoveAt &&
+          occurredAt <= turn.completedAt,
+      ) ||
+        turn.observation.recentAllianceMessages.some(
+          ({ senderId, occurredAt }) =>
+            senderId !== turn.agentId &&
+            occurredAt > priorMoveAt &&
+            occurredAt <= turn.completedAt,
+        ))
+    )
+      directionChangesAfterCommunication += 1;
+    previousDirection = direction;
+    previousMoveAt = turn.completedAt;
+    if (visited.has(toCell)) recentCellRevisits += 1;
+    visited.add(toCell);
+  }
+  return {
+    movementDirectionDistribution: [...counts.entries()]
+      .map(([direction, count]) => ({ direction, count }))
+      .toSorted((a, b) => a.direction.localeCompare(b.direction)),
+    longestRepeatedDirectionStreak: longest,
+    recentCellRevisits,
+    directionChangesAfterCommunication,
   };
 }
 
@@ -1615,6 +1734,21 @@ function communicationMetrics(
     (communication) =>
       communication.channel === 'direct' && authoredBySelection(communication),
   );
+  const allianceAuthored = communications.filter(
+    (communication) =>
+      communication.channel === 'alliance' &&
+      authoredBySelection(communication),
+  );
+  const deliveredDirect = directAuthored.filter(
+    (communication) =>
+      communication.status === 'accepted' &&
+      communication.distance !== null &&
+      communication.distance !== undefined,
+  );
+  const directDistanceTotal = deliveredDirect.reduce(
+    (sum, communication) => sum + (communication.distance ?? 0),
+    0,
+  );
   return {
     publicMessagesRequested: publicAuthored.length,
     publicMessagesAccepted: publicAuthored.filter(
@@ -1630,6 +1764,13 @@ function communicationMetrics(
     directMessagesRejected: directAuthored.filter(
       ({ status }) => status === 'rejected',
     ).length,
+    allianceMessagesRequested: allianceAuthored.length,
+    allianceMessagesDelivered: allianceAuthored.filter(
+      ({ status }) => status === 'accepted',
+    ).length,
+    allianceMessagesRejected: allianceAuthored.filter(
+      ({ status }) => status === 'rejected',
+    ).length,
     publicMessagesSent: publicAuthored.filter(
       ({ status }) => status === 'accepted',
     ).length,
@@ -1641,6 +1782,21 @@ function communicationMetrics(
         communication.status === 'accepted' &&
         receivedBySelection(communication),
     ).length,
+    uniqueDirectMessagePairs: new Set(
+      directAuthored.flatMap((communication) =>
+        communication.recipientId
+          ? [`${communication.agentId}:${communication.recipientId}`]
+          : [],
+      ),
+    ).size,
+    directMessageDistanceTotalKm: directDistanceTotal,
+    directMessageDistanceAverageKm: deliveredDirect.length
+      ? directDistanceTotal / deliveredDirect.length
+      : 0,
+    directMessageDistanceMaximumKm: Math.max(
+      0,
+      ...deliveredDirect.map(({ distance }) => distance ?? 0),
+    ),
   };
 }
 

@@ -192,6 +192,8 @@ There is no manual travel-state control and no requirement to stop an unrelated 
 
 ## Capture consequences and population maintenance
 
+Once real or deterministic simulated capture exists, every surviving agent receives a bounded authoritative capture alert regardless of distance. It may identify the captured agent, capture cell, time/tick, alliance, and newly abandoned territory. It must not expose the capturing player's identity, live GPS, route, or continued presence. No capture alerts are generated before capture capability exists.
+
 When an agent is captured:
 
 - The agent is removed immediately.

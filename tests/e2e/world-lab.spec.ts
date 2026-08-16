@@ -10,6 +10,7 @@ const MINGLE_PERSONALITY =
 test('runs the complete deterministic World Lab browser flow', async ({
   page,
 }) => {
+  test.setTimeout(60_000);
   const isolatedApiOrigin = process.env.PLAYWRIGHT_API_ORIGIN;
   if (isolatedApiOrigin) {
     await page.route('**/api/game/**', async (route) => {
@@ -55,6 +56,15 @@ test('runs the complete deterministic World Lab browser flow', async ({
   }
 
   await expect(page.getByRole('heading', { name: 'World Lab' })).toBeVisible();
+  await openActions();
+  await page.getByRole('button', { name: 'World setup' }).click();
+  const setupDialog = page.getByRole('dialog', { name: 'World Setup' });
+  await setupDialog.getByLabel('Communication range (km)').fill('7.5');
+  await setupDialog.getByRole('button', { name: 'Preview' }).click();
+  await setupDialog
+    .getByRole('button', { name: 'Apply / Create Experiment' })
+    .click();
+  await expect(setupDialog).toBeHidden();
   const worldMap = page.getByTestId('world-map');
   await expect(worldMap).toBeVisible();
   for (const viewport of [
@@ -207,7 +217,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
       .locator('details')
       .filter({ hasText: 'Latest structured observation' }),
   ).toContainText('inbound: Ember → Rook');
-  await expect(worldMap).toHaveAttribute('data-controller-colors', /#ff6b57/);
+  await expect(worldMap).toHaveAttribute('data-controller-colors', /#b2d3a8/);
   await page.getByRole('tab', { name: 'Scoreboard' }).click();
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Ember1');
   await page.getByRole('tab', { name: 'Agent' }).click();
@@ -229,6 +239,23 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(
     page.getByRole('button', { name: 'Select agent Solace' }),
   ).toHaveAttribute('data-effective-color', '#0072B2');
+  for (let index = 0; index < 8; index += 1)
+    await page.getByRole('button', { name: 'Single turn' }).click();
+  await page.getByRole('tab', { name: /Private comms/ }).click();
+  const privateComms = page.getByRole('tabpanel', {
+    name: 'Private communications',
+  });
+  await expect(privateComms).toContainText('Meet near the center');
+  await privateComms.getByRole('button', { name: 'Alliance' }).click();
+  await expect(privateComms).toContainText('Coordinate privately');
+  await privateComms.getByRole('button', { name: 'Direct' }).click();
+  await expect(privateComms).toContainText('Meet near the center');
+  await privateComms.getByRole('button', { name: 'Rook' }).click();
+  await expect(page.getByRole('heading', { name: /Rook/ })).toBeVisible();
+  await page.getByRole('tab', { name: 'Event log' }).click();
+  await expect(
+    page.getByRole('list', { name: 'World event log' }),
+  ).not.toContainText('Coordinate privately');
   await page.getByRole('tab', { name: 'Agent' }).click();
   await expect(page.getByLabel('Agent inspector')).toContainText('move →');
 
@@ -238,19 +265,20 @@ test('runs the complete deterministic World Lab browser flow', async ({
     captured = await page.getByText(/Rook captured .* from Ember/).isVisible();
   }
   expect(captured).toBe(true);
-  await expect(worldMap).toHaveAttribute('data-controller-colors', /#ffd166/);
+  await expect(worldMap).toHaveAttribute('data-controller-colors', /#b2d3a8/);
   await page.getByRole('tab', { name: 'Scoreboard' }).click();
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Ember0');
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Rook1');
-  await page.getByRole('button', { name: 'Select agent Ember' }).click();
+  const agentRoster = page.getByLabel('Agent roster');
+  await agentRoster.getByRole('button', { name: /^Ember / }).click();
   await expect(page.getByLabel('Recent territory changes')).toContainText(
     'Lost',
   );
-  await page.getByRole('button', { name: 'Select agent Rook' }).click();
+  await agentRoster.getByRole('button', { name: /^Rook / }).click();
   await expect(page.getByLabel('Recent territory changes')).toContainText(
     'Gained',
   );
-  await page.getByRole('button', { name: 'Select agent Ember' }).click();
+  await agentRoster.getByRole('button', { name: /^Ember / }).click();
   await openActions();
   await page.getByRole('button', { name: 'Export' }).click();
   await page.getByRole('button', { name: 'Clear' }).click();

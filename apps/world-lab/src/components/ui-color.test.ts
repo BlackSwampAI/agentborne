@@ -17,12 +17,16 @@ const state = (allied: boolean) =>
 describe('effective agent color resolution', () => {
   it('prefers current alliance color and updates when membership changes', () => {
     expect(resolveAgentColor(state(true), agentId, '#654321')).toBe('#abcdef');
-    expect(resolveAgentColor(state(false), agentId, '#654321')).toBe('#654321');
+    expect(resolveAgentColor(state(false), agentId, '#654321')).toBe(
+      neutralAgentColor,
+    );
   });
 
   it('falls back through retained, base, and neutral colors', () => {
-    expect(resolveAgentColor(state(false), agentId)).toBe('#123456');
-    expect(resolveAgentColor(state(false), otherId, '#654321')).toBe('#654321');
+    expect(resolveAgentColor(state(false), agentId)).toBe(neutralAgentColor);
+    expect(resolveAgentColor(state(false), otherId, '#654321')).toBe(
+      neutralAgentColor,
+    );
     expect(resolveAgentColor(state(false), otherId)).toBe(neutralAgentColor);
   });
 });
