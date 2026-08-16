@@ -25,6 +25,7 @@ import {
   type ProviderMetadata,
   type WorldSnapshot,
   type BehaviorConfiguration,
+  type AppliedScenario,
 } from '@agentborne/shared';
 
 export interface ExperimentSource {
@@ -41,6 +42,7 @@ export interface ExperimentSource {
   currentWorld: WorldSnapshot;
   modelConfiguration: ExperimentModelConfiguration;
   behaviorConfiguration: BehaviorConfiguration;
+  scenario: AppliedScenario;
 }
 
 export class ExperimentExportValidationError extends Error {
@@ -156,6 +158,11 @@ interface MutableMetrics {
   automaticRepairAttempts: number;
   automaticTransportRetries: number;
   manualRetryAttempts: number;
+  unattendedRetryAttempts: number;
+  manualSkips: number;
+  unattendedSkips: number;
+  recoveredByUnattendedRetry: number;
+  skippedAfterUnattendedRecovery: number;
   retriedTurns: number;
   recoveredAutomatically: number;
   recoveredManually: number;
@@ -232,6 +239,11 @@ function mutableMetrics(): MutableMetrics {
     automaticRepairAttempts: 0,
     automaticTransportRetries: 0,
     manualRetryAttempts: 0,
+    unattendedRetryAttempts: 0,
+    manualSkips: 0,
+    unattendedSkips: 0,
+    recoveredByUnattendedRetry: 0,
+    skippedAfterUnattendedRecovery: 0,
     retriedTurns: 0,
     recoveredAutomatically: 0,
     recoveredManually: 0,
@@ -302,8 +314,13 @@ function addToMutable(
 ): void {
   metrics.turns += 1;
   if (turn.outcome === 'provider-error') metrics.providerErrors += 1;
-  else if (turn.outcome === 'operator-skipped') metrics.operatorSkipped += 1;
-  else metrics[turn.outcome] += 1;
+  else if (turn.outcome === 'operator-skipped') {
+    metrics.operatorSkipped += 1;
+    if (turn.skipKind === 'unattended') {
+      metrics.unattendedSkips += 1;
+      metrics.skippedAfterUnattendedRecovery += 1;
+    } else metrics.manualSkips += 1;
+  } else metrics[turn.outcome] += 1;
   metrics.visited.add(turn.observation.currentCell.cell);
   if (
     turn.outcome !== 'provider-error' &&
@@ -410,8 +427,14 @@ function addToMutable(
   metrics.manualRetryAttempts += attempts.filter(
     ({ kind }) => kind === 'manual-retry',
   ).length;
+  metrics.unattendedRetryAttempts += attempts.filter(
+    ({ kind }) => kind === 'unattended-retry',
+  ).length;
   const retried = attempts.some(({ kind }) => kind !== 'initial');
   const manuallyRetried = attempts.some(({ kind }) => kind === 'manual-retry');
+  const unattendedRetried = attempts.some(
+    ({ kind }) => kind === 'unattended-retry',
+  );
   if (retried) metrics.retriedTurns += 1;
   if (
     retried &&
@@ -425,7 +448,10 @@ function addToMutable(
     turn.outcome !== 'operator-skipped'
   ) {
     if (manuallyRetried) metrics.recoveredManually += 1;
-    else metrics.recoveredAutomatically += 1;
+    else if (unattendedRetried) {
+      metrics.recoveredAutomatically += 1;
+      metrics.recoveredByUnattendedRetry += 1;
+    } else metrics.recoveredAutomatically += 1;
   }
   for (const { provider } of attempts) {
     if (provider) {
@@ -488,6 +514,11 @@ function finalizeMutable(metrics: MutableMetrics) {
     automaticRepairAttempts: metrics.automaticRepairAttempts,
     automaticTransportRetries: metrics.automaticTransportRetries,
     manualRetryAttempts: metrics.manualRetryAttempts,
+    unattendedRetryAttempts: metrics.unattendedRetryAttempts,
+    manualSkips: metrics.manualSkips,
+    unattendedSkips: metrics.unattendedSkips,
+    recoveredByUnattendedRetry: metrics.recoveredByUnattendedRetry,
+    skippedAfterUnattendedRecovery: metrics.skippedAfterUnattendedRecovery,
     retriedTurns: metrics.retriedTurns,
     recoveredAutomatically: metrics.recoveredAutomatically,
     recoveredManually: metrics.recoveredManually,
@@ -597,7 +628,7 @@ export function createExperimentExport(
           },
     );
   const document: ExperimentExportDocument = {
-    schemaVersion: 8,
+    schemaVersion: 9,
     generatedAt,
     experiment: {
       id: source.id,
@@ -605,6 +636,7 @@ export function createExperimentExport(
       providerMode: source.providerMode,
       modelConfiguration: structuredClone(source.modelConfiguration),
       behaviorConfiguration: structuredClone(source.behaviorConfiguration),
+      scenario: structuredClone(source.scenario),
       ...(request.level === 'full-safe'
         ? { initialAgents: structuredClone([...source.initialAgents]) }
         : {}),

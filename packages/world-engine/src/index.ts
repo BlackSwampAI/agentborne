@@ -1,8 +1,11 @@
-import { gridDisk, gridDistance, latLngToCell } from 'h3-js';
+import { cellArea, gridDisk, gridDistance, latLngToCell, UNITS } from 'h3-js';
 import {
   ALLIANCE_COLOR_PALETTE,
   ALLIANCE_PROPOSAL_DURATION_TURNS,
   DEVELOPMENT_WORLD_CONFIG,
+  assignBehavior,
+  OBJECTIVE_PROMPT_VERSION,
+  WORLD_SCENARIO_LIMITS,
   agentIdSchema,
   allianceIdSchema,
   allianceProposalIdSchema,
@@ -28,6 +31,10 @@ import {
   type WorldEvent,
   type WorldActionResult,
   type WorldSnapshot,
+  type AppliedScenario,
+  type ScenarioRosterEntry,
+  type WorldSetupPreviewResponse,
+  type WorldSetupRequest,
 } from '@agentborne/shared';
 
 export interface WorldState {
@@ -450,7 +457,7 @@ export function applyDiplomacy(
     if (
       proposerAlliance &&
       proposerAlliance.memberAgentIds.length >=
-        DEVELOPMENT_WORLD_CONFIG.agentCount
+        WORLD_SCENARIO_LIMITS.maximumAllianceMembers
     )
       return diplomacyRejected(
         state,
@@ -912,6 +919,280 @@ export const DEVELOPMENT_AGENT_BLUEPRINTS = [
   },
 ] as const;
 
+const DEFAULT_WORLD_SEED = 'toledo-world-v1';
+const DEFAULT_ROSTER_SEED = 'default-eight-v1';
+const DEFAULT_SPAWN_SEED = 'default-spawns-v1';
+const DEFAULT_BEHAVIOR_SEED = 'default-behavior-v1';
+const DEFAULT_STARTING_INDEXES = [91, 94, 97, 100, 103, 106, 109, 112] as const;
+
+function seededNumber(seed: string): () => number {
+  let state = 2166136261;
+  for (const character of seed) {
+    state ^= character.charCodeAt(0);
+    state = Math.imul(state, 16777619);
+  }
+  return () => {
+    state += 0x6d2b79f5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffled<T>(values: readonly T[], seed: string): T[] {
+  const result = [...values];
+  const random = seededNumber(seed);
+  for (let index = result.length - 1; index > 0; index--) {
+    const other = Math.floor(random() * (index + 1));
+    [result[index], result[other]] = [result[other]!, result[index]!];
+  }
+  return result;
+}
+
+export function allocateDeterministicSpawns(
+  cells: readonly H3Cell[],
+  agentCount: number,
+  minimumSeparation: number,
+  seed: string,
+): H3Cell[] | null {
+  const selected: H3Cell[] = [];
+  for (const candidate of shuffled(cells, seed)) {
+    if (
+      selected.every((cell) => {
+        try {
+          return gridDistance(cell, candidate) >= minimumSeparation;
+        } catch {
+          return false;
+        }
+      })
+    )
+      selected.push(candidate);
+    if (selected.length === agentCount) return selected;
+  }
+  return null;
+}
+
+function deterministicUuid(seed: string, index: number): string {
+  const bytes = Array.from({ length: 16 }, (_, byte) =>
+    Math.floor(seededNumber(`${seed}:${index}:${byte}`)() * 256),
+  );
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function generateDeterministicRoster(
+  count: number,
+  seed: string,
+): ScenarioRosterEntry[] {
+  const adjectives = [
+    'Amber',
+    'Bold',
+    'Cobalt',
+    'Distant',
+    'Emerald',
+    'Feral',
+    'Golden',
+    'Harbor',
+  ];
+  const nouns = [
+    'Arc',
+    'Beacon',
+    'Cairn',
+    'Drift',
+    'Echo',
+    'Flint',
+    'Grove',
+    'Haven',
+  ];
+  return Array.from({ length: count }, (_, index) => {
+    const random = seededNumber(`${seed}:color:${index}`);
+    const color = `#${Array.from({ length: 3 }, () =>
+      Math.floor(48 + random() * 176)
+        .toString(16)
+        .padStart(2, '0'),
+    ).join('')}`;
+    const base = `${adjectives[index % adjectives.length]} ${nouns[Math.floor(index / adjectives.length) % nouns.length]}`;
+    return {
+      id: agentIdSchema.parse(deterministicUuid(seed, index)),
+      name: `${base} ${index + 1}`.slice(0, 80),
+      color,
+      personality:
+        'You are an autonomous territorial agent. Communicate in your own concise style and adapt your legal choices to the assigned personality and strategy profiles.',
+    };
+  });
+}
+
+export function defaultWorldSetupRequest(): WorldSetupRequest {
+  const roster = DEVELOPMENT_AGENT_BLUEPRINTS.map((agent) => ({
+    ...agent,
+  })) as ScenarioRosterEntry[];
+  return {
+    scenarioVersion: 'world-scenario-v1',
+    locationLabel: 'Toledo, Ohio',
+    center: {
+      latitude: DEVELOPMENT_WORLD_CONFIG.latitude,
+      longitude: DEVELOPMENT_WORLD_CONFIG.longitude,
+    },
+    resolution: DEVELOPMENT_WORLD_CONFIG.resolution,
+    radius: DEVELOPMENT_WORLD_CONFIG.radius,
+    worldSeed: DEFAULT_WORLD_SEED,
+    rosterSeed: DEFAULT_ROSTER_SEED,
+    spawnSeed: DEFAULT_SPAWN_SEED,
+    minimumSpawnSeparation: 1,
+    roster,
+    modelConfiguration: {
+      globalModelId: null,
+      globalReasoningProfile: 'provider-default',
+      overrides: [],
+      locked: false,
+    },
+    behaviorConfiguration: {
+      registryVersion: 1,
+      assignmentMode: 'balanced-random',
+      seed: DEFAULT_BEHAVIOR_SEED,
+      assignments: assignBehavior(
+        roster.map(({ id }) => agentIdSchema.parse(id)),
+        DEFAULT_BEHAVIOR_SEED,
+        'balanced-random',
+      ),
+      locked: false,
+    },
+    objectiveVersion: OBJECTIVE_PROMPT_VERSION,
+    capabilities: { communication: true, diplomacy: true },
+  };
+}
+
+export function previewWorldSetup(
+  request: WorldSetupRequest,
+  generatedAt = new Date().toISOString(),
+): WorldSetupPreviewResponse {
+  let cells: H3Cell[];
+  try {
+    const center = h3CellSchema.parse(
+      latLngToCell(
+        request.center.latitude,
+        request.center.longitude,
+        request.resolution,
+      ),
+    );
+    cells = gridDisk(center, request.radius).map((cell) =>
+      h3CellSchema.parse(cell),
+    );
+  } catch {
+    return {
+      feasible: false,
+      errors: [
+        {
+          code: 'invalid-coordinates',
+          message:
+            'The coordinates could not be converted to a valid H3 world.',
+        },
+      ],
+      warnings: [],
+    };
+  }
+  if (cells.length > WORLD_SCENARIO_LIMITS.maximumGeneratedCells)
+    return {
+      feasible: false,
+      errors: [
+        {
+          code: 'cell-limit-exceeded',
+          message: `The generated world has ${cells.length} cells; the limit is ${WORLD_SCENARIO_LIMITS.maximumGeneratedCells}.`,
+        },
+      ],
+      warnings: [],
+    };
+  const isDefault =
+    request.center.latitude === DEVELOPMENT_WORLD_CONFIG.latitude &&
+    request.center.longitude === DEVELOPMENT_WORLD_CONFIG.longitude &&
+    request.resolution === DEVELOPMENT_WORLD_CONFIG.resolution &&
+    request.radius === DEVELOPMENT_WORLD_CONFIG.radius &&
+    request.roster.length === DEVELOPMENT_AGENT_BLUEPRINTS.length &&
+    request.roster.every(
+      (agent, index) => agent.id === DEVELOPMENT_AGENT_BLUEPRINTS[index]?.id,
+    ) &&
+    request.spawnSeed === DEFAULT_SPAWN_SEED;
+  const startingCells = isDefault
+    ? DEFAULT_STARTING_INDEXES.map((index) => cells[index]!).filter(Boolean)
+    : allocateDeterministicSpawns(
+        cells,
+        request.roster.length,
+        request.minimumSpawnSeparation,
+        request.spawnSeed,
+      );
+  const separationSatisfied = startingCells?.every((cell, index) =>
+    startingCells.slice(index + 1).every((other) => {
+      try {
+        return gridDistance(cell, other) >= request.minimumSpawnSeparation;
+      } catch {
+        return false;
+      }
+    }),
+  );
+  if (!startingCells || !separationSatisfied)
+    return {
+      feasible: false,
+      errors: [
+        {
+          code: 'spawn-infeasible',
+          message: `The ${request.roster.length}-agent roster cannot fit with minimum separation ${request.minimumSpawnSeparation}.`,
+        },
+      ],
+      warnings: [],
+    };
+  const setupWarnings =
+    cells.length / request.roster.length <
+    WORLD_SCENARIO_LIMITS.highDensityCellsPerAgent
+      ? [
+          {
+            code: 'high-agent-density' as const,
+            message: `This setup has fewer than ${WORLD_SCENARIO_LIMITS.highDensityCellsPerAgent} cells per agent.`,
+          },
+        ]
+      : [];
+  const world: WorldSnapshot = {
+    generatedAt,
+    hexes: cells.map((cell) => ({
+      cell,
+      state: 'open',
+      controllerAgentId: null,
+    })),
+    agents: request.roster.map((agent, index) => ({
+      ...agent,
+      currentCell: startingCells[index]!,
+    })),
+    events: [],
+    alliances: [],
+    pendingAllianceProposals: [],
+  };
+  const scenario: AppliedScenario = {
+    ...request,
+    exactCellCount: cells.length,
+    areaSquareKilometers: cells.reduce(
+      (total, cell) => total + cellArea(cell, UNITS.km2),
+      0,
+    ),
+    startingCells,
+    setupWarnings,
+  };
+  return { feasible: true, scenario, world };
+}
+
+export function createWorldFromScenario(
+  scenario: AppliedScenario,
+  generatedAt = new Date().toISOString(),
+): WorldSnapshot {
+  const preview = previewWorldSetup(scenario, generatedAt);
+  if (!preview.feasible)
+    throw new Error(preview.errors[0]?.message ?? 'Invalid scenario.');
+  return preview.world;
+}
+
 export function createDevelopmentWorld({
   latitude = DEVELOPMENT_WORLD_CONFIG.latitude,
   longitude = DEVELOPMENT_WORLD_CONFIG.longitude,
@@ -926,6 +1207,9 @@ export function createDevelopmentWorld({
     h3CellSchema.parse(cell),
   );
   if (
+    latitude === DEVELOPMENT_WORLD_CONFIG.latitude &&
+    longitude === DEVELOPMENT_WORLD_CONFIG.longitude &&
+    resolution === DEVELOPMENT_WORLD_CONFIG.resolution &&
     radius === DEVELOPMENT_WORLD_CONFIG.radius &&
     cells.length !== DEVELOPMENT_WORLD_CONFIG.cellCount
   )
@@ -933,8 +1217,11 @@ export function createDevelopmentWorld({
       `The development world must contain exactly ${DEVELOPMENT_WORLD_CONFIG.cellCount} cells.`,
     );
   const startingIndexes =
+    latitude === DEVELOPMENT_WORLD_CONFIG.latitude &&
+    longitude === DEVELOPMENT_WORLD_CONFIG.longitude &&
+    resolution === DEVELOPMENT_WORLD_CONFIG.resolution &&
     radius === DEVELOPMENT_WORLD_CONFIG.radius
-      ? [91, 94, 97, 100, 103, 106, 109, 112]
+      ? [...DEFAULT_STARTING_INDEXES]
       : DEVELOPMENT_AGENT_BLUEPRINTS.map((_, index) =>
           Math.floor(
             (index * cells.length) / DEVELOPMENT_AGENT_BLUEPRINTS.length,
@@ -962,6 +1249,15 @@ export function createDevelopmentWorld({
     alliances: [],
     pendingAllianceProposals: [],
   };
+}
+
+export function createDefaultAppliedScenario(
+  generatedAt = new Date().toISOString(),
+): AppliedScenario {
+  const preview = previewWorldSetup(defaultWorldSetupRequest(), generatedAt);
+  if (!preview.feasible)
+    throw new Error('The default World Lab scenario is invalid.');
+  return preview.scenario;
 }
 
 export function toWorldState(snapshot: WorldSnapshot): WorldState {

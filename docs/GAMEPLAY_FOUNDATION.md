@@ -323,8 +323,8 @@ chain-of-thought.
 
 The intended sequence is:
 
-1. Configurable map scale, H3 resolution, and agent roster.
-2. Goal-oriented prompt revision and versioned scenario attribution.
+1. Configurable map scale, H3 resolution, and agent roster. **Implemented in the World Lab scenario milestone.**
+2. Goal-oriented prompt revision and versioned scenario attribution. **Implemented as `durable-influence-v1` without player-survival language.**
 3. Simultaneous agent ticks with a provider-neutral dispatcher and virtual clock.
 4. Deterministic real-time simulated players and threat observations.
 5. Comparative unattended World Lab experiments.

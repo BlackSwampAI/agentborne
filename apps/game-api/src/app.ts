@@ -34,9 +34,20 @@ import {
   verifyModelRequestSchema,
   verifyModelResponseSchema,
   worldSnapshotSchema,
+  worldSetupRequestSchema,
+  worldSetupPreviewResponseSchema,
+  applyWorldSetupResponseSchema,
+  generatedAgentRequestSchema,
+  generatedAgentResponseSchema,
+  locationSearchRequestSchema,
+  locationSearchResponseSchema,
+  defaultWorldSetupResponseSchema,
   type ModelVerification,
 } from '@agentborne/shared';
-import { createDevelopmentWorld } from '@agentborne/world-engine';
+import {
+  createDevelopmentWorld,
+  generateDeterministicRoster,
+} from '@agentborne/world-engine';
 import {
   SimulationConflictError,
   SimulationService,
@@ -44,6 +55,7 @@ import {
   SimulationValidationError,
 } from './simulation-service';
 import { ExperimentExportValidationError } from './experiment-export';
+import { NominatimGeocoder, type Geocoder } from './geocoder';
 
 export { healthResponseSchema };
 
@@ -51,6 +63,7 @@ export interface AppOptions {
   service?: SimulationService;
   provider?: AgentProvider;
   catalog?: Pick<OpenRouterModelCatalog, 'getCatalog'>;
+  geocoder?: Geocoder;
 }
 
 export function providerFromEnvironment(): AgentProvider {
@@ -73,10 +86,12 @@ export function createApp(options: AppOptions = {}) {
     options.catalog ??
     new OpenRouterModelCatalog({ apiKey: process.env.OPENROUTER_API_KEY });
   const modelVerifications = new Map<string, ModelVerification>();
+  const geocoder = options.geocoder ?? new NominatimGeocoder();
   const turnMutations = new Map<string, Promise<unknown>>();
   const mutationPromise = <T>(
     context: Context,
-    operation: 'turn' | 'retry',
+    operation:
+      'turn' | 'retry' | 'unattended-retry' | 'unattended-skip' | 'setup',
     execute: () => Promise<T>,
   ): Promise<T> => {
     const supplied =
@@ -104,7 +119,7 @@ export function createApp(options: AppOptions = {}) {
           ? origin
           : null,
       allowMethods: ['GET', 'POST'],
-      allowHeaders: ['Content-Type'],
+      allowHeaders: ['Content-Type', 'X-Agentborne-Mutation-Id'],
     }),
   );
 
@@ -123,6 +138,113 @@ export function createApp(options: AppOptions = {}) {
 
   app.get('/api/simulation', (context) =>
     context.json(simulationSnapshotSchema.parse(service.getSnapshot())),
+  );
+
+  app.post('/api/simulation/experiment/setup/preview', async (context) => {
+    return context.json(
+      worldSetupPreviewResponseSchema.parse(
+        service.previewWorldSetup(
+          await context.req.json().catch(() => undefined),
+        ),
+      ),
+    );
+  });
+
+  app.get('/api/simulation/experiment/setup/default', (context) =>
+    context.json(
+      defaultWorldSetupResponseSchema.parse({
+        request: service.getDefaultWorldSetup(),
+      }),
+    ),
+  );
+
+  app.post('/api/simulation/experiment/setup', async (context) => {
+    const request = worldSetupRequestSchema.safeParse(
+      await context.req.json().catch(() => undefined),
+    );
+    if (!request.success)
+      return context.json(
+        apiErrorSchema.parse({
+          error: {
+            code: 'invalid_request',
+            message: 'The scenario setup request is invalid.',
+          },
+        }),
+        400,
+      );
+    try {
+      const snapshot = await mutationPromise(context, 'setup', async () =>
+        service.applyWorldSetup(request.data),
+      );
+      return context.json(applyWorldSetupResponseSchema.parse({ snapshot }));
+    } catch (error) {
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'setup_conflict', message: error.message },
+          }),
+          409,
+        );
+      if (error instanceof SimulationValidationError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'invalid_request', message: error.message },
+          }),
+          400,
+        );
+      throw error;
+    }
+  });
+
+  app.post(
+    '/api/simulation/experiment/setup/roster/generate',
+    async (context) => {
+      const request = generatedAgentRequestSchema.safeParse(
+        await context.req.json().catch(() => undefined),
+      );
+      if (!request.success)
+        return context.json(
+          apiErrorSchema.parse({
+            error: {
+              code: 'invalid_request',
+              message: 'A valid roster count and seed are required.',
+            },
+          }),
+          400,
+        );
+      return context.json(
+        generatedAgentResponseSchema.parse({
+          roster: generateDeterministicRoster(
+            request.data.count,
+            request.data.seed,
+          ),
+        }),
+      );
+    },
+  );
+
+  app.post(
+    '/api/simulation/experiment/setup/location-search',
+    async (context) => {
+      const request = locationSearchRequestSchema.safeParse(
+        await context.req.json().catch(() => undefined),
+      );
+      if (!request.success)
+        return context.json(
+          apiErrorSchema.parse({
+            error: {
+              code: 'invalid_request',
+              message: 'Enter a location query between 2 and 120 characters.',
+            },
+          }),
+          400,
+        );
+      return context.json(
+        locationSearchResponseSchema.parse(
+          await geocoder.search(request.data.query),
+        ),
+      );
+    },
   );
 
   app.get('/api/simulation/models', async (context) => {
@@ -427,6 +549,57 @@ export function createApp(options: AppOptions = {}) {
   app.post('/api/simulation/turn/skip', (context) =>
     respondToManualTurn(context, 'skip'),
   );
+  app.post('/api/simulation/turn/unattended-retry', async (context) => {
+    try {
+      const turn = await mutationPromise(context, 'unattended-retry', () =>
+        service.retryFailedTurn('unattended-retry'),
+      );
+      return context.json(
+        singleTurnResponseSchema.parse({
+          snapshot: service.getSnapshot(),
+          turn,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SimulationTurnCancelledError)
+        return context.json(
+          cancelledTurnResponseSchema.parse({
+            snapshot: service.getSnapshot(),
+            cancelled: true,
+          }),
+        );
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'turn_conflict', message: error.message },
+          }),
+          409,
+        );
+      throw error;
+    }
+  });
+  app.post('/api/simulation/turn/unattended-skip', async (context) => {
+    try {
+      const turn = await mutationPromise(context, 'unattended-skip', async () =>
+        service.skipFailedTurn('unattended'),
+      );
+      return context.json(
+        singleTurnResponseSchema.parse({
+          snapshot: service.getSnapshot(),
+          turn,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'turn_conflict', message: error.message },
+          }),
+          409,
+        );
+      throw error;
+    }
+  });
 
   app.post('/api/simulation/reset', (context) => {
     try {

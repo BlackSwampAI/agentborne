@@ -14,6 +14,12 @@ The request uses the selected model, messages, `max_tokens`, `stream: false`, an
 
 Explicit scripted mode bypasses repository `.env` loading entirely. This keeps deterministic browser validation offline and prevents test-provider processes from unnecessarily reading genuine-provider credentials; genuine mode retains the existing environment conventions.
 
+## Location-search boundary
+
+Browser-driven unattended recovery is explicitly opt-in and bounded to at most three additional one-call retries per failed logical turn. Authentication, configuration, cancellation, conflicts, and unreconciled connection state require operator intervention. Retry requests reuse only the saved safe observation and never retain raw output, credentials, or private reasoning. Provider cost can increase by the configured bound, and closing the tab stops orchestration.
+
+Search runs only after explicit submission. Queries are trimmed to 120 characters, URL-encoded, receive no browser credentials, and are not logged by application code. The replaceable Nominatim adapter identifies the project, requests at most five results, limits upstream access to once per second per process, caches at most 100 normalized queries, times out after five seconds, and returns safe failures. `NOMINATIM_BASE_URL` replaces the upstream. Tests inject a fake; manual coordinates remain available.
+
 Non-success OpenRouter bodies are read only up to a fixed bound. The adapter extracts a sanitized status, provider code/message, request ID, selected/resolved model, finish reasons, and latency, redacts credentials and observation strings, and discards the raw body. Those bounded fields may appear in the operator-facing failure record; raw bodies, prompts, responses, headers, and credentials never do.
 
 ## Prompt and reasoning data

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { WORLD_SCENARIO_LIMITS } from './limits';
 import type { AgentId } from './index';
 
 export const BEHAVIOR_REGISTRY_VERSION = 1 as const;
@@ -122,7 +123,10 @@ export const behaviorConfigurationSchema = z
     registryVersion: z.literal(BEHAVIOR_REGISTRY_VERSION),
     assignmentMode: behaviorAssignmentModeSchema,
     seed: z.string().trim().min(1).max(80),
-    assignments: z.array(behaviorAssignmentSchema).length(8),
+    assignments: z
+      .array(behaviorAssignmentSchema)
+      .min(WORLD_SCENARIO_LIMITS.minimumAgents)
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
     locked: z.boolean(),
   })
   .strict()

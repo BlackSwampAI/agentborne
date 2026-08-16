@@ -552,7 +552,7 @@ describe('SimulationService', () => {
       actions: ['capture'],
       level: 'minimal',
     });
-    expect(victimExport.schemaVersion).toBe(8);
+    expect(victimExport.schemaVersion).toBe(9);
     expect(victimExport.turns).toHaveLength(0);
     expect(victimExport.selection).toMatchObject({
       matchingTurnCount: 0,
@@ -662,7 +662,7 @@ describe('SimulationService', () => {
       outcomes: ['rejected'],
       actions: ['capture'],
     });
-    expect(exported.schemaVersion).toBe(8);
+    expect(exported.schemaVersion).toBe(9);
     const behavior = exported.turns[0]!.behavior!;
     expect(
       exported.metrics!.byPersonality.find(
@@ -1259,7 +1259,7 @@ describe('SimulationService', () => {
         controlChanges: false,
       },
     });
-    expect(minimal.schemaVersion).toBe(8);
+    expect(minimal.schemaVersion).toBe(9);
     expect(
       experimentExportDocumentSchema.safeParse({
         ...minimal,

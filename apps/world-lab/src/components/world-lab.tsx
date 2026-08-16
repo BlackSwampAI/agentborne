@@ -33,6 +33,12 @@ import {
   updateExperimentModelsResponseSchema,
   updateExperimentBehaviorResponseSchema,
   verifyModelResponseSchema,
+  worldSetupPreviewResponseSchema,
+  applyWorldSetupResponseSchema,
+  generatedAgentResponseSchema,
+  locationSearchResponseSchema,
+  defaultWorldSetupResponseSchema,
+  WORLD_RADIUS_PRESETS,
   type AgentId,
   type AgentTurnRecord,
   type CustomExportOptions,
@@ -47,6 +53,8 @@ import {
   type ExperimentModelConfiguration,
   type BehaviorConfiguration,
   type SimulationSnapshot,
+  type WorldSetupRequest,
+  type WorldSetupPreviewResponse,
 } from '@agentborne/shared';
 import {
   matchingPersonalityPreset,
@@ -56,14 +64,29 @@ import { WorldMap } from './world-map';
 import { buildModelOptions } from './model-options';
 import { resolveAgentColor } from './ui-color';
 
-const latitude = Number(process.env.NEXT_PUBLIC_DEV_MAP_LATITUDE ?? 41.6528);
-const longitude = Number(process.env.NEXT_PUBLIC_DEV_MAP_LONGITUDE ?? -83.5379);
-const resolution = Number(process.env.NEXT_PUBLIC_DEV_MAP_H3_RESOLUTION ?? 9);
 const apiBase =
   process.env.NEXT_PUBLIC_GAME_API_BASE_URL ?? '/api/game/simulation';
 const followTurnStorageKey = 'agentborne.world-lab.follow-turn';
 const runTargetStorageKey = 'agentborne.world-lab.run-target';
+const unattendedRecoveryStorageKey = 'agentborne.world-lab.unattended-recovery';
 export const runTargets = [25, 50, 100, 200, 500, 1000] as const;
+
+function unattendedFailureEligible(
+  failure: NonNullable<SimulationSnapshot['pendingFailedTurn']>['failure'],
+): boolean {
+  if (
+    failure.code === 'configuration' ||
+    failure.code === 'cancelled' ||
+    (failure.code === 'provider-http' &&
+      [401, 403].includes(failure.httpStatus ?? 0))
+  )
+    return false;
+  return (
+    failure.retryable ||
+    Boolean(failure.validationCodes?.length) ||
+    ['malformed-response', 'unsupported-response'].includes(failure.code)
+  );
+}
 
 export function WorldLab() {
   const [snapshot, setSnapshot] = useState<SimulationSnapshot | null>(null);
@@ -75,6 +98,15 @@ export function WorldLab() {
   const [boundedRunTarget, setBoundedRunTarget] = useState<number | null>(null);
   const [inFlight, setInFlight] = useState(false);
   const [reconciling, setReconciling] = useState(false);
+  const [unattendedRecoveryEnabled, setUnattendedRecoveryEnabled] =
+    useState(false);
+  const [unattendedRetryLimit, setUnattendedRetryLimit] = useState<1 | 2 | 3>(
+    2,
+  );
+  const [unattendedPreferenceLoaded, setUnattendedPreferenceLoaded] =
+    useState(false);
+  const [unattendedRetryCount, setUnattendedRetryCount] = useState(0);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
   const [personalityPending, setPersonalityPending] = useState(false);
   const [personalityNotice, setPersonalityNotice] = useState<string | null>(
@@ -83,6 +115,7 @@ export function WorldLab() {
   const [speed, setSpeed] = useState(1_000);
   const [uiError, setUiError] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
   const [exportAgentIds, setExportAgentIds] = useState<AgentId[]>([]);
   const [catalog, setCatalog] = useState<ModelCatalogResponse | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
@@ -99,13 +132,74 @@ export function WorldLab() {
   const boundedRunTargetRef = useRef<number | null>(null);
   const completedTurnsRef = useRef(0);
   const mutationSequenceRef = useRef(0);
+  const runningRef = useRef(false);
+  const unattendedEnabledRef = useRef(false);
+  const unattendedRetryLimitRef = useRef<1 | 2 | 3>(2);
+  const unattendedRetryCountRef = useRef(0);
   const configurationPendingRef = useRef(false);
   const exportInitializedRef = useRef(false);
   const exportTriggerRef = useRef<HTMLButtonElement>(null);
+  const setupTriggerRef = useRef<HTMLElement>(null);
+  const overflowMenuRef = useRef<HTMLDetailsElement>(null);
 
   useEffect(() => {
     boundedRunTargetRef.current = boundedRunTarget;
   }, [boundedRunTarget]);
+
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem(unattendedRecoveryStorageKey);
+    const hydrationTask = window.setTimeout(() => {
+      if (saved) {
+        try {
+          const preference = JSON.parse(saved) as {
+            enabled?: unknown;
+            retryLimit?: unknown;
+          };
+          const limit = Number(preference.retryLimit);
+          setUnattendedRecoveryEnabled(preference.enabled === true);
+          unattendedEnabledRef.current = preference.enabled === true;
+          if (limit === 1 || limit === 2 || limit === 3) {
+            setUnattendedRetryLimit(limit);
+            unattendedRetryLimitRef.current = limit;
+          }
+        } catch {
+          // Ignore malformed browser-local preferences.
+        }
+      }
+      setUnattendedPreferenceLoaded(true);
+    }, 0);
+    return () => window.clearTimeout(hydrationTask);
+  }, []);
+
+  useEffect(() => {
+    if (!unattendedPreferenceLoaded) return;
+    window.localStorage.setItem(
+      unattendedRecoveryStorageKey,
+      JSON.stringify({
+        enabled: unattendedRecoveryEnabled,
+        retryLimit: unattendedRetryLimit,
+      }),
+    );
+  }, [
+    unattendedPreferenceLoaded,
+    unattendedRecoveryEnabled,
+    unattendedRetryLimit,
+  ]);
+
+  useEffect(() => {
+    if (
+      !recoveryNotice ||
+      recoveryNotice.startsWith('Recovering ') ||
+      recoveryNotice.startsWith('Recovery pending ')
+    )
+      return;
+    const timer = window.setTimeout(() => setRecoveryNotice(null), 6_000);
+    return () => window.clearTimeout(timer);
+  }, [recoveryNotice]);
 
   useEffect(() => {
     const stored = Number(window.sessionStorage.getItem(runTargetStorageKey));
@@ -144,15 +238,19 @@ export function WorldLab() {
     completedTurnsRef.current = next.experiment.totalCompletedTurns;
     setSnapshot(next);
     if (
-      next.status === 'provider-error' ||
       next.status === 'configuration-error' ||
       next.world.hexes.every(({ state }) => state === 'infected') ||
       (boundedRunTargetRef.current !== null &&
         next.experiment.totalCompletedTurns >= boundedRunTargetRef.current)
     ) {
+      runningRef.current = false;
       setRunning(false);
       setBoundedRunTarget(null);
       boundedRunTargetRef.current = null;
+    }
+    if (next.pendingFailedTurn === null) {
+      unattendedRetryCountRef.current = 0;
+      setUnattendedRetryCount(0);
     }
     setSelectedAgentId((current) => current ?? next.world.agents[0]!.id);
   }, []);
@@ -167,7 +265,7 @@ export function WorldLab() {
           await response.json(),
         );
         applySnapshot(authoritative);
-        if (authoritative.activeAgentId === null) return;
+        if (authoritative.activeAgentId === null) return authoritative;
         await new Promise((resolve) => window.setTimeout(resolve, 500));
       }
     } finally {
@@ -370,7 +468,7 @@ export function WorldLab() {
   };
 
   const executeTurn = useCallback(
-    async (operation: 'turn' | 'retry' = 'turn') => {
+    async (operation: 'turn' | 'retry' | 'unattended-retry' = 'turn') => {
       if (inFlightRef.current) return;
       if (
         boundedRunTargetRef.current !== null &&
@@ -387,13 +485,20 @@ export function WorldLab() {
       try {
         mutationSequenceRef.current += 1;
         const mutationId = `mutation_${Date.now()}_${mutationSequenceRef.current}`;
-        const turnPath = `${apiBase}/turn${operation === 'retry' ? '/retry' : ''}`;
+        const turnPath = `${apiBase}/turn${
+          operation === 'retry'
+            ? '/retry'
+            : operation === 'unattended-retry'
+              ? '/unattended-retry'
+              : ''
+        }`;
         const response = await fetch(
           `${turnPath}?mutationId=${encodeURIComponent(mutationId)}`,
           { method: 'POST' },
         );
         if (response.status === 409) {
           setUiError('Another turn is already in progress.');
+          runningRef.current = false;
           setRunning(false);
           setBoundedRunTarget(null);
           boundedRunTargetRef.current = null;
@@ -408,27 +513,43 @@ export function WorldLab() {
           return;
         }
         const payload = singleTurnResponseSchema.parse(body);
+        const completedUnattendedRetries = unattendedRetryCountRef.current;
         applySnapshot(payload.snapshot);
         if (payload.turn.outcome === 'provider-error') {
-          setRunning(false);
-          setBoundedRunTarget(null);
-          boundedRunTargetRef.current = null;
           const failedAgent = payload.snapshot.world.agents.find(
             ({ id }) => id === payload.turn.agentId,
           );
-          setUiError(
-            `Turn stopped (${payload.turn.failure.code}): ${payload.turn.failure.message} Agent ${failedAgent?.name ?? payload.turn.agentId} · model ${payload.turn.failure.model ?? payload.turn.provider?.model ?? 'unavailable'}.`,
+          const attribution = `${failedAgent?.name ?? payload.turn.agentId} · model ${payload.turn.failure.model ?? payload.turn.provider?.model ?? 'unavailable'} · ${payload.turn.failure.code}: ${payload.turn.failure.message}`;
+          if (
+            runningRef.current &&
+            unattendedEnabledRef.current &&
+            unattendedFailureEligible(payload.turn.failure)
+          ) {
+            setRecoveryNotice(
+              `Recovery pending for ${attribution}. Each retry may incur provider cost.`,
+            );
+          } else {
+            runningRef.current = false;
+            setRunning(false);
+            setBoundedRunTarget(null);
+            boundedRunTargetRef.current = null;
+            setUiError(`Turn stopped (${attribution}).`);
+          }
+        } else if (operation === 'unattended-retry') {
+          setRecoveryNotice(
+            `Recovered the failed turn after ${completedUnattendedRetries} unattended ${completedUnattendedRetries === 1 ? 'retry' : 'retries'}. Continuing; provider calls may incur cost.`,
           );
         }
       } catch {
         setUiError('The response was lost. Reconciling with the Game API…');
-        setRunning(false);
-        setBoundedRunTarget(null);
-        boundedRunTargetRef.current = null;
         try {
           await reconcileAuthoritativeSnapshot();
           setUiError(null);
         } catch {
+          runningRef.current = false;
+          setRunning(false);
+          setBoundedRunTarget(null);
+          boundedRunTargetRef.current = null;
           setUiError(
             'The authoritative state could not be reconciled. Refresh before retrying.',
           );
@@ -459,8 +580,44 @@ export function WorldLab() {
     }
   };
 
+  const unattendedSkipFailedTurn = useCallback(async () => {
+    if (inFlightRef.current || !runningRef.current) return;
+    inFlightRef.current = true;
+    setInFlight(true);
+    try {
+      mutationSequenceRef.current += 1;
+      const mutationId = `unattended_skip_${Date.now()}_${mutationSequenceRef.current}`;
+      const response = await fetch(
+        `${apiBase}/turn/unattended-skip?mutationId=${encodeURIComponent(mutationId)}`,
+        { method: 'POST' },
+      );
+      if (!response.ok) throw new Error('unattended skip failed');
+      const payload = singleTurnResponseSchema.parse(await response.json());
+      const completedUnattendedRetries = unattendedRetryCountRef.current;
+      const agent = payload.snapshot.world.agents.find(
+        ({ id }) => id === payload.turn.agentId,
+      );
+      applySnapshot(payload.snapshot);
+      setRecoveryNotice(
+        `${agent?.name ?? payload.turn.agentId} lost the turn after ${completedUnattendedRetries} unattended ${completedUnattendedRetries === 1 ? 'retry' : 'retries'}. Continuing.`,
+      );
+    } catch {
+      runningRef.current = false;
+      setRunning(false);
+      setBoundedRunTarget(null);
+      boundedRunTargetRef.current = null;
+      setUiError(
+        'The failed turn could not be skipped safely. Playback stopped.',
+      );
+    } finally {
+      inFlightRef.current = false;
+      setInFlight(false);
+    }
+  }, [applySnapshot]);
+
   const cancelCurrentRequest = async () => {
     setCancelling(true);
+    runningRef.current = false;
     setRunning(false);
     setBoundedRunTarget(null);
     boundedRunTargetRef.current = null;
@@ -491,9 +648,48 @@ export function WorldLab() {
       completedTurnsRef.current >= boundedRunTargetRef.current
     )
       return;
+    const pending = snapshot?.pendingFailedTurn;
+    if (pending) {
+      if (
+        !unattendedRecoveryEnabled ||
+        !unattendedFailureEligible(pending.failure)
+      )
+        return;
+      if (unattendedRetryCountRef.current < unattendedRetryLimit) {
+        const nextRetry = unattendedRetryCountRef.current + 1;
+        const agent = snapshot.world.agents.find(
+          ({ id }) => id === pending.agentId,
+        );
+        const timer = window.setTimeout(() => {
+          if (!runningRef.current) return;
+          unattendedRetryCountRef.current = nextRetry;
+          setUnattendedRetryCount(nextRetry);
+          setRecoveryNotice(
+            `Recovering ${agent?.name ?? pending.agentId} · retry ${nextRetry} of ${unattendedRetryLimit}. Each retry may incur provider cost.`,
+          );
+          void executeTurn('unattended-retry');
+        }, speed);
+        return () => window.clearTimeout(timer);
+      }
+      const timer = window.setTimeout(
+        () => void unattendedSkipFailedTurn(),
+        speed,
+      );
+      return () => window.clearTimeout(timer);
+    }
     const timer = window.setTimeout(() => void executeTurn(), speed);
     return () => window.clearTimeout(timer);
-  }, [executeTurn, inFlight, resetting, running, snapshot?.turnNumber, speed]);
+  }, [
+    executeTurn,
+    inFlight,
+    resetting,
+    running,
+    snapshot,
+    speed,
+    unattendedRecoveryEnabled,
+    unattendedRetryLimit,
+    unattendedSkipFailedTurn,
+  ]);
 
   useEffect(() => {
     if (!snapshot?.activeAgentId || inFlight) return;
@@ -518,6 +714,7 @@ export function WorldLab() {
       )
     )
       return;
+    runningRef.current = false;
     setRunning(false);
     setBoundedRunTarget(null);
     boundedRunTargetRef.current = null;
@@ -591,7 +788,7 @@ export function WorldLab() {
   const restoreDefaultPersonalities = async () => {
     if (
       !window.confirm(
-        'Restore the milestone defaults for all eight agents? World progress will be preserved.',
+        'Restore milestone default personalities for applicable active agents? World progress will be preserved.',
       )
     )
       return;
@@ -692,6 +889,14 @@ export function WorldLab() {
   const modelsReady = snapshot.resolvedModels.every(
     ({ available }) => available,
   );
+  const unattendedCanRecoverPending = Boolean(
+    snapshot.pendingFailedTurn &&
+    unattendedRecoveryEnabled &&
+    unattendedFailureEligible(snapshot.pendingFailedTurn.failure),
+  );
+  const unattendedRecoveryActive = Boolean(
+    running && unattendedCanRecoverPending,
+  );
   const reasoningUnavailable = snapshot.resolvedModels.some(
     ({ issue }) => issue === 'reasoning-unavailable',
   );
@@ -787,6 +992,7 @@ export function WorldLab() {
               title="Pause simulation"
               type="button"
               onClick={() => {
+                runningRef.current = false;
                 setRunning(false);
                 setBoundedRunTarget(null);
                 boundedRunTargetRef.current = null;
@@ -806,10 +1012,14 @@ export function WorldLab() {
                 fullyInfected ||
                 !snapshot.providerConfigured ||
                 !modelsReady ||
-                snapshot.pendingFailedTurn !== null
+                (snapshot.pendingFailedTurn !== null &&
+                  !unattendedCanRecoverPending)
               }
               type="button"
-              onClick={() => setRunning(true)}
+              onClick={() => {
+                runningRef.current = true;
+                setRunning(true);
+              }}
             >
               <CommandIcon name="play" />
               <span className="sr-only">Start</span>
@@ -881,13 +1091,15 @@ export function WorldLab() {
                 !snapshot.providerConfigured ||
                 !modelsReady ||
                 fullyInfected ||
-                snapshot.pendingFailedTurn !== null ||
+                (snapshot.pendingFailedTurn !== null &&
+                  !unattendedCanRecoverPending) ||
                 snapshot.experiment.totalCompletedTurns >= runTarget
               }
               type="button"
               onClick={() => {
                 boundedRunTargetRef.current = runTarget;
                 setBoundedRunTarget(runTarget);
+                runningRef.current = true;
                 setRunning(true);
               }}
             >
@@ -900,6 +1112,7 @@ export function WorldLab() {
               disabled={cancelling}
               aria-busy={cancelling}
               onClick={() => {
+                runningRef.current = false;
                 setRunning(false);
                 setBoundedRunTarget(null);
                 boundedRunTargetRef.current = null;
@@ -945,7 +1158,11 @@ export function WorldLab() {
           >
             <button
               className="secondary-action"
-              disabled={!snapshot.pendingFailedTurn || inFlight}
+              disabled={
+                !snapshot.pendingFailedTurn ||
+                inFlight ||
+                unattendedRecoveryActive
+              }
               aria-hidden={!snapshot.pendingFailedTurn || inFlight}
               tabIndex={
                 snapshot.pendingFailedTurn && !inFlight ? undefined : -1
@@ -957,7 +1174,11 @@ export function WorldLab() {
             </button>
             <button
               className="secondary-action"
-              disabled={!snapshot.pendingFailedTurn || inFlight}
+              disabled={
+                !snapshot.pendingFailedTurn ||
+                inFlight ||
+                unattendedRecoveryActive
+              }
               aria-hidden={!snapshot.pendingFailedTurn || inFlight}
               tabIndex={
                 snapshot.pendingFailedTurn && !inFlight ? undefined : -1
@@ -1011,11 +1232,64 @@ export function WorldLab() {
         ) : (
           <p className="test-provider-summary">Deterministic test model</p>
         )}
-        <details className="overflow-menu">
-          <summary aria-label="More World Lab actions" title="More actions">
+        <details className="overflow-menu" ref={overflowMenuRef}>
+          <summary
+            ref={setupTriggerRef}
+            aria-label="More World Lab actions"
+            title="More actions"
+          >
             <CommandIcon name="more" />
           </summary>
           <div className="command-popover overflow-content">
+            <fieldset className="unattended-recovery-control">
+              <legend>Unattended recovery</legend>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={unattendedRecoveryEnabled}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    unattendedEnabledRef.current = enabled;
+                    setUnattendedRecoveryEnabled(enabled);
+                  }}
+                />
+                Enable for continuous playback
+              </label>
+              <label>
+                Retry limit
+                <select
+                  aria-label="Unattended retry limit"
+                  value={unattendedRetryLimit}
+                  onChange={(event) => {
+                    const limit = Number(event.target.value) as 1 | 2 | 3;
+                    unattendedRetryLimitRef.current = limit;
+                    setUnattendedRetryLimit(limit);
+                  }}
+                >
+                  <option value={1}>1 retry</option>
+                  <option value={2}>2 retries</option>
+                  <option value={3}>3 retries</option>
+                </select>
+              </label>
+              <p>
+                While continuous playback is active, retry a failed model turn
+                up to this limit, then skip the turn and continue. Each retry
+                may incur provider cost. The World Lab tab must remain open.
+              </p>
+            </fieldset>
+            <button
+              type="button"
+              aria-label="World setup"
+              disabled={inFlight || resetting || running}
+              onClick={() => {
+                if (overflowMenuRef.current)
+                  overflowMenuRef.current.open = false;
+                setSetupOpen(true);
+              }}
+            >
+              <CommandIcon name="map" />
+              <span>World setup</span>
+            </button>
             <label className="speed-control">
               Playback speed
               <select
@@ -1041,6 +1315,11 @@ export function WorldLab() {
         </details>
       </header>
       <div className="command-alerts">
+        {recoveryNotice && (
+          <div className="command-alert recovery-notice" role="status">
+            {recoveryNotice}
+          </div>
+        )}
         {(!modelsReady || uiError || fullyInfected || personalityNotice) && (
           <div className="command-alert" role="alert">
             {uiError ??
@@ -1069,6 +1348,30 @@ export function WorldLab() {
         onSelectionChange={setExportAgentIds}
         returnFocusRef={exportTriggerRef}
       />
+      {setupOpen && (
+        <WorldSetupPanel
+          open
+          snapshot={snapshot}
+          apiBase={apiBase}
+          returnFocusRef={setupTriggerRef}
+          onClose={() => setSetupOpen(false)}
+          onApplied={(next) => {
+            setSnapshot(next);
+            setSelectedCell(null);
+            setSelectedAgentId((selected) =>
+              next.world.agents.some(({ id }) => id === selected)
+                ? selected
+                : null,
+            );
+            setExportAgentIds((selected) =>
+              selected.filter((id) =>
+                next.world.agents.some((agent) => agent.id === id),
+              ),
+            );
+            setSetupOpen(false);
+          }}
+        />
+      )}
 
       <div className="workspace">
         <AgentRoster
@@ -1080,8 +1383,8 @@ export function WorldLab() {
         />
         <section className="map-panel" aria-label="Development world map">
           <WorldMap
-            latitude={latitude}
-            longitude={longitude}
+            latitude={snapshot.scenario.center.latitude}
+            longitude={snapshot.scenario.center.longitude}
             hexes={snapshot.world.hexes}
             agents={snapshot.world.agents}
             alliances={snapshot.world.alliances}
@@ -1103,9 +1406,15 @@ export function WorldLab() {
             />
           )}
           <div className="map-caption">
-            <span>Development location: Toledo, Ohio</span>
             <span>
-              H3 resolution {resolution} · {snapshot.world.hexes.length} cells
+              Development location:{' '}
+              {snapshot.scenario.locationLabel ??
+                `${snapshot.scenario.center.latitude}, ${snapshot.scenario.center.longitude}`}
+            </span>
+            <span>
+              H3 resolution {snapshot.scenario.resolution} ·{' '}
+              {snapshot.scenario.exactCellCount} cells ·{' '}
+              {snapshot.scenario.areaSquareKilometers.toFixed(2)} km²
             </span>
           </div>
         </section>
@@ -1255,7 +1564,8 @@ function HexMapPopup({
 function CommandIcon({
   name,
 }: {
-  name: 'play' | 'pause' | 'step' | 'reset' | 'target' | 'export' | 'more';
+  name:
+    'play' | 'pause' | 'step' | 'reset' | 'target' | 'map' | 'export' | 'more';
 }) {
   const path = {
     play: 'M8 5v14l11-7z',
@@ -1264,13 +1574,567 @@ function CommandIcon({
     reset: 'M6.3 7.8A7 7 0 1 1 5 14h2a5 5 0 1 0 1-3l3 3H4V7z',
     target:
       'M12 2v3m0 14v3M2 12h3m14 0h3m-5 0a5 5 0 1 1-10 0 5 5 0 0 1 10 0zm-3 0a2 2 0 1 1-4 0 2 2 0 0 1 4 0z',
+    map: 'M3 6.5 8.5 4l7 2.5L21 4v13.5L15.5 20l-7-2.5L3 20zm5.5-2.5v13.5m7-11V20',
     export: 'M12 3v12m-5-5 5 5 5-5M5 17v3h14v-3',
     more: 'M5 12h.01M12 12h.01M19 12h.01',
   }[name];
   return (
-    <svg className="command-icon" viewBox="0 0 24 24" aria-hidden="true">
+    <svg
+      className="command-icon"
+      data-icon={name}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
       <path d={path} />
     </svg>
+  );
+}
+
+function WorldSetupPanel({
+  open,
+  snapshot,
+  apiBase,
+  returnFocusRef,
+  onClose,
+  onApplied,
+}: {
+  open: boolean;
+  snapshot: SimulationSnapshot;
+  apiBase: string;
+  returnFocusRef: { current: HTMLElement | null };
+  onClose: () => void;
+  onApplied: (snapshot: SimulationSnapshot) => void;
+}) {
+  const initialDraft = useMemo<WorldSetupRequest>(() => {
+    const scenario = snapshot.scenario;
+    return structuredClone({
+      scenarioVersion: scenario.scenarioVersion,
+      locationLabel: scenario.locationLabel,
+      center: scenario.center,
+      resolution: scenario.resolution,
+      radius: scenario.radius,
+      worldSeed: scenario.worldSeed,
+      rosterSeed: scenario.rosterSeed,
+      spawnSeed: scenario.spawnSeed,
+      minimumSpawnSeparation: scenario.minimumSpawnSeparation,
+      roster: scenario.roster,
+      modelConfiguration: scenario.modelConfiguration,
+      behaviorConfiguration: scenario.behaviorConfiguration,
+      objectiveVersion: scenario.objectiveVersion,
+      capabilities: scenario.capabilities,
+    });
+  }, [snapshot.scenario]);
+  const [draft, setDraft] = useState(initialDraft);
+  const [preview, setPreview] = useState<WorldSetupPreviewResponse | null>(
+    null,
+  );
+  const [previewKey, setPreviewKey] = useState('');
+  const [pending, setPending] = useState<
+    'preview' | 'apply' | 'roster' | 'search' | null
+  >(null);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [desiredAgentCount, setDesiredAgentCount] = useState(
+    initialDraft.roster.length,
+  );
+  const [locations, setLocations] = useState<
+    Array<{ label: string; latitude: number; longitude: number }>
+  >([]);
+  const key = JSON.stringify(draft);
+  const fresh = previewKey === key;
+  const reconcileBehaviorAssignments = (
+    roster: WorldSetupRequest['roster'],
+    configuration: WorldSetupRequest['behaviorConfiguration'],
+    mode = configuration.assignmentMode,
+  ) => {
+    const generated = assignBehavior(
+      roster.map(({ id }) => id),
+      configuration.seed,
+      mode === 'manual' ? 'balanced-random' : mode,
+    );
+    if (mode !== 'manual') return generated;
+    return generated.map((fallback) => ({
+      ...(configuration.assignments.find(
+        ({ agentId }) => agentId === fallback.agentId,
+      ) ?? fallback),
+      manual: true,
+    }));
+  };
+  const replaceRoster = (roster: WorldSetupRequest['roster']) =>
+    setDraft((current) => {
+      const ids = new Set(roster.map(({ id }) => id));
+      return {
+        ...current,
+        roster,
+        modelConfiguration: {
+          ...current.modelConfiguration,
+          overrides: current.modelConfiguration.overrides.filter(
+            ({ agentId }) => ids.has(agentId),
+          ),
+        },
+        behaviorConfiguration: {
+          ...current.behaviorConfiguration,
+          assignments: reconcileBehaviorAssignments(
+            roster,
+            current.behaviorConfiguration,
+          ),
+        },
+      };
+    });
+  const generateRoster = async (count: number, appendOnly = false) => {
+    setPending('roster');
+    setError(null);
+    try {
+      const response = await fetch(
+        `${apiBase}/experiment/setup/roster/generate`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ count, seed: draft.rosterSeed }),
+        },
+      );
+      if (!response.ok) throw new Error('Roster generation failed.');
+      const generated = generatedAgentResponseSchema.parse(
+        await response.json(),
+      ).roster;
+      replaceRoster(
+        appendOnly ? [...draft.roster, generated.at(-1)!] : generated,
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : 'Roster generation failed.',
+      );
+    } finally {
+      setPending(null);
+    }
+  };
+  const doPreview = async () => {
+    setPending('preview');
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}/experiment/setup/preview`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: key,
+      });
+      if (!response.ok) throw new Error('Scenario preview failed.');
+      setPreview(worldSetupPreviewResponseSchema.parse(await response.json()));
+      setPreviewKey(key);
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : 'Scenario preview failed.',
+      );
+    } finally {
+      setPending(null);
+    }
+  };
+  const apply = async () => {
+    if (!preview?.feasible || !fresh) return;
+    if (
+      snapshot.experiment.totalCompletedTurns > 0 &&
+      !window.confirm(
+        'Create a new experiment and discard non-exported telemetry?',
+      )
+    )
+      return;
+    setPending('apply');
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}/experiment/setup`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-agentborne-mutation-id': `setup-${Date.now()}`,
+        },
+        body: key,
+      });
+      if (!response.ok) throw new Error('Scenario application failed.');
+      onApplied(
+        applyWorldSetupResponseSchema.parse(await response.json()).snapshot,
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : 'Scenario application failed.',
+      );
+    } finally {
+      setPending(null);
+    }
+  };
+  const search = async () => {
+    setPending('search');
+    setError(null);
+    try {
+      const response = await fetch(
+        `${apiBase}/experiment/setup/location-search`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ query }),
+        },
+      );
+      if (!response.ok) throw new Error('Location search failed.');
+      const result = locationSearchResponseSchema.parse(await response.json());
+      setLocations(result.results);
+      if (result.warning) setError(result.warning.message);
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : 'Location search failed.',
+      );
+    } finally {
+      setPending(null);
+    }
+  };
+  const restoreDefault = async () => {
+    setPending('roster');
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}/experiment/setup/default`);
+      if (!response.ok) throw new Error('Default scenario is unavailable.');
+      setDraft(
+        defaultWorldSetupResponseSchema.parse(await response.json()).request,
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'Default scenario is unavailable.',
+      );
+    } finally {
+      setPending(null);
+    }
+  };
+  return (
+    <DialogShell
+      open={open}
+      title="World Setup"
+      description="Create a reproducible authoritative experiment."
+      label="World Setup"
+      className="world-setup-dialog"
+      returnFocusRef={returnFocusRef}
+      onClose={pending === 'apply' ? () => {} : onClose}
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={() => void doPreview()}
+            disabled={pending !== null}
+          >
+            Preview
+          </button>
+          <button
+            type="button"
+            onClick={() => void apply()}
+            disabled={pending !== null || !fresh || !preview?.feasible}
+          >
+            {pending === 'apply' ? 'Applying…' : 'Apply / Create Experiment'}
+          </button>
+        </>
+      }
+    >
+      <section className="setup-section">
+        <h3>World</h3>
+        <button
+          type="button"
+          disabled={pending !== null}
+          onClick={() => void restoreDefault()}
+        >
+          Restore Default Scenario
+        </button>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void search();
+          }}
+        >
+          <label>
+            Location search
+            <input
+              value={query}
+              maxLength={120}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <button disabled={pending !== null || query.trim().length < 2}>
+            Search
+          </button>
+        </form>
+        {locations.length > 0 && (
+          <div>
+            <p>© OpenStreetMap contributors</p>
+            {locations.map((location) => (
+              <button
+                type="button"
+                key={`${location.latitude}:${location.longitude}`}
+                onClick={() =>
+                  setDraft((current) => ({
+                    ...current,
+                    locationLabel: location.label,
+                    center: {
+                      latitude: location.latitude,
+                      longitude: location.longitude,
+                    },
+                  }))
+                }
+              >
+                {location.label}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="setup-grid">
+          <label>
+            Latitude
+            <input
+              type="number"
+              step="any"
+              value={draft.center.latitude}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  center: {
+                    ...draft.center,
+                    latitude: Number(event.target.value),
+                  },
+                })
+              }
+            />
+          </label>
+          <label>
+            Longitude
+            <input
+              type="number"
+              step="any"
+              value={draft.center.longitude}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  center: {
+                    ...draft.center,
+                    longitude: Number(event.target.value),
+                  },
+                })
+              }
+            />
+          </label>
+          <label>
+            H3 resolution
+            <select
+              value={draft.resolution}
+              onChange={(event) =>
+                setDraft({ ...draft, resolution: Number(event.target.value) })
+              }
+            >
+              {[8, 9, 10, 11].map((value) => (
+                <option key={value}>{value}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Radius
+            <select
+              value={draft.radius}
+              onChange={(event) =>
+                setDraft({ ...draft, radius: Number(event.target.value) })
+              }
+            >
+              {Object.entries(WORLD_RADIUS_PRESETS).map(([name, preset]) => (
+                <option key={name} value={preset.radius}>
+                  {name} · normally {preset.expectedCellCount}
+                </option>
+              ))}
+              <option value={draft.radius}>Custom · {draft.radius}</option>
+            </select>
+          </label>
+          <label>
+            Custom radius
+            <input
+              type="number"
+              min="0"
+              max="40"
+              value={draft.radius}
+              onChange={(event) =>
+                setDraft({ ...draft, radius: Number(event.target.value) })
+              }
+            />
+          </label>
+          <label>
+            Spawn seed
+            <input
+              value={draft.spawnSeed}
+              onChange={(event) =>
+                setDraft({ ...draft, spawnSeed: event.target.value })
+              }
+            />
+          </label>
+          <label>
+            Minimum spawn separation
+            <input
+              type="number"
+              min="0"
+              value={draft.minimumSpawnSeparation}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  minimumSpawnSeparation: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+        </div>
+      </section>
+      <section className="setup-section">
+        <h3>Roster · {draft.roster.length}</h3>
+        <label>
+          Desired agent count
+          <input
+            aria-label="Desired agent count"
+            type="number"
+            min="1"
+            max="32"
+            value={desiredAgentCount}
+            onChange={(event) =>
+              setDesiredAgentCount(Number(event.target.value))
+            }
+          />
+        </label>
+        <label>
+          Roster seed
+          <input
+            value={draft.rosterSeed}
+            onChange={(event) =>
+              setDraft({ ...draft, rosterSeed: event.target.value })
+            }
+          />
+        </label>
+        <button
+          type="button"
+          disabled={
+            desiredAgentCount < 1 || desiredAgentCount > 32 || pending !== null
+          }
+          onClick={() => void generateRoster(desiredAgentCount)}
+        >
+          Generate desired roster
+        </button>
+        <button
+          type="button"
+          disabled={draft.roster.length >= 32 || pending !== null}
+          onClick={() => void generateRoster(draft.roster.length + 1, true)}
+        >
+          Add generated agent
+        </button>
+        <button
+          type="button"
+          disabled={pending !== null}
+          onClick={() => void generateRoster(draft.roster.length)}
+        >
+          Regenerate roster
+        </button>
+        <div className="setup-roster">
+          {draft.roster.map((agent, index) => (
+            <div key={agent.id}>
+              <input
+                aria-label={`Agent ${index + 1} name`}
+                value={agent.name}
+                onChange={(event) =>
+                  replaceRoster(
+                    draft.roster.map((item) =>
+                      item.id === agent.id
+                        ? { ...item, name: event.target.value }
+                        : item,
+                    ),
+                  )
+                }
+              />
+              <input
+                aria-label={`${agent.name} color`}
+                type="color"
+                value={agent.color}
+                onChange={(event) =>
+                  replaceRoster(
+                    draft.roster.map((item) =>
+                      item.id === agent.id
+                        ? { ...item, color: event.target.value }
+                        : item,
+                    ),
+                  )
+                }
+              />
+              <button
+                type="button"
+                disabled={draft.roster.length <= 1}
+                onClick={() =>
+                  replaceRoster(
+                    draft.roster.filter(({ id }) => id !== agent.id),
+                  )
+                }
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="setup-section">
+        <h3>Assignments</h3>
+        <label>
+          Behavior mode
+          <select
+            value={draft.behaviorConfiguration.assignmentMode}
+            onChange={(event) => {
+              const mode = event.target
+                .value as WorldSetupRequest['behaviorConfiguration']['assignmentMode'];
+              setDraft({
+                ...draft,
+                behaviorConfiguration: {
+                  ...draft.behaviorConfiguration,
+                  assignmentMode: mode,
+                  assignments: reconcileBehaviorAssignments(
+                    draft.roster,
+                    draft.behaviorConfiguration,
+                    mode,
+                  ),
+                },
+              });
+            }}
+          >
+            <option value="balanced-random">Balanced random</option>
+            <option value="fully-random">Fully random</option>
+            <option value="manual">Manual</option>
+          </select>
+        </label>
+        <p>
+          Model and reasoning assignments are shared with Agent Controller and
+          preserved unless an agent is removed.
+        </p>
+      </section>
+      <section className="setup-section">
+        <h3>Preview</h3>
+        {!fresh && <p>Preview required after setup changes.</p>}
+        {fresh && preview?.feasible && (
+          <>
+            <p>
+              {preview.scenario.exactCellCount.toLocaleString()} exact cells ·{' '}
+              {preview.scenario.areaSquareKilometers.toFixed(2)} km² ·{' '}
+              {preview.scenario.startingCells.length} valid spawns
+            </p>
+            {preview.scenario.setupWarnings.map((warning) => (
+              <p role="status" key={warning.code}>
+                {warning.message}
+              </p>
+            ))}
+          </>
+        )}
+        {fresh &&
+          preview &&
+          !preview.feasible &&
+          preview.errors.map((issue) => (
+            <p role="alert" key={issue.code}>
+              {issue.message}
+            </p>
+          ))}
+        {error && <p role="alert">{error}</p>}
+      </section>
+    </DialogShell>
   );
 }
 
@@ -1293,7 +2157,7 @@ function DialogShell({
   label: string;
   closeLabel?: string;
   className?: string;
-  returnFocusRef?: { current: HTMLButtonElement | null };
+  returnFocusRef?: { current: HTMLElement | null };
   headerActions?: ReactNode;
   footer?: ReactNode;
   onClose: () => void;
@@ -1416,6 +2280,11 @@ function ModelConsole({
       ]
     : undefined;
   const globalReasoningProfiles = reasoningProfilesForModel(selected);
+  const activeAgentIds = new Set(snapshot.scenario.roster.map(({ id }) => id));
+  const readyAgentCount = snapshot.resolvedModels.filter(
+    ({ agentId, available }) => available && activeAgentIds.has(agentId),
+  ).length;
+  const activeAgentCount = snapshot.scenario.roster.length;
 
   const save = (next: Omit<ExperimentModelConfiguration, 'locked'>) =>
     void onUpdate(next);
@@ -1429,13 +2298,11 @@ function ModelConsole({
         ref={toggleRef}
         type="button"
         title={`Agent setup · ${selected?.name ?? configuration.globalModelId ?? 'model needed'}`}
-        aria-label={`Open Agent Controller. ${snapshot.resolvedModels.filter(({ available }) => available).length} of 8 agents ready. Global model ${selected?.name ?? configuration.globalModelId ?? 'not selected'}.`}
+        aria-label={`Open Agent Controller. ${readyAgentCount} of ${activeAgentCount} agents ready. Global model ${selected?.name ?? configuration.globalModelId ?? 'not selected'}.`}
         onClick={() => (open ? close() : setOpen(true))}
       >
         <span className="setup-label">
-          Agent setup ·
-          {snapshot.resolvedModels.filter(({ available }) => available).length}
-          /8 ready
+          Agent setup ·{readyAgentCount}/{activeAgentCount} ready
         </span>
         <span className="setup-model">
           Model: {selected?.name ?? configuration.globalModelId ?? 'needed'}
@@ -3609,7 +4476,7 @@ function EventLog({
           {turns.length === 0 ? (
             <li>
               <time>Initial</time>
-              <span>Development world loaded with eight agents.</span>
+              <span>Development world loaded with {agents.length} agents.</span>
             </li>
           ) : (
             turns

@@ -57,6 +57,10 @@ Eighth focused slice: add versioned objective/personality/strategy prompt layers
 
 Ninth focused slice: consolidate World Lab controls into one responsive command navbar, add browser-session absolute run targets through turn 1,000, make export generation explicitly artifact-based, unify model-option presentation, synchronize effective alliance colors across activity surfaces, and adopt a tokenless dark basemap plus semantic dark chrome. Simulation rules, model decisions, retry behavior, telemetry meaning, and export contents remain unchanged.
 
+Tenth focused slice: add versioned configurable World Lab scenarios, actual H3 geometry preview, deterministic 1–32-agent rosters and separated spawns, current-scenario reset, a replaceable location-search boundary, `durable-influence-v1` attribution, and schema-v9 exports.
+
+Temporary experiment hardening adds explicitly opted-in browser-lifetime unattended recovery with one to three one-call retries and one attributed skip. It does not replace the future server-owned scheduler or simultaneous-tick recovery policy.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.
