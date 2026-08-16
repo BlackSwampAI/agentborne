@@ -1,4 +1,4 @@
-import { gridDistance, gridDisk } from 'h3-js';
+import { gridDisk, gridDistance } from 'h3-js';
 import {
   AgentProviderError,
   type AgentProvider,
@@ -68,6 +68,7 @@ import {
   getCaptureEligibility,
   getAgentAlliance,
   getEffectiveAgentColor,
+  physicalDistanceKm,
   expireAllianceProposals,
   toWorldState,
   type WorldState,
@@ -1070,6 +1071,7 @@ export class SimulationService {
         createEventId: this.#createEventId,
         createAllianceId: this.#createAllianceId,
         createProposalId: this.#createProposalId,
+        communicationRangeKm: this.#scenario.communicationRangeKm,
       };
       const appliedAction = applyWorldAction(
         preActionState,
@@ -1397,20 +1399,62 @@ export class SimulationService {
       .filter((cell) => cell !== agent.currentCell)
       .map((cell) => h3CellSchema.parse(cell))
       .filter((cell) => this.#state.hexes.has(cell))
-      .map(stateFor);
+      .map(stateFor)
+      .toSorted(
+        (a, b) =>
+          stableOrder(
+            `${this.#scenario.worldSeed}:${agent.id}:${this.#completedTurnCount + 1}:${a.cell}`,
+          ) -
+          stableOrder(
+            `${this.#scenario.worldSeed}:${agent.id}:${this.#completedTurnCount + 1}:${b.cell}`,
+          ),
+      );
+    const recentMovements = this.#state.events
+      .filter(
+        (event): event is Extract<WorldEvent, { type: 'agent-moved' }> =>
+          event.type === 'agent-moved' && event.agentId === agent.id,
+      )
+      .slice(-6)
+      .map(({ fromCell, toCell, occurredAt }) => ({
+        fromCell,
+        toCell,
+        occurredAt,
+      }));
     const captureEligibility = getCaptureEligibility(this.#state, agent.id);
+    const actingAlliance = getAgentAlliance(this.#state, agent.id);
+    const territory = this.#territoryScoreboard();
     const nearbyAgents = [...this.#state.agents.values()]
       .filter((candidate) => candidate.id !== agent.id)
       .map((candidate) => ({
         id: candidate.id,
         name: candidate.name,
         currentCell: candidate.currentCell,
-        distance: safeDistance(agent.currentCell, candidate.currentCell),
+        distanceKm:
+          physicalDistanceKm(agent.currentCell, candidate.currentCell) ??
+          Number.POSITIVE_INFINITY,
+        distance: gridRingDistance(agent.currentCell, candidate.currentCell),
         allianceId: getAgentAlliance(this.#state, candidate.id)?.id ?? null,
+        allianceRelationship: actingAlliance?.memberAgentIds.includes(
+          candidate.id,
+        )
+          ? ('allied' as const)
+          : ('not-allied' as const),
+        controlledCellCount:
+          territory.find(({ agentId }) => agentId === candidate.id)
+            ?.controlledCellCount ?? 0,
       }))
-      .filter(({ distance }) => distance <= 4)
-      .sort((a, b) => a.distance - b.distance || a.id.localeCompare(b.id))
-      .slice(0, 7);
+      .filter(
+        ({ distanceKm, allianceRelationship }) =>
+          allianceRelationship === 'allied' ||
+          distanceKm <= this.#scenario.communicationRangeKm,
+      )
+      .map((entry) => ({
+        ...entry,
+        directMessageLegal:
+          entry.distanceKm <= this.#scenario.communicationRangeKm,
+      }))
+      .sort((a, b) => a.distanceKm - b.distanceKm || a.id.localeCompare(b.id))
+      .slice(0, 8);
     const recentEvents = this.#state.events
       .filter(
         (
@@ -1479,6 +1523,28 @@ export class SimulationService {
           distance: event.distance,
         } as const;
       });
+    const recentAllianceMessages = this.#state.events
+      .filter(
+        (
+          event,
+        ): event is Extract<WorldEvent, { type: 'alliance-message-sent' }> =>
+          event.type === 'alliance-message-sent' &&
+          (event.agentId === agent.id || event.recipientIds.includes(agent.id)),
+      )
+      .slice(-RECENT_DIRECT_MESSAGE_LIMIT)
+      .map((event) => {
+        const sender = this.#state.agents.get(event.agentId);
+        if (!sender)
+          throw new Error('An alliance-message sender does not exist.');
+        return {
+          eventId: event.id,
+          senderId: sender.id,
+          senderName: sender.name,
+          allianceId: event.allianceId,
+          message: event.message,
+          occurredAt: event.occurredAt,
+        };
+      });
     const recentControlChanges = this.#state.events
       .filter(
         (event): event is Extract<WorldEvent, { type: 'hex-captured' }> =>
@@ -1513,6 +1579,35 @@ export class SimulationService {
       captureEligibility,
       actionAvailability: {
         moveTargetCellIds: adjacentCells.map(({ cell }) => cell),
+        moveOptions: adjacentCells.map((destination) => {
+          const controllerAlliance = destination.controllerAgentId
+            ? getAgentAlliance(this.#state, destination.controllerAgentId)
+            : undefined;
+          const relationship =
+            destination.state === 'open'
+              ? ('open' as const)
+              : destination.controllerAgentId === agent.id
+                ? ('self' as const)
+                : actingAlliance && controllerAlliance?.id === actingAlliance.id
+                  ? ('allied' as const)
+                  : ('other' as const);
+          const directions = ['N', 'NE', 'SE', 'S', 'SW', 'NW'] as const;
+          const canonicalIndex = gridDisk(agent.currentCell, 1)
+            .filter((cell) => cell !== agent.currentCell)
+            .indexOf(destination.cell);
+          return {
+            targetCell: destination.cell,
+            direction: directions[Math.max(0, canonicalIndex)]!,
+            destinationState: destination.state,
+            controllerRelationship: relationship,
+            recentlyOccupied: recentMovements.some(
+              ({ toCell }) => toCell === destination.cell,
+            ),
+            nearbyAgentCount: nearbyAgents.filter(
+              ({ currentCell }) => currentCell === destination.cell,
+            ).length,
+          };
+        }),
         infect:
           this.#state.hexes.get(agent.currentCell)?.state === 'open'
             ? { available: true }
@@ -1526,11 +1621,23 @@ export class SimulationService {
         wait: { available: true },
       },
       diplomacyAvailability: this.#diplomacyAvailability(agent.id),
+      communicationAvailability: {
+        public: { available: true, playerVisible: true },
+        direct: {
+          eligibleRecipientAgentIds: nearbyAgents
+            .filter(({ directMessageLegal }) => directMessageLegal)
+            .map(({ id }) => id),
+        },
+        alliance: actingAlliance
+          ? { available: true, allianceId: actingAlliance.id }
+          : { available: false, allianceId: null },
+      },
       adjacentCells,
       nearbyAgents,
       recentEvents,
       recentPublicMessages,
       recentDirectMessages,
+      recentAllianceMessages,
       territoryScoreboard: this.#territoryScoreboard(),
       actingAllianceId: getAgentAlliance(this.#state, agent.id)?.id ?? null,
       actingAlliance:
@@ -1553,6 +1660,7 @@ export class SimulationService {
           summary: summarizeAllianceEvent(event, this.#state),
         })),
       recentControlChanges,
+      recentMovements,
     });
   }
 
@@ -1662,7 +1770,10 @@ export class SimulationService {
 
 function isAllianceEvent(event: WorldEvent): event is AllianceEvent {
   return (
-    event.type.startsWith('alliance-') ||
+    event.type === 'alliance-proposed' ||
+    event.type === 'alliance-proposal-closed' ||
+    event.type === 'alliance-formed' ||
+    event.type === 'alliance-dissolved' ||
     event.type === 'agent-joined-alliance' ||
     event.type === 'agent-left-alliance'
   );
@@ -1675,11 +1786,20 @@ function allianceEventsSince(
   return after.events.slice(before.events.length).filter(isAllianceEvent);
 }
 
-function safeDistance(from: H3Cell, to: H3Cell): number {
+function stableOrder(input: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function gridRingDistance(from: H3Cell, to: H3Cell): number {
   try {
     return gridDistance(from, to);
   } catch {
-    return 99;
+    return 999;
   }
 }
 

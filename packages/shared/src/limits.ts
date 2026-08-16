@@ -8,6 +8,9 @@ export const WORLD_SCENARIO_LIMITS = {
   maximumAllianceMembers: 8,
   highDensityCellsPerAgent: 10,
   observedOtherAgents: 7,
+  maximumNearbyAgentObservations: 8,
+  minimumCommunicationRangeKm: 0.1,
+  maximumCommunicationRangeKm: 100,
 } as const;
 
 export const WORLD_RADIUS_PRESETS = {

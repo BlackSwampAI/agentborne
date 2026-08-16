@@ -17,7 +17,11 @@ import {
   type CompatibleModel,
   type WorldEvent,
 } from '@agentborne/shared';
-import { DEVELOPMENT_AGENT_BLUEPRINTS } from '@agentborne/world-engine';
+import {
+  DEVELOPMENT_AGENT_BLUEPRINTS,
+  defaultWorldSetupRequest,
+  physicalDistanceKm,
+} from '@agentborne/world-engine';
 import {
   SimulationConflictError,
   SimulationService,
@@ -78,6 +82,49 @@ function exportRequest(level: 'minimal' | 'standard' | 'full-safe' | 'custom') {
 }
 
 describe('SimulationService', () => {
+  it('preserves the default and custom physical communication range', () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
+      ]),
+    );
+    expect(simulation.getSnapshot().scenario.communicationRangeKm).toBe(12);
+    const request = defaultWorldSetupRequest();
+    const applied = simulation.applyWorldSetup({
+      ...request,
+      communicationRangeKm: 7.5,
+    });
+    expect(applied.scenario.communicationRangeKm).toBe(7.5);
+  });
+
+  it('reproduces move ordering for identical inputs and varies it across agents', async () => {
+    const provider = () =>
+      new ScriptedAgentProvider(
+        Array.from({ length: 8 }, () => ({
+          worldAction: { type: 'wait' as const },
+          summary: 'Wait.',
+        })),
+      );
+    const first = service(provider());
+    const second = service(provider());
+    const firstOrders: string[] = [];
+    const secondOrders: string[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      firstOrders.push(
+        (
+          await first.executeNextTurn()
+        ).observation.actionAvailability.moveTargetCellIds.join(','),
+      );
+      secondOrders.push(
+        (
+          await second.executeNextTurn()
+        ).observation.actionAvailability.moveTargetCellIds.join(','),
+      );
+    }
+    expect(firstOrders).toEqual(secondOrders);
+    expect(new Set(firstOrders).size).toBeGreaterThan(1);
+  });
+
   it('derives compact action availability from the same authoritative world state', async () => {
     const simulation = service(
       new ScriptedAgentProvider([
@@ -85,12 +132,15 @@ describe('SimulationService', () => {
       ]),
     );
     const turn = await simulation.executeNextTurn();
-    expect(turn.observation.actionAvailability).toEqual({
+    expect(turn.observation.actionAvailability).toMatchObject({
       moveTargetCellIds: turn.observation.adjacentCells.map(({ cell }) => cell),
       infect: { available: true },
       capture: { available: false, reason: 'capture-open-cell' },
       wait: { available: true },
     });
+    expect(turn.observation.actionAvailability.moveOptions).toHaveLength(
+      turn.observation.adjacentCells.length,
+    );
     expect(turn.outcome).toBe('accepted');
     if (
       turn.outcome === 'provider-error' ||
@@ -1623,13 +1673,16 @@ describe('SimulationService', () => {
         },
       ]),
     );
+    const initialPhysicalDistance = physicalDistanceKm(
+      sender.currentCell,
+      recipient.currentCell,
+    )!;
     const turn = await simulation.executeNextTurn();
     expect(turn).toMatchObject({
       outcome: 'accepted',
       communicationResult: {
-        accepted: false,
-        reason: 'out-of-range',
-        attempt: { distance: initialDistance },
+        accepted: true,
+        event: { distance: initialPhysicalDistance },
       },
     });
     expect(simulation.getSnapshot().world.agents[0]?.currentCell).toBe(

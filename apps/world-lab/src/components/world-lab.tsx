@@ -95,9 +95,31 @@ export function WorldLab() {
     'scoreboard' | 'agent' | 'hex' | 'run'
   >('agent');
   const [activityTab, setActivityTab] = useState<
-    'chat' | 'events' | 'recovery'
+    'chat' | 'private' | 'events' | 'recovery'
   >('chat');
   const [snapshot, setSnapshot] = useState<SimulationSnapshot | null>(null);
+  const [privateCommsUnread, setPrivateCommsUnread] = useState(0);
+  const privateCommCount =
+    snapshot?.world.events.filter(
+      (event) =>
+        event.type === 'direct-message-sent' ||
+        event.type === 'alliance-message-sent',
+    ).length ?? 0;
+  const previousPrivateCommCount = useRef<number | null>(null);
+  useEffect(() => {
+    if (previousPrivateCommCount.current === null) {
+      if (snapshot) previousPrivateCommCount.current = privateCommCount;
+      return;
+    }
+    const added = Math.max(
+      0,
+      privateCommCount - previousPrivateCommCount.current,
+    );
+    if (activityTab !== 'private' && added)
+      setPrivateCommsUnread((count) => count + added);
+    if (activityTab === 'private') setPrivateCommsUnread(0);
+    previousPrivateCommCount.current = privateCommCount;
+  }, [activityTab, privateCommCount, snapshot]);
   const [selectedCell, setSelectedCell] = useState<H3Cell | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId | null>(null);
   const [running, setRunning] = useState(false);
@@ -1569,22 +1591,29 @@ export function WorldLab() {
                 role="tablist"
                 aria-label="Activity views"
               >
-                {(['chat', 'events', 'recovery'] as const).map((tab) => (
-                  <button
-                    key={tab}
-                    type="button"
-                    role="tab"
-                    aria-selected={activityTab === tab}
-                    aria-controls={`activity-${tab}`}
-                    onClick={() => setActivityTab(tab)}
-                  >
-                    {tab === 'chat'
-                      ? 'Public chat'
-                      : tab === 'events'
-                        ? 'Event log'
-                        : 'Failures & recovery'}
-                  </button>
-                ))}
+                {(['chat', 'private', 'events', 'recovery'] as const).map(
+                  (tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      role="tab"
+                      aria-selected={activityTab === tab}
+                      aria-controls={`activity-${tab}`}
+                      onClick={() => {
+                        setActivityTab(tab);
+                        if (tab === 'private') setPrivateCommsUnread(0);
+                      }}
+                    >
+                      {tab === 'chat'
+                        ? 'Public chat'
+                        : tab === 'private'
+                          ? `Private comms${privateCommsUnread ? ` (${privateCommsUnread})` : ''}`
+                          : tab === 'events'
+                            ? 'Event log'
+                            : 'Failures & recovery'}
+                    </button>
+                  ),
+                )}
               </div>
               <button
                 type="button"
@@ -1602,6 +1631,12 @@ export function WorldLab() {
                 turns={snapshot.turns}
                 collapsed={false}
                 onCollapsedChange={setChatCollapsed}
+              />
+            )}
+            {!chatCollapsed && activityTab === 'private' && (
+              <PrivateComms
+                snapshot={snapshot}
+                onSelectAgent={selectAgentForInspection}
               />
             )}
             {!chatCollapsed && activityTab === 'events' && (
@@ -2010,6 +2045,7 @@ function WorldSetupPanel({
       rosterSeed: scenario.rosterSeed,
       spawnSeed: scenario.spawnSeed,
       minimumSpawnSeparation: scenario.minimumSpawnSeparation,
+      communicationRangeKm: scenario.communicationRangeKm,
       roster: scenario.roster,
       modelConfiguration: scenario.modelConfiguration,
       behaviorConfiguration: scenario.behaviorConfiguration,
@@ -2369,6 +2405,22 @@ function WorldSetupPanel({
                 setDraft({
                   ...draft,
                   minimumSpawnSeparation: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label>
+            Communication range (km)
+            <input
+              type="number"
+              min="0.1"
+              max="100"
+              step="0.1"
+              value={draft.communicationRangeKm}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  communicationRangeKm: Number(event.target.value),
                 })
               }
             />
@@ -3364,6 +3416,176 @@ function AgentRoster({
   );
 }
 
+function PrivateComms({
+  snapshot,
+  onSelectAgent,
+}: {
+  snapshot: SimulationSnapshot;
+  onSelectAgent: (agentId: AgentId) => void;
+}) {
+  const [filter, setFilter] = useState<'all' | 'direct' | 'alliance'>('all');
+  const messages = snapshot.world.events
+    .filter(
+      (
+        event,
+      ): event is Extract<
+        SimulationSnapshot['world']['events'][number],
+        { type: 'direct-message-sent' | 'alliance-message-sent' }
+      > =>
+        event.type === 'direct-message-sent' ||
+        event.type === 'alliance-message-sent',
+    )
+    .filter((event) => filter === 'all' || event.channel === filter)
+    .toReversed()
+    .slice(0, 120);
+  const rejections = snapshot.turns
+    .filter(
+      (turn) =>
+        turn.outcome !== 'provider-error' &&
+        turn.outcome !== 'operator-skipped' &&
+        turn.communicationResult.requested &&
+        !turn.communicationResult.accepted &&
+        turn.communicationResult.attempt.channel !== 'public' &&
+        (filter === 'all' ||
+          turn.communicationResult.attempt.channel === filter),
+    )
+    .toReversed()
+    .slice(0, 40);
+  return (
+    <section
+      className="panel world-chat-panel"
+      id="activity-private"
+      role="tabpanel"
+      aria-label="Private communications"
+    >
+      <div className="dock-heading">
+        <div>
+          <p className="panel-kicker">
+            World Lab operator-only · hidden from players
+          </p>
+          <h2>Private comms</h2>
+        </div>
+      </div>
+      <div className="tab-list" aria-label="Private communication filters">
+        {(['all', 'direct', 'alliance'] as const).map((value) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={filter === value}
+            onClick={() => setFilter(value)}
+          >
+            {value === 'all'
+              ? 'All'
+              : value === 'direct'
+                ? 'Direct'
+                : 'Alliance'}
+          </button>
+        ))}
+      </div>
+      {messages.length === 0 ? (
+        <p className="muted">No private communications yet.</p>
+      ) : (
+        <ol className="world-chat-feed">
+          {messages.map((event) => {
+            const sender = snapshot.world.agents.find(
+              ({ id }) => id === event.agentId,
+            );
+            const turn = snapshot.turns.find(
+              (candidate) =>
+                candidate.outcome !== 'provider-error' &&
+                candidate.outcome !== 'operator-skipped' &&
+                candidate.communicationResult.requested &&
+                candidate.communicationResult.accepted &&
+                candidate.communicationResult.event.id === event.id,
+            );
+            const recipient =
+              event.type === 'direct-message-sent'
+                ? snapshot.world.agents.find(
+                    ({ id }) => id === event.recipientId,
+                  )
+                : undefined;
+            return (
+              <li
+                key={event.id}
+                style={{
+                  borderLeftColor: resolveAgentColor(snapshot, event.agentId),
+                }}
+              >
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => onSelectAgent(event.agentId)}
+                  >
+                    {sender?.name ?? event.agentId}
+                  </button>
+                  <small>Turn {turn?.turnNumber ?? '—'} · Delivered</small>
+                </div>
+                <p>{event.message}</p>
+                <small>
+                  {event.type === 'direct-message-sent' ? (
+                    <>
+                      To{' '}
+                      <button
+                        type="button"
+                        onClick={() => onSelectAgent(event.recipientId)}
+                      >
+                        {recipient?.name ?? event.recipientId}
+                      </button>{' '}
+                      · {event.distance.toFixed(2)} km
+                    </>
+                  ) : (
+                    <>
+                      Alliance {event.allianceId} · {event.recipientIds.length}{' '}
+                      recipient{event.recipientIds.length === 1 ? '' : 's'}
+                    </>
+                  )}
+                </small>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      {rejections.length > 0 && (
+        <>
+          <h3>Rejected private attempts</h3>
+          <ol className="world-chat-feed">
+            {rejections.map((turn) => {
+              if (
+                turn.outcome === 'provider-error' ||
+                turn.outcome === 'operator-skipped' ||
+                !turn.communicationResult.requested ||
+                turn.communicationResult.accepted
+              )
+                return null;
+              return (
+                <li
+                  key={`rejected-${turn.turnNumber}`}
+                  style={{
+                    borderLeftColor: resolveAgentColor(snapshot, turn.agentId),
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => onSelectAgent(turn.agentId)}
+                  >
+                    {snapshot.world.agents.find(({ id }) => id === turn.agentId)
+                      ?.name ?? turn.agentId}
+                  </button>
+                  <p>{turn.communicationResult.attempt.message}</p>
+                  <small>
+                    Turn {turn.turnNumber} · Rejected:{' '}
+                    {turn.communicationResult.reason}
+                  </small>
+                </li>
+              );
+            })}
+          </ol>
+        </>
+      )}
+    </section>
+  );
+}
+
 function PublicWorldChat({
   snapshot,
   agents,
@@ -3530,7 +3752,7 @@ function TerritoryScoreboard({
           <li key={entry.agentId}>
             <span
               className="agent-swatch"
-              style={{ background: entry.color }}
+              style={{ background: entry.effectiveColor }}
             />
             <span>{entry.name}</span>
             <strong>{entry.controlledCellCount}</strong>

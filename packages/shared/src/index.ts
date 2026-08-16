@@ -12,7 +12,10 @@ import {
 
 export const MODEL_SUMMARY_MAX_LENGTH = 240;
 export const MESSAGE_MAX_LENGTH = 280;
+/** Legacy H3-ring range retained only for schema-v5-v9 import compatibility. */
 export const MESSAGE_RANGE = 3;
+export const DEFAULT_COMMUNICATION_RANGE_KM = 12;
+export const NEUTRAL_AGENT_COLOR = '#b2d3a8';
 export const RECENT_PUBLIC_MESSAGE_LIMIT = 12;
 export const RECENT_DIRECT_MESSAGE_LIMIT = 6;
 export const RECENT_CONTROL_CHANGE_LIMIT = 6;
@@ -23,8 +26,8 @@ export const OPENROUTER_MODEL_CONTEXT_MINIMUM = 16_384;
 export const OPENROUTER_MAX_OUTPUT_TOKENS = 4_096;
 export const OPENROUTER_PROVIDER_TIMEOUT_MS = 75_000;
 export const OPENROUTER_429_FALLBACK_BACKOFF_MS = 1_500;
-export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v1';
-export const OBJECTIVE_PROMPT_VERSION = 'durable-influence-v1';
+export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v2';
+export const OBJECTIVE_PROMPT_VERSION = 'durable-influence-v2';
 export const OPENROUTER_REQUIRED_PARAMETERS = ['max_tokens'] as const;
 export const DEVELOPMENT_WORLD_CONFIG = {
   latitude: 41.6528,
@@ -121,9 +124,16 @@ export const directCommunicationSchema = z
     message: messageContentSchema,
   })
   .strict();
+export const allianceCommunicationSchema = z
+  .object({
+    channel: z.literal('alliance'),
+    message: messageContentSchema,
+  })
+  .strict();
 export const communicationIntentSchema = z.discriminatedUnion('channel', [
   publicCommunicationSchema,
   directCommunicationSchema,
+  allianceCommunicationSchema,
 ]);
 export type CommunicationIntent = z.infer<typeof communicationIntentSchema>;
 
@@ -187,7 +197,7 @@ export type AgentTurnAction = WorldAction;
 const directMessageFields = {
   recipientId: agentIdSchema,
   message: messageContentSchema,
-  distance: z.number().int().nonnegative().nullable(),
+  distance: z.number().nonnegative().nullable(),
 };
 
 const worldEventBaseSchema = z.object({
@@ -200,16 +210,30 @@ export const publicMessageEventSchema = worldEventBaseSchema.extend({
   type: z.literal('public-message-sent'),
   channel: z.literal('public'),
   message: messageContentSchema,
+  playerVisible: z.literal(true).default(true),
 });
 export const directMessageEventSchema = worldEventBaseSchema.extend({
   type: z.literal('direct-message-sent'),
   channel: z.literal('direct'),
   ...directMessageFields,
-  distance: z.number().int().min(0).max(MESSAGE_RANGE),
+  distance: z.number().nonnegative(),
+  playerVisible: z.literal(false).default(false),
+});
+export const allianceMessageEventSchema = worldEventBaseSchema.extend({
+  type: z.literal('alliance-message-sent'),
+  channel: z.literal('alliance'),
+  allianceId: allianceIdSchema,
+  recipientIds: z
+    .array(agentIdSchema)
+    .min(1)
+    .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers - 1),
+  message: messageContentSchema,
+  playerVisible: z.literal(false).default(false),
 });
 export const communicationEventSchema = z.discriminatedUnion('channel', [
   publicMessageEventSchema,
   directMessageEventSchema,
+  allianceMessageEventSchema,
 ]);
 export type CommunicationEvent = z.infer<typeof communicationEventSchema>;
 
@@ -313,6 +337,7 @@ export const worldEventSchema = z.discriminatedUnion('type', [
   hexCapturedWorldEventSchema,
   publicMessageEventSchema,
   directMessageEventSchema,
+  allianceMessageEventSchema,
   agentWaitedWorldEventSchema,
   allianceProposedEventSchema,
   allianceProposalClosedEventSchema,
@@ -375,6 +400,7 @@ export const communicationRejectionReasonSchema = z.enum([
   'unknown-recipient',
   'self-message',
   'out-of-range',
+  'not-allied',
 ]);
 export type CommunicationRejectionReason = z.infer<
   typeof communicationRejectionReasonSchema
@@ -391,8 +417,9 @@ export const communicationAttemptSchema = z.discriminatedUnion('channel', [
   communicationAttemptBaseSchema.extend({
     channel: z.literal('direct'),
     recipientId: agentIdSchema.nullable(),
-    distance: z.number().int().nonnegative().nullable(),
+    distance: z.number().nonnegative().nullable(),
   }),
+  communicationAttemptBaseSchema.extend({ channel: z.literal('alliance') }),
 ]);
 export type CommunicationAttempt = z.infer<typeof communicationAttemptSchema>;
 
@@ -625,8 +652,12 @@ export const nearbyAgentObservationSchema = z.object({
   id: agentIdSchema,
   name: z.string().trim().min(1).max(80),
   currentCell: h3CellSchema,
-  distance: z.number().int().min(0).max(4),
+  distance: z.number().int().nonnegative().default(0),
+  distanceKm: z.number().nonnegative().default(0),
   allianceId: allianceIdSchema.nullable(),
+  allianceRelationship: z.enum(['allied', 'not-allied']).default('not-allied'),
+  controlledCellCount: z.number().int().nonnegative().default(0),
+  directMessageLegal: z.boolean().default(false),
 });
 
 export const publicEventObservationSchema = z.object({
@@ -654,9 +685,17 @@ export const observedDirectMessageSchema = z.object({
   direction: z.enum(['inbound', 'outbound']),
   message: messageContentSchema,
   occurredAt: z.iso.datetime(),
-  distance: z.number().int().min(0).max(MESSAGE_RANGE),
+  distance: z.number().nonnegative(),
 });
 export type ObservedDirectMessage = z.infer<typeof observedDirectMessageSchema>;
+export const observedAllianceMessageSchema = z.object({
+  eventId: eventIdSchema,
+  senderId: agentIdSchema,
+  senderName: z.string().trim().min(1).max(80),
+  allianceId: allianceIdSchema,
+  message: messageContentSchema,
+  occurredAt: z.iso.datetime(),
+});
 
 export const territoryScoreboardEntrySchema = z.object({
   agentId: agentIdSchema,
@@ -740,6 +779,30 @@ const agentObservationObjectSchema = z.object({
   actionAvailability: z
     .object({
       moveTargetCellIds: z.array(h3CellSchema).min(1).max(6),
+      moveOptions: z
+        .array(
+          z
+            .object({
+              targetCell: h3CellSchema,
+              direction: z.enum(['N', 'NE', 'SE', 'S', 'SW', 'NW']),
+              destinationState: hexStateSchema,
+              controllerRelationship: z.enum([
+                'open',
+                'self',
+                'allied',
+                'other',
+              ]),
+              recentlyOccupied: z.boolean(),
+              nearbyAgentCount: z
+                .number()
+                .int()
+                .nonnegative()
+                .max(WORLD_SCENARIO_LIMITS.maximumNearbyAgentObservations),
+            })
+            .strict(),
+        )
+        .max(6)
+        .default([]),
       infect: z.discriminatedUnion('available', [
         z.object({ available: z.literal(true) }).strict(),
         z
@@ -813,10 +876,33 @@ const agentObservationObjectSchema = z.object({
     })
     .strict()
     .optional(),
+  communicationAvailability: z
+    .object({
+      public: z
+        .object({ available: z.literal(true), playerVisible: z.literal(true) })
+        .strict(),
+      direct: z
+        .object({
+          eligibleRecipientAgentIds: z
+            .array(agentIdSchema)
+            .max(WORLD_SCENARIO_LIMITS.maximumNearbyAgentObservations),
+        })
+        .strict(),
+      alliance: z.discriminatedUnion('available', [
+        z
+          .object({ available: z.literal(true), allianceId: allianceIdSchema })
+          .strict(),
+        z
+          .object({ available: z.literal(false), allianceId: z.null() })
+          .strict(),
+      ]),
+    })
+    .strict()
+    .optional(),
   adjacentCells: z.array(cellObservationSchema).min(1).max(6),
   nearbyAgents: z
     .array(nearbyAgentObservationSchema)
-    .max(WORLD_SCENARIO_LIMITS.observedOtherAgents),
+    .max(WORLD_SCENARIO_LIMITS.maximumNearbyAgentObservations),
   recentEvents: z.array(publicEventObservationSchema).max(8),
   recentPublicMessages: z
     .array(observedPublicMessageSchema)
@@ -824,6 +910,10 @@ const agentObservationObjectSchema = z.object({
   recentDirectMessages: z
     .array(observedDirectMessageSchema)
     .max(RECENT_DIRECT_MESSAGE_LIMIT),
+  recentAllianceMessages: z
+    .array(observedAllianceMessageSchema)
+    .max(RECENT_DIRECT_MESSAGE_LIMIT)
+    .default([]),
   territoryScoreboard: territoryScoreboardSchema,
   actingAllianceId: allianceIdSchema.nullable(),
   actingAlliance: allianceTerritorySummarySchema.nullable(),
@@ -836,6 +926,16 @@ const agentObservationObjectSchema = z.object({
   recentControlChanges: z
     .array(observedControlChangeSchema)
     .max(RECENT_CONTROL_CHANGE_LIMIT),
+  recentMovements: z
+    .array(
+      z.object({
+        fromCell: h3CellSchema,
+        toCell: h3CellSchema,
+        occurredAt: z.iso.datetime(),
+      }),
+    )
+    .max(6)
+    .default([]),
 });
 
 export const agentObservationSchema = agentObservationObjectSchema.transform(
@@ -849,6 +949,7 @@ export const agentObservationSchema = agentObservationObjectSchema.transform(
     },
     actionAvailability: observation.actionAvailability ?? {
       moveTargetCellIds: observation.adjacentCells.map(({ cell }) => cell),
+      moveOptions: [],
       infect:
         observation.currentCell.state === 'open'
           ? { available: true as const }
@@ -890,6 +991,17 @@ export const agentObservationSchema = agentObservationObjectSchema.transform(
             allianceId: null,
             reason: 'The agent is not currently in an alliance.',
           },
+    },
+    communicationAvailability: observation.communicationAvailability ?? {
+      public: { available: true as const, playerVisible: true as const },
+      direct: {
+        eligibleRecipientAgentIds: observation.nearbyAgents
+          .filter(({ directMessageLegal }) => directMessageLegal)
+          .map(({ id }) => id),
+      },
+      alliance: observation.actingAllianceId
+        ? { available: true as const, allianceId: observation.actingAllianceId }
+        : { available: false as const, allianceId: null },
     },
   }),
 );
@@ -1373,11 +1485,17 @@ export const worldSetupRequestSchema = z
       .int()
       .min(0)
       .max(WORLD_SCENARIO_LIMITS.maximumRadius * 2),
+    communicationRangeKm: z
+      .number()
+      .finite()
+      .min(WORLD_SCENARIO_LIMITS.minimumCommunicationRangeKm)
+      .max(WORLD_SCENARIO_LIMITS.maximumCommunicationRangeKm)
+      .default(DEFAULT_COMMUNICATION_RANGE_KM),
     roster: scenarioRosterSchema,
     modelConfiguration: experimentModelConfigurationSchema,
     behaviorConfiguration: behaviorConfigurationSchema,
     objectiveVersion: z
-      .literal(OBJECTIVE_PROMPT_VERSION)
+      .enum(['durable-influence-v1', OBJECTIVE_PROMPT_VERSION])
       .default(OBJECTIVE_PROMPT_VERSION),
     capabilities: z
       .object({ communication: z.boolean(), diplomacy: z.boolean() })
@@ -1600,7 +1718,7 @@ export const simulationSnapshotSchema = z
       );
       if (
         entry.allianceId !== (alliance?.id ?? null) ||
-        entry.effectiveColor !== (alliance?.color ?? agent?.color)
+        entry.effectiveColor !== (alliance?.color ?? NEUTRAL_AGENT_COLOR)
       )
         context.addIssue({
           code: 'custom',
@@ -1894,9 +2012,41 @@ export const metricCountsSchema = z
     directMessagesRequested: z.number().int().nonnegative().default(0),
     directMessagesDelivered: z.number().int().nonnegative().default(0),
     directMessagesRejected: z.number().int().nonnegative().default(0),
+    allianceMessagesRequested: z.number().int().nonnegative().default(0),
+    allianceMessagesDelivered: z.number().int().nonnegative().default(0),
+    allianceMessagesRejected: z.number().int().nonnegative().default(0),
     publicMessagesSent: z.number().int().nonnegative().default(0),
     directMessagesSent: z.number().int().nonnegative().default(0),
     directMessagesReceived: z.number().int().nonnegative().default(0),
+    uniqueDirectMessagePairs: z.number().int().nonnegative().default(0),
+    directMessageDistanceTotalKm: z.number().nonnegative().default(0),
+    directMessageDistanceAverageKm: z.number().nonnegative().default(0),
+    directMessageDistanceMaximumKm: z.number().nonnegative().default(0),
+    eligibleNearbyAgentObservations: z.number().int().nonnegative().default(0),
+    firstAllianceTurn: z.number().int().positive().nullable().default(null),
+    maximumAllianceSize: z.number().int().nonnegative().default(0),
+    completedAllianceDurationTurnsTotal: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(0),
+    completedAllianceDurationTurnsAverage: z.number().nonnegative().default(0),
+    movementDirectionDistribution: z
+      .array(
+        z.object({
+          direction: z.enum(['N', 'NE', 'SE', 'S', 'SW', 'NW']),
+          count: z.number().int().positive(),
+        }),
+      )
+      .max(6)
+      .default([]),
+    longestRepeatedDirectionStreak: z.number().int().nonnegative().default(0),
+    recentCellRevisits: z.number().int().nonnegative().default(0),
+    directionChangesAfterCommunication: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(0),
     diplomacyProposalsRequested: z.number().int().nonnegative().default(0),
     diplomacyAcceptancesRequested: z.number().int().nonnegative().default(0),
     diplomacyDeparturesRequested: z.number().int().nonnegative().default(0),
@@ -1999,6 +2149,7 @@ export const exportCommunicationChannelSchema = z.enum([
   'all',
   'public',
   'direct',
+  'alliance',
 ]);
 export const exportCommunicationStatusSchema = z.enum([
   'all',
@@ -2186,10 +2337,10 @@ export const exportedCommunicationSchema = z
   .object({
     id: eventIdSchema,
     agentId: agentIdSchema,
-    channel: z.enum(['public', 'direct']),
+    channel: z.enum(['public', 'direct', 'alliance']),
     recipientId: agentIdSchema.nullable().optional(),
     message: messageContentSchema,
-    distance: z.number().int().nonnegative().nullable().optional(),
+    distance: z.number().nonnegative().nullable().optional(),
     occurredAt: z.iso.datetime(),
     originatingTurn: z.number().int().positive(),
     status: z.enum(['accepted', 'rejected']),
@@ -2216,13 +2367,14 @@ export const exportedCommunicationSchema = z
         message: 'Accepted direct communication requires a valid recipient.',
       });
     if (
-      communication.channel === 'public' &&
+      communication.channel !== 'direct' &&
       (communication.recipientId !== undefined ||
         communication.distance !== undefined)
     )
       context.addIssue({
         code: 'custom',
-        message: 'Public communication cannot have a recipient or distance.',
+        message:
+          'Non-direct communication cannot have a recipient or distance.',
       });
     if (
       communication.status === 'rejected' &&

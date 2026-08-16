@@ -32,6 +32,7 @@ import {
   reasoningProfilesForModel,
   type CompatibleModel,
   assignBehavior,
+  NEUTRAL_AGENT_COLOR,
 } from '.';
 
 const agentId = '128f3f38-6b7d-4db7-9e95-751b4ce2681e';
@@ -51,7 +52,7 @@ const scoreboard = [
   name: `Agent ${index + 1}`,
   color: '#ff6b57',
   allianceId: null,
-  effectiveColor: '#ff6b57',
+  effectiveColor: NEUTRAL_AGENT_COLOR,
   controlledCellCount: 0,
 }));
 const observation = {
@@ -147,6 +148,7 @@ const snapshot = {
     rosterSeed: 'roster',
     spawnSeed: 'spawn',
     minimumSpawnSeparation: 0,
+    communicationRangeKm: 12,
     roster: worldAgents.map(({ currentCell: _currentCell, ...agent }) => agent),
     modelConfiguration: {
       globalModelId: 'author/compatible-model',
@@ -165,7 +167,7 @@ const snapshot = {
       ),
       locked: false,
     },
-    objectiveVersion: 'durable-influence-v1',
+    objectiveVersion: 'durable-influence-v2',
     capabilities: { communication: true, diplomacy: true },
     exactCellCount: 1,
     areaSquareKilometers: 0.1,
@@ -286,7 +288,7 @@ describe('agent observation and decision schemas', () => {
     { ...observation, currentCell: { cell, state: 'unknown' } },
     {
       ...observation,
-      nearbyAgents: Array(8).fill({
+      nearbyAgents: Array(9).fill({
         id: agentId,
         name: 'x',
         currentCell: cell,

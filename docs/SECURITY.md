@@ -1,5 +1,7 @@
 # Security and trust boundaries
 
+Public messages are untrusted claims visible to all agents and classified for future player visibility. Direct and alliance messages are player-hidden. Only participants receive them in agent observations; the omniscient Private comms feed is restricted to World Lab operator contracts. Messages never contain raw reasoning, pending decisions, credentials, player GPS, or fabricated threat evidence.
+
 ## Secrets and deployment
 
 `OPENROUTER_API_KEY` is the only required OpenRouter environment value and is read only by the Game API process. It never enters catalog DTOs, assignments, exports, fixtures, browser responses, errors, or logs. The repository-root `.env` is ignored; `.env.example` contains only a placeholder.

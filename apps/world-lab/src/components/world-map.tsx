@@ -457,13 +457,13 @@ export function WorldMap(props: WorldMapProps) {
         data-controller-colors={hexes
           .flatMap((hex) => {
             if (hex.state === 'open') return [];
-            const controller = agents.find(
-              ({ id }) => id === hex.controllerAgentId,
+            const effectiveColor = resolveAgentColor(
+              { world: { agents, alliances } } as unknown as Pick<
+                SimulationSnapshot,
+                'world'
+              >,
+              hex.controllerAgentId,
             );
-            const effectiveColor =
-              alliances.find(({ memberAgentIds }) =>
-                memberAgentIds.includes(hex.controllerAgentId),
-              )?.color ?? controller?.color;
             return [`${hex.cell}:${effectiveColor ?? 'unknown'}`];
           })
           .join(',')}

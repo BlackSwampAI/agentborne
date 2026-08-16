@@ -1,8 +1,18 @@
-import { cellArea, gridDisk, gridDistance, latLngToCell, UNITS } from 'h3-js';
+import {
+  cellArea,
+  cellToLatLng,
+  greatCircleDistance,
+  gridDisk,
+  gridDistance,
+  latLngToCell,
+  UNITS,
+} from 'h3-js';
 import {
   ALLIANCE_COLOR_PALETTE,
   ALLIANCE_PROPOSAL_DURATION_TURNS,
   DEVELOPMENT_WORLD_CONFIG,
+  DEFAULT_COMMUNICATION_RANGE_KM,
+  NEUTRAL_AGENT_COLOR,
   assignBehavior,
   OBJECTIVE_PROMPT_VERSION,
   WORLD_SCENARIO_LIMITS,
@@ -13,7 +23,6 @@ import {
   diplomacyIntentSchema,
   h3CellSchema,
   MESSAGE_MAX_LENGTH,
-  MESSAGE_RANGE,
   worldActionSchema,
   type ActionResult,
   type Agent,
@@ -57,6 +66,7 @@ export interface EngineContext {
   createAllianceId: () => string;
   createProposalId: () => string;
   now: () => string;
+  communicationRangeKm: number;
 }
 
 export interface AppliedAction {
@@ -79,6 +89,7 @@ const defaultContext: EngineContext = {
   createAllianceId: () => crypto.randomUUID(),
   createProposalId: () => crypto.randomUUID(),
   now: () => new Date().toISOString(),
+  communicationRangeKm: DEFAULT_COMMUNICATION_RANGE_KM,
 };
 
 function rejected(
@@ -300,6 +311,30 @@ export function applyCommunication(
       ...base,
       type: 'public-message-sent' as const,
       channel: 'public' as const,
+      playerVisible: true as const,
+    };
+    return {
+      state: { ...state, events: [...state.events, event] },
+      result: { requested: true, accepted: true, event },
+    };
+  }
+
+  if (communication.channel === 'alliance') {
+    const alliance = getAgentAlliance(eligibilityState, agentId);
+    if (!alliance)
+      return communicationRejected(
+        state,
+        { ...base, channel: 'alliance' },
+        'not-allied',
+        'Alliance communication requires current alliance membership.',
+      );
+    const event = {
+      ...base,
+      type: 'alliance-message-sent' as const,
+      channel: 'alliance' as const,
+      allianceId: alliance.id,
+      recipientIds: alliance.memberAgentIds.filter((id) => id !== agentId),
+      playerVisible: false as const,
     };
     return {
       state: { ...state, events: [...state.events, event] },
@@ -310,13 +345,14 @@ export function applyCommunication(
   const actingAgent = eligibilityState.agents.get(agentId)!;
   const recipient = eligibilityState.agents.get(communication.recipientId);
   const distance = recipient
-    ? safeGridDistance(actingAgent.currentCell, recipient.currentCell)
+    ? physicalDistanceKm(actingAgent.currentCell, recipient.currentCell)
     : null;
   const attempt = {
     ...base,
     channel: 'direct' as const,
     recipientId: communication.recipientId,
     distance,
+    playerVisible: false as const,
   };
   if (!recipient)
     return communicationRejected(
@@ -332,7 +368,7 @@ export function applyCommunication(
       'self-message',
       'An agent cannot message itself.',
     );
-  if (distance === null || distance > MESSAGE_RANGE)
+  if (distance === null || distance > resolvedContext.communicationRangeKm)
     return communicationRejected(
       state,
       attempt,
@@ -365,7 +401,7 @@ export function getEffectiveAgentColor(
 ): string {
   const agent = state.agents.get(agentId);
   if (!agent) throw new Error('The agent does not exist.');
-  return getAgentAlliance(state, agentId)?.color ?? agent.color;
+  return getAgentAlliance(state, agentId)?.color ?? NEUTRAL_AGENT_COLOR;
 }
 
 export function applyDiplomacy(
@@ -780,6 +816,14 @@ function safeGridDistance(from: H3Cell, to: H3Cell): number | null {
   }
 }
 
+export function physicalDistanceKm(from: H3Cell, to: H3Cell): number | null {
+  try {
+    return greatCircleDistance(cellToLatLng(from), cellToLatLng(to), UNITS.km);
+  } catch {
+    return null;
+  }
+}
+
 function communicationRejected(
   state: WorldState,
   attempt: Extract<
@@ -834,10 +878,11 @@ function invalidCommunicationAttempt(
       channel: 'direct',
       recipientId: recipientId.success ? recipientId.data : null,
       distance: recipient
-        ? safeGridDistance(sender.currentCell, recipient.currentCell)
+        ? physicalDistanceKm(sender.currentCell, recipient.currentCell)
         : null,
     };
   }
+  if (input?.channel === 'alliance') return { ...base, channel: 'alliance' };
   return { ...base, channel: 'public' };
 }
 
@@ -1044,6 +1089,7 @@ export function defaultWorldSetupRequest(): WorldSetupRequest {
     rosterSeed: DEFAULT_ROSTER_SEED,
     spawnSeed: DEFAULT_SPAWN_SEED,
     minimumSpawnSeparation: 1,
+    communicationRangeKm: DEFAULT_COMMUNICATION_RANGE_KM,
     roster,
     modelConfiguration: {
       globalModelId: null,

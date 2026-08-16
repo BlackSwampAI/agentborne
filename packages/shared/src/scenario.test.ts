@@ -25,6 +25,7 @@ const request = {
   rosterSeed: 'roster',
   spawnSeed: 'spawn',
   minimumSpawnSeparation: 1,
+  communicationRangeKm: 12,
   roster: [...roster],
   modelConfiguration: {
     globalModelId: null,
@@ -43,7 +44,7 @@ const request = {
     ),
     locked: false,
   },
-  objectiveVersion: 'durable-influence-v1' as const,
+  objectiveVersion: 'durable-influence-v2' as const,
   capabilities: { communication: true, diplomacy: true },
 };
 
@@ -87,7 +88,7 @@ describe('scenario contracts', () => {
     if (preview.feasible)
       expect(
         appliedScenarioSchema.parse(preview.scenario).objectiveVersion,
-      ).toBe('durable-influence-v1');
+      ).toBe('durable-influence-v2');
   });
 
   it('rejects dynamic roster overflow and behavior under-coverage', () => {

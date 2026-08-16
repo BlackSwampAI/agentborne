@@ -347,7 +347,7 @@ describe('capture', () => {
 
 describe('nearby messaging', () => {
   it.each([0, 1, 3])(
-    'delivers at inclusive grid distance %s without moving or infecting',
+    'delivers by physical distance at former grid distance %s without moving or infecting',
     (distance) => {
       const before = stateWithRecipientAt(distance);
       const result = applyCommunication(
@@ -359,7 +359,7 @@ describe('nearby messaging', () => {
           recipientId,
           message: '  Hold this position.  ',
         },
-        context,
+        { ...context, communicationRangeKm: 100 },
       );
       expect(result.result).toMatchObject({
         accepted: true,
@@ -368,23 +368,28 @@ describe('nearby messaging', () => {
           agentId,
           recipientId,
           message: 'Hold this position.',
-          distance,
         },
       });
       expect(result.state.agents).toBe(before.agents);
       expect(result.state.hexes).toBe(before.hexes);
       expect(result.state.events).toHaveLength(1);
+      if (
+        result.result.requested &&
+        result.result.accepted &&
+        result.result.event.channel === 'direct'
+      )
+        expect(result.result.event.distance).toBeGreaterThanOrEqual(0);
     },
   );
 
-  it('rejects distance four without creating or delivering an event', () => {
+  it('rejects a recipient beyond the configured physical range', () => {
     const before = stateWithRecipientAt(4);
     const result = applyCommunication(
       before,
       before,
       agentId,
       { channel: 'direct', recipientId, message: 'Too far.' },
-      context,
+      { ...context, communicationRangeKm: 0.001 },
     );
     expect(result.state).toBe(before);
     expect(result.result).toMatchObject({
@@ -454,6 +459,24 @@ describe('nearby messaging', () => {
         channel: 'public',
         message: 'Hello, world.',
       },
+    });
+  });
+
+  it('rejects alliance communication for an unaffiliated sender without mutation', () => {
+    const before = stateWithRecipientAt(1);
+    const result = applyCommunication(
+      before,
+      before,
+      agentId,
+      { channel: 'alliance', message: 'Private coordination.' },
+      context,
+    );
+    expect(result.state).toBe(before);
+    expect(result.result).toMatchObject({
+      requested: true,
+      accepted: false,
+      reason: 'not-allied',
+      attempt: { channel: 'alliance' },
     });
   });
 });
@@ -531,6 +554,21 @@ describe('formal alliances', () => {
       ember!.id,
       rook!.id,
     ]);
+    const privateMessage = applyCommunication(
+      formed.state,
+      formed.state,
+      ember!.id,
+      { channel: 'alliance', message: 'Coordinate privately.' },
+      { ...context, communicationRangeKm: 0.001 },
+    );
+    expect(privateMessage.result).toMatchObject({
+      requested: true,
+      accepted: true,
+      event: {
+        type: 'alliance-message-sent',
+        recipientIds: [rook!.id],
+      },
+    });
     const invite = applyDiplomacy(
       formed.state,
       ember!.id,

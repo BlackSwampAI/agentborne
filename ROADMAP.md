@@ -63,6 +63,8 @@ Temporary experiment hardening adds explicitly opted-in browser-lifetime unatten
 
 Eleventh focused slice: redesign World Lab as a persistent long-running experiment operator workspace with a single execution controller, Live and Agents workspaces, a compact agent rail, contextual Scoreboard/Agent/Hex/Run inspection, and a bounded tabbed activity dock. This reorganizes existing authoritative configuration and telemetry without adding gameplay mechanics or persistent run storage.
 
+Twelfth focused slice: add scenario-owned physical communication range, private alliance communications, bounded nearby awareness, deterministic legal-move ordering variety, neutral unaffiliated presentation, and operator-only private-communication observability without adding world actions or player mechanics.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.
