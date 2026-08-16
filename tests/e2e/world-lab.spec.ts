@@ -269,15 +269,16 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await page.getByRole('tab', { name: 'Scoreboard' }).click();
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Ember0');
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Rook1');
-  await page.getByRole('button', { name: 'Select agent Ember' }).click();
+  const agentRoster = page.getByLabel('Agent roster');
+  await agentRoster.getByRole('button', { name: /^Ember / }).click();
   await expect(page.getByLabel('Recent territory changes')).toContainText(
     'Lost',
   );
-  await page.getByRole('button', { name: 'Select agent Rook' }).click();
+  await agentRoster.getByRole('button', { name: /^Rook / }).click();
   await expect(page.getByLabel('Recent territory changes')).toContainText(
     'Gained',
   );
-  await page.getByRole('button', { name: 'Select agent Ember' }).click();
+  await agentRoster.getByRole('button', { name: /^Ember / }).click();
   await openActions();
   await page.getByRole('button', { name: 'Export' }).click();
   await page.getByRole('button', { name: 'Clear' }).click();
