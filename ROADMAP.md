@@ -2,6 +2,10 @@
 
 Player development begins only after the agent milestones below demonstrate compelling behavior. Each milestone is intended to remain a focused pull request; do not implement ahead of the current milestone.
 
+The [Gameplay Foundation](docs/GAMEPLAY_FOUNDATION.md) records accepted future
+product direction, tunable experiment values, and explicit non-goals. It is not
+an implementation claim and does not supersede this delivery order.
+
 ## PR 1 — Project foundation and CI
 
 Create the permanent project structure, World Lab shell, initial H3 map, minimal world-domain boundaries, documentation, tests, and GitHub Actions.
