@@ -36,6 +36,13 @@ test('runs the complete deterministic World Lab browser flow', async ({
   });
 
   await page.goto('/');
+  const openActions = async () => {
+    const menu = page.locator('details.overflow-menu');
+    if (
+      !(await menu.evaluate((element) => (element as HTMLDetailsElement).open))
+    )
+      await page.getByLabel('More World Lab actions').click();
+  };
 
   try {
     await expect(page.getByText('Deterministic test model')).toBeVisible({
@@ -57,7 +64,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   ]) {
     await page.setViewportSize(viewport);
     await expect(
-      page.getByRole('region', { name: 'Public world chat' }),
+      page.getByRole('tabpanel', { name: 'Public world chat' }),
     ).toBeVisible();
     const layout = await page.evaluate(() => ({
       viewportHeight: window.innerHeight,
@@ -114,6 +121,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   );
   await expect(worldMap).toHaveAttribute('data-controller-colors', '');
   await expect(page.getByLabel('Selected hex details')).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Scoreboard' }).click();
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Rook0');
   await expect(page.getByLabel('Territory scoreboard')).toContainText(
     'Mingle0',
@@ -123,15 +131,14 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(followTurn).toBeChecked();
   await expect(page.getByLabel('Agent roster').getByText('Next')).toBeVisible();
 
-  await page
-    .getByRole('button', { name: 'Collapse Public world chat' })
-    .click();
-  await expect(
-    page.getByRole('heading', { name: 'Public world chat' }),
-  ).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Event log' })).toBeVisible();
+  await page.getByRole('button', { name: 'Collapse activity' }).click();
   await expect(page.locator('.bottom-dock')).toHaveCSS('height', '54px');
-  await page.getByRole('button', { name: 'Expand Event log' }).click();
+  await page.getByRole('button', { name: 'Expand activity' }).click();
+  await page.getByRole('tab', { name: 'Event log' }).click();
+  await expect(
+    page.getByRole('list', { name: 'World event log' }),
+  ).toBeVisible();
+  await page.getByRole('tab', { name: 'Public chat' }).click();
 
   const markers = page.getByRole('button', { name: /Select agent/ });
   await expect(markers).toHaveCount(8);
@@ -165,6 +172,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(page.getByRole('heading', { name: /Rook/ })).toBeVisible();
   await page.getByRole('button', { name: 'Select agent Ember' }).click();
   await expect(followTurn).not.toBeChecked();
+  await page.getByRole('tab', { name: 'Event log' }).click();
   await expect(
     page.getByText(/Infection .* direct message accepted/),
   ).toBeVisible();
@@ -200,9 +208,12 @@ test('runs the complete deterministic World Lab browser flow', async ({
       .filter({ hasText: 'Latest structured observation' }),
   ).toContainText('inbound: Ember → Rook');
   await expect(worldMap).toHaveAttribute('data-controller-colors', /#ff6b57/);
+  await page.getByRole('tab', { name: 'Scoreboard' }).click();
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Ember1');
+  await page.getByRole('tab', { name: 'Agent' }).click();
   for (let index = 0; index < 8; index += 1)
     await page.getByRole('button', { name: 'Single turn' }).click();
+  await page.getByRole('tab', { name: 'Scoreboard' }).click();
   await expect(page.getByLabel('Alliance and territory panel')).toContainText(
     'Mingle',
   );
@@ -218,6 +229,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(
     page.getByRole('button', { name: 'Select agent Solace' }),
   ).toHaveAttribute('data-effective-color', '#0072B2');
+  await page.getByRole('tab', { name: 'Agent' }).click();
   await expect(page.getByLabel('Agent inspector')).toContainText('move →');
 
   let captured = false;
@@ -227,6 +239,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   }
   expect(captured).toBe(true);
   await expect(worldMap).toHaveAttribute('data-controller-colors', /#ffd166/);
+  await page.getByRole('tab', { name: 'Scoreboard' }).click();
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Ember0');
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Rook1');
   await page.getByRole('button', { name: 'Select agent Ember' }).click();
@@ -238,6 +251,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
     'Gained',
   );
   await page.getByRole('button', { name: 'Select agent Ember' }).click();
+  await openActions();
   await page.getByRole('button', { name: 'Export' }).click();
   await page.getByRole('button', { name: 'Clear' }).click();
   await page.getByRole('checkbox', { name: 'Ember', exact: true }).click();
@@ -315,6 +329,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   ).toHaveClass(/selected/);
 
   page.once('dialog', (dialog) => dialog.accept());
+  await openActions();
   await page.getByRole('button', { name: 'Reset world' }).click();
   await expect(page.getByText('Turn 0')).toBeVisible();
   await expect(
@@ -353,7 +368,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
     '1',
   );
   page.once('dialog', (dialog) => dialog.accept());
-  await page.getByLabel('More World Lab actions').click();
+  await openActions();
   await page
     .getByRole('button', { name: 'Restore default personalities' })
     .click();
@@ -376,9 +391,10 @@ test('runs the complete deterministic World Lab browser flow', async ({
   const narrowMapBox = await worldMap.boundingBox();
   expect(narrowMapBox?.width ?? 0).toBeGreaterThan(700);
   expect(narrowMapBox?.height ?? 0).toBeGreaterThan(350);
-  await expect(page.getByLabel('Agent roster')).toBeVisible();
+  await expect(page.getByLabel('Agent roster')).toBeHidden();
+  await page.getByRole('tab', { name: 'Public chat' }).click();
   await expect(
-    page.getByRole('region', { name: 'Public world chat' }),
+    page.getByRole('tabpanel', { name: 'Public world chat' }),
   ).toBeVisible();
   expect(openRouterRequests).toEqual([]);
 });

@@ -69,6 +69,7 @@ const apiBase =
 const followTurnStorageKey = 'agentborne.world-lab.follow-turn';
 const runTargetStorageKey = 'agentborne.world-lab.run-target';
 const unattendedRecoveryStorageKey = 'agentborne.world-lab.unattended-recovery';
+const activityDockStorageKey = 'agentborne.world-lab.activity-dock';
 export const runTargets = [25, 50, 100, 200, 500, 1000] as const;
 
 function unattendedFailureEligible(
@@ -89,6 +90,13 @@ function unattendedFailureEligible(
 }
 
 export function WorldLab() {
+  const [workspaceView, setWorkspaceView] = useState<'live' | 'agents'>('live');
+  const [inspectorTab, setInspectorTab] = useState<
+    'scoreboard' | 'agent' | 'hex' | 'run'
+  >('agent');
+  const [activityTab, setActivityTab] = useState<
+    'chat' | 'events' | 'recovery'
+  >('chat');
   const [snapshot, setSnapshot] = useState<SimulationSnapshot | null>(null);
   const [selectedCell, setSelectedCell] = useState<H3Cell | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId | null>(null);
@@ -149,6 +157,22 @@ export function WorldLab() {
   useEffect(() => {
     runningRef.current = running;
   }, [running]);
+
+  useEffect(() => {
+    const collapsed = window.localStorage.getItem(activityDockStorageKey);
+    const hydrationTask = window.setTimeout(
+      () => setChatCollapsed(collapsed === 'collapsed'),
+      0,
+    );
+    return () => window.clearTimeout(hydrationTask);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      activityDockStorageKey,
+      chatCollapsed ? 'collapsed' : 'expanded',
+    );
+  }, [chatCollapsed]);
 
   useEffect(() => {
     const saved = window.localStorage.getItem(unattendedRecoveryStorageKey);
@@ -844,6 +868,7 @@ export function WorldLab() {
   const selectAgentForInspection = (agentId: AgentId) => {
     setFollowTurn(false);
     setSelectedAgentId(agentId);
+    setInspectorTab('agent');
   };
   const selectedHex = snapshot.world.hexes.find(
     ({ cell }) => cell === selectedCell,
@@ -922,6 +947,22 @@ export function WorldLab() {
             <p className="eyebrow">Developer simulation</p>
             <h1>World Lab</h1>
           </div>
+          <nav className="workspace-switcher" aria-label="World Lab workspaces">
+            <button
+              type="button"
+              aria-current={workspaceView === 'live' ? 'page' : undefined}
+              onClick={() => setWorkspaceView('live')}
+            >
+              Live
+            </button>
+            <button
+              type="button"
+              aria-current={workspaceView === 'agents' ? 'page' : undefined}
+              onClick={() => setWorkspaceView('agents')}
+            >
+              Agents
+            </button>
+          </nav>
         </div>
         <div className="status-popover">
           <button
@@ -981,13 +1022,18 @@ export function WorldLab() {
             <ExperimentUsageMeter snapshot={snapshot} />
           </div>
         </div>
+        <p className="test-provider-summary">
+          {snapshot.providerMode === 'openrouter'
+            ? `${new Set(snapshot.resolvedModels.map(({ modelId }) => modelId ?? 'unassigned')).size} active model assignment${snapshot.resolvedModels.length === 1 ? '' : 's'}`
+            : 'Deterministic test model'}
+        </p>
         <nav
           className="command-controls"
           aria-label="Simulation execution controls"
         >
           {running ? (
             <button
-              className="icon-button primary-command"
+              className="primary-command labeled-command"
               aria-label="Pause"
               title="Pause simulation"
               type="button"
@@ -999,11 +1045,11 @@ export function WorldLab() {
               }}
             >
               <CommandIcon name="pause" />
-              <span className="sr-only">Pause</span>
+              <span>Pause</span>
             </button>
           ) : (
             <button
-              className="icon-button primary-command"
+              className="primary-command labeled-command"
               aria-label="Start"
               title="Start simulation"
               disabled={
@@ -1022,11 +1068,11 @@ export function WorldLab() {
               }}
             >
               <CommandIcon name="play" />
-              <span className="sr-only">Start</span>
+              <span>Start</span>
             </button>
           )}
           <button
-            className="icon-button"
+            className="labeled-command"
             aria-label="Single turn"
             aria-busy={inFlight}
             title="Advance one turn"
@@ -1042,19 +1088,7 @@ export function WorldLab() {
             onClick={() => void executeTurn()}
           >
             {inFlight ? <Spinner /> : <CommandIcon name="step" />}
-            <span className="sr-only">Single turn</span>
-          </button>
-          <button
-            className="icon-button destructive-command"
-            aria-label="Reset world"
-            aria-busy={resetting}
-            title="Reset world"
-            disabled={inFlight || resetting || personalityPending}
-            type="button"
-            onClick={() => void reset()}
-          >
-            {resetting ? <Spinner /> : <CommandIcon name="reset" />}
-            <span className="sr-only">Reset world</span>
+            <span>Single turn</span>
           </button>
           <label className="run-target-control">
             <span className="sr-only">Run target</span>
@@ -1078,6 +1112,18 @@ export function WorldLab() {
                   {target}
                 </option>
               ))}
+            </select>
+          </label>
+          <label className="speed-control compact-speed-control">
+            <span>Speed</span>
+            <select
+              aria-label="Playback speed"
+              value={speed}
+              onChange={(event) => setSpeed(Number(event.target.value))}
+            >
+              <option value={2_000}>0.5×</option>
+              <option value={1_000}>1×</option>
+              <option value={250}>4×</option>
             </select>
           </label>
           {boundedRunTarget === null ? (
@@ -1189,49 +1235,7 @@ export function WorldLab() {
               Skip turn
             </button>
           </span>
-          <button
-            className="icon-button"
-            aria-label="Export"
-            title="Export"
-            data-export-trigger
-            ref={exportTriggerRef}
-            type="button"
-            onClick={() => {
-              if (!exportInitializedRef.current) {
-                setExportAgentIds(snapshot.world.agents.map(({ id }) => id));
-                exportInitializedRef.current = true;
-              }
-              setExportOpen(true);
-            }}
-          >
-            <CommandIcon name="export" />
-            <span className="sr-only">Export</span>
-          </button>
         </nav>
-        {snapshot.providerMode === 'openrouter' ? (
-          <ModelConsole
-            catalog={catalog}
-            loading={catalogLoading || catalog === null}
-            snapshot={snapshot}
-            disabled={
-              running ||
-              inFlight ||
-              resetting ||
-              snapshot.activeAgentId !== null ||
-              verifyingModelId !== null ||
-              configurationPending
-            }
-            verifications={modelVerifications}
-            verifyingModelId={verifyingModelId}
-            onRefresh={refreshCatalog}
-            onUpdate={updateModels}
-            onUpdateBehavior={updateBehavior}
-            onVerify={verifyModel}
-            onImport={importExperiment}
-          />
-        ) : (
-          <p className="test-provider-summary">Deterministic test model</p>
-        )}
         <details className="overflow-menu" ref={overflowMenuRef}>
           <summary
             ref={setupTriggerRef}
@@ -1290,18 +1294,33 @@ export function WorldLab() {
               <CommandIcon name="map" />
               <span>World setup</span>
             </button>
-            <label className="speed-control">
-              Playback speed
-              <select
-                aria-label="Playback speed"
-                value={speed}
-                onChange={(event) => setSpeed(Number(event.target.value))}
-              >
-                <option value={2_000}>Slow · 2s</option>
-                <option value={1_000}>Normal · 1s</option>
-                <option value={250}>Fast · 0.25s</option>
-              </select>
-            </label>
+            <button
+              type="button"
+              onClick={() => {
+                if (overflowMenuRef.current)
+                  overflowMenuRef.current.open = false;
+                setWorkspaceView('agents');
+              }}
+            >
+              Agent setup
+            </button>
+            <button
+              type="button"
+              data-export-trigger
+              ref={exportTriggerRef}
+              onClick={() => {
+                if (!exportInitializedRef.current) {
+                  setExportAgentIds(snapshot.world.agents.map(({ id }) => id));
+                  exportInitializedRef.current = true;
+                }
+                if (overflowMenuRef.current)
+                  overflowMenuRef.current.open = false;
+                setExportOpen(true);
+              }}
+            >
+              <CommandIcon name="export" />
+              Export
+            </button>
             <button
               disabled={personalityControlsDisabled}
               type="button"
@@ -1311,6 +1330,18 @@ export function WorldLab() {
                 ? 'Restoring…'
                 : 'Restore default personalities'}
             </button>
+            <div className="destructive-actions">
+              <button
+                className="destructive-command"
+                aria-busy={resetting}
+                disabled={inFlight || resetting || personalityPending}
+                type="button"
+                onClick={() => void reset()}
+              >
+                {resetting ? <Spinner /> : <CommandIcon name="reset" />}
+                Reset world
+              </button>
+            </div>
           </div>
         </details>
       </header>
@@ -1373,56 +1404,255 @@ export function WorldLab() {
         />
       )}
 
-      <div className="workspace">
-        <AgentRoster
+      {workspaceView === 'live' ? (
+        <>
+          <div className="workspace operator-workspace">
+            <AgentRoster
+              snapshot={snapshot}
+              selectedAgentId={inspectionAgentId}
+              followTurn={followTurn}
+              onFollowTurnChange={setFollowTurn}
+              onSelect={selectAgentForInspection}
+            />
+            <section className="map-panel" aria-label="Development world map">
+              <WorldMap
+                latitude={snapshot.scenario.center.latitude}
+                longitude={snapshot.scenario.center.longitude}
+                hexes={snapshot.world.hexes}
+                agents={snapshot.world.agents}
+                alliances={snapshot.world.alliances}
+                selectedCell={selectedCell}
+                selectedAgentId={inspectionAgentId}
+                onSelectCell={(cell) => {
+                  setSelectedCell(cell);
+                  setInspectorTab('hex');
+                }}
+                onClearCellSelection={() => setSelectedCell(null)}
+                onSelectAgent={(agentId) => {
+                  setSelectedCell(null);
+                  selectAgentForInspection(agentId);
+                }}
+              />
+              <div className="map-caption">
+                <span>
+                  Development location:{' '}
+                  {snapshot.scenario.locationLabel ??
+                    `${snapshot.scenario.center.latitude}, ${snapshot.scenario.center.longitude}`}
+                </span>
+                <span>
+                  H3 resolution {snapshot.scenario.resolution} ·{' '}
+                  {snapshot.scenario.exactCellCount} cells ·{' '}
+                  {snapshot.scenario.areaSquareKilometers.toFixed(2)} km²
+                </span>
+              </div>
+            </section>
+
+            <aside className="sidebar details-sidebar operator-inspector">
+              <div className="inspector-heading">
+                <div>
+                  <p className="panel-kicker">Context</p>
+                  <h2>Inspector</h2>
+                </div>
+              </div>
+              <div
+                className="tab-list"
+                role="tablist"
+                aria-label="Inspector views"
+              >
+                {(['scoreboard', 'agent', 'hex', 'run'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    role="tab"
+                    aria-selected={inspectorTab === tab}
+                    aria-controls={`inspector-${tab}`}
+                    disabled={
+                      (tab === 'agent' && !selectedAgent) ||
+                      (tab === 'hex' && !selectedHex)
+                    }
+                    onClick={() => setInspectorTab(tab)}
+                  >
+                    {tab[0]!.toUpperCase() + tab.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <div
+                className="inspector-tabpanel"
+                role="tabpanel"
+                id={`inspector-${inspectorTab}`}
+              >
+                {inspectorTab === 'agent' && selectedAgent && (
+                  <AgentInspector
+                    key={`${selectedAgent.id}:${selectedAgent.personality}`}
+                    agent={selectedAgent}
+                    snapshot={snapshot}
+                    cellState={
+                      snapshot.world.hexes.find(
+                        ({ cell }) => cell === selectedAgent.currentCell,
+                      )!.state
+                    }
+                    latestTurn={latestTurn}
+                    turns={snapshot.turns}
+                    directMessages={snapshot.world.events.filter(
+                      (
+                        event,
+                      ): event is Extract<
+                        SimulationSnapshot['world']['events'][number],
+                        { type: 'direct-message-sent' }
+                      > =>
+                        event.type === 'direct-message-sent' &&
+                        (event.agentId === selectedAgent.id ||
+                          event.recipientId === selectedAgent.id),
+                    )}
+                    agents={snapshot.world.agents}
+                    mutationDisabled={personalityControlsDisabled}
+                    mutationPending={personalityPending}
+                    onApplyPersonality={updatePersonality}
+                    metrics={
+                      snapshot.experiment.metrics.byAgent.find(
+                        ({ agentId }) => agentId === selectedAgent.id,
+                      )?.metrics
+                    }
+                    controlledCellCount={
+                      snapshot.experiment.currentTerritory.find(
+                        ({ agentId }) => agentId === selectedAgent.id,
+                      )?.controlledCellCount ?? 0
+                    }
+                    controlChanges={snapshot.world.events.filter(
+                      (
+                        event,
+                      ): event is Extract<
+                        SimulationSnapshot['world']['events'][number],
+                        { type: 'hex-captured' }
+                      > =>
+                        event.type === 'hex-captured' &&
+                        (event.controllerAgentId === selectedAgent.id ||
+                          event.previousControllerAgentId === selectedAgent.id),
+                    )}
+                  />
+                )}
+                {inspectorTab === 'hex' && selectedHex && (
+                  <HexInspector
+                    hex={selectedHex}
+                    controller={selectedHexController}
+                    alliance={selectedHexAlliance}
+                    selectedAgent={selectedAgent}
+                  />
+                )}
+                {inspectorTab === 'scoreboard' && (
+                  <>
+                    <TerritoryScoreboard
+                      entries={snapshot.experiment.currentTerritory}
+                    />
+                    <AlliancePanel snapshot={snapshot} />
+                  </>
+                )}
+                {inspectorTab === 'run' && (
+                  <RunHealthSummary
+                    snapshot={snapshot}
+                    status={status}
+                    runTarget={boundedRunTarget ?? runTarget}
+                    unattendedRetryCount={unattendedRetryCount}
+                    unattendedRetryLimit={unattendedRetryLimit}
+                  />
+                )}
+              </div>
+            </aside>
+          </div>
+          <section
+            className="bottom-dock activity-dock"
+            aria-label="Activity dock"
+          >
+            <div className="activity-dock-header">
+              <div
+                className="tab-list"
+                role="tablist"
+                aria-label="Activity views"
+              >
+                {(['chat', 'events', 'recovery'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    role="tab"
+                    aria-selected={activityTab === tab}
+                    aria-controls={`activity-${tab}`}
+                    onClick={() => setActivityTab(tab)}
+                  >
+                    {tab === 'chat'
+                      ? 'Public chat'
+                      : tab === 'events'
+                        ? 'Event log'
+                        : 'Failures & recovery'}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                aria-expanded={!chatCollapsed}
+                onClick={() => setChatCollapsed((collapsed) => !collapsed)}
+              >
+                {chatCollapsed ? 'Expand activity' : 'Collapse activity'}
+              </button>
+            </div>
+            {!chatCollapsed && activityTab === 'chat' && (
+              <PublicWorldChat
+                snapshot={snapshot}
+                agents={snapshot.world.agents}
+                events={publicMessages}
+                turns={snapshot.turns}
+                collapsed={false}
+                onCollapsedChange={setChatCollapsed}
+              />
+            )}
+            {!chatCollapsed && activityTab === 'events' && (
+              <EventLog
+                snapshot={snapshot}
+                turns={snapshot.turns}
+                agents={snapshot.world.agents}
+                collapsed={false}
+                onCollapsedChange={setChatCollapsed}
+              />
+            )}
+            {!chatCollapsed && activityTab === 'recovery' && (
+              <RecoveryLog snapshot={snapshot} turns={snapshot.turns} />
+            )}
+          </section>
+        </>
+      ) : (
+        <AgentsWorkspace
           snapshot={snapshot}
           selectedAgentId={inspectionAgentId}
           followTurn={followTurn}
           onFollowTurnChange={setFollowTurn}
-          onSelect={selectAgentForInspection}
-        />
-        <section className="map-panel" aria-label="Development world map">
-          <WorldMap
-            latitude={snapshot.scenario.center.latitude}
-            longitude={snapshot.scenario.center.longitude}
-            hexes={snapshot.world.hexes}
-            agents={snapshot.world.agents}
-            alliances={snapshot.world.alliances}
-            selectedCell={selectedCell}
-            selectedAgentId={inspectionAgentId}
-            onSelectCell={setSelectedCell}
-            onClearCellSelection={() => setSelectedCell(null)}
-            onSelectAgent={(agentId) => {
-              setSelectedCell(null);
-              selectAgentForInspection(agentId);
-            }}
-          />
-          {selectedHex && (
-            <HexMapPopup
-              hex={selectedHex}
-              controller={selectedHexController}
-              alliance={selectedHexAlliance}
-              onClose={() => setSelectedCell(null)}
+          onSelectAgent={selectAgentForInspection}
+          onOpenWorldSetup={() => setSetupOpen(true)}
+        >
+          {snapshot.providerMode === 'openrouter' ? (
+            <ModelConsole
+              catalog={catalog}
+              loading={catalogLoading || catalog === null}
+              snapshot={snapshot}
+              disabled={
+                personalityControlsDisabled ||
+                verifyingModelId !== null ||
+                configurationPending
+              }
+              verifications={modelVerifications}
+              verifyingModelId={verifyingModelId}
+              onRefresh={refreshCatalog}
+              onUpdate={updateModels}
+              onUpdateBehavior={updateBehavior}
+              onVerify={verifyModel}
+              onImport={importExperiment}
             />
+          ) : (
+            <p className="test-provider-summary">
+              Deterministic test model assignments are active.
+            </p>
           )}
-          <div className="map-caption">
-            <span>
-              Development location:{' '}
-              {snapshot.scenario.locationLabel ??
-                `${snapshot.scenario.center.latitude}, ${snapshot.scenario.center.longitude}`}
-            </span>
-            <span>
-              H3 resolution {snapshot.scenario.resolution} ·{' '}
-              {snapshot.scenario.exactCellCount} cells ·{' '}
-              {snapshot.scenario.areaSquareKilometers.toFixed(2)} km²
-            </span>
-          </div>
-        </section>
-
-        <aside className="sidebar details-sidebar">
           {selectedAgent && (
             <AgentInspector
-              key={`${selectedAgent.id}:${selectedAgent.personality}`}
+              key={`management:${selectedAgent.id}:${selectedAgent.personality}`}
               agent={selectedAgent}
               snapshot={snapshot}
               cellState={
@@ -1470,95 +1700,258 @@ export function WorldLab() {
               )}
             />
           )}
-
-          <TerritoryScoreboard entries={snapshot.experiment.currentTerritory} />
-          <AlliancePanel snapshot={snapshot} />
-        </aside>
-      </div>
-      <div className="bottom-dock">
-        <PublicWorldChat
-          snapshot={snapshot}
-          agents={snapshot.world.agents}
-          events={publicMessages}
-          turns={snapshot.turns}
-          collapsed={chatCollapsed}
-          onCollapsedChange={setChatCollapsed}
-        />
-        <EventLog
-          snapshot={snapshot}
-          turns={snapshot.turns}
-          agents={snapshot.world.agents}
-          collapsed={chatCollapsed}
-          onCollapsedChange={setChatCollapsed}
-        />
-      </div>
+        </AgentsWorkspace>
+      )}
     </main>
+  );
+}
+
+function AgentsWorkspace({
+  snapshot,
+  selectedAgentId,
+  followTurn,
+  onFollowTurnChange,
+  onSelectAgent,
+  onOpenWorldSetup,
+  children,
+}: {
+  snapshot: SimulationSnapshot;
+  selectedAgentId: AgentId | null;
+  followTurn: boolean;
+  onFollowTurnChange: (follow: boolean) => void;
+  onSelectAgent: (agentId: AgentId) => void;
+  onOpenWorldSetup: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      className="agents-workspace"
+      aria-label="Agent management workspace"
+    >
+      <AgentRoster
+        snapshot={snapshot}
+        selectedAgentId={selectedAgentId}
+        followTurn={followTurn}
+        onFollowTurnChange={onFollowTurnChange}
+        onSelect={onSelectAgent}
+      />
+      <div className="agents-configuration">
+        <header className="workspace-heading">
+          <div>
+            <p className="panel-kicker">Experiment assignments</p>
+            <h2>Agent configuration</h2>
+            <p className="muted">
+              Global assignments and explicit overrides apply through the
+              existing server-authoritative configuration boundary.
+            </p>
+          </div>
+          <button type="button" onClick={onOpenWorldSetup}>
+            Replace roster in World setup
+          </button>
+        </header>
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function HexInspector({
+  hex,
+  controller,
+  alliance,
+  selectedAgent,
+}: {
+  hex: SimulationSnapshot['world']['hexes'][number];
+  controller?: SimulationSnapshot['world']['agents'][number];
+  alliance?: SimulationSnapshot['world']['alliances'][number];
+  selectedAgent?: SimulationSnapshot['world']['agents'][number];
+}) {
+  const relationship = !selectedAgent
+    ? 'No agent selected'
+    : controller?.id === selectedAgent.id
+      ? 'Controlled by selected agent'
+      : alliance?.memberAgentIds.includes(selectedAgent.id)
+        ? 'Controlled by an ally'
+        : controller
+          ? 'Controlled by another agent'
+          : 'Open';
+  return (
+    <section
+      className="panel compact-inspector"
+      aria-label="Selected hex details"
+    >
+      <p className="panel-kicker">Authoritative cell</p>
+      <h2>{hex.cell}</h2>
+      <dl className="operator-facts">
+        <div>
+          <dt>State</dt>
+          <dd>{hex.state}</dd>
+        </div>
+        <div>
+          <dt>Controller</dt>
+          <dd>{controller?.name ?? 'None'}</dd>
+        </div>
+        <div>
+          <dt>Alliance</dt>
+          <dd>{alliance?.id ?? 'None'}</dd>
+        </div>
+        <div>
+          <dt>Relationship</dt>
+          <dd>{relationship}</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+function RunHealthSummary({
+  snapshot,
+  status,
+  runTarget,
+  unattendedRetryCount,
+  unattendedRetryLimit,
+}: {
+  snapshot: SimulationSnapshot;
+  status: string;
+  runTarget: number;
+  unattendedRetryCount: number;
+  unattendedRetryLimit: number;
+}) {
+  const metrics = snapshot.experiment.metrics.aggregate;
+  const active = snapshot.world.agents.find(
+    ({ id }) => id === snapshot.activeAgentId,
+  );
+  const next = snapshot.world.agents.find(
+    ({ id }) => id === snapshot.nextAgentId,
+  );
+  const elapsedMs = Math.max(
+    0,
+    Date.parse(
+      snapshot.turns.at(-1)?.completedAt ?? snapshot.experiment.startedAt,
+    ) - Date.parse(snapshot.experiment.startedAt),
+  );
+  const elapsedMinutes = Math.floor(elapsedMs / 60_000);
+  return (
+    <section className="panel run-health" aria-label="Run health summary">
+      <p className="panel-kicker">Long-run telemetry</p>
+      <h2>{status.replaceAll('-', ' ')}</h2>
+      <dl className="operator-facts">
+        <div>
+          <dt>Progress</dt>
+          <dd>
+            {snapshot.experiment.totalCompletedTurns} / {runTarget}
+          </dd>
+        </div>
+        <div>
+          <dt>Active agent</dt>
+          <dd>{active?.name ?? 'None'}</dd>
+        </div>
+        <div>
+          <dt>Next agent</dt>
+          <dd>{next?.name ?? 'Unavailable'}</dd>
+        </div>
+        <div>
+          <dt>Elapsed</dt>
+          <dd>{elapsedMinutes} min</dd>
+        </div>
+        <div>
+          <dt>Known cost</dt>
+          <dd>{formatCost(metrics.knownCostCredits)}</dd>
+        </div>
+        <div>
+          <dt>Successful turns</dt>
+          <dd>{metrics.accepted}</dd>
+        </div>
+        <div>
+          <dt>Rejected actions</dt>
+          <dd>{metrics.rejectedWorldActions}</dd>
+        </div>
+        <div>
+          <dt>Provider failures</dt>
+          <dd>{metrics.providerErrors}</dd>
+        </div>
+        <div>
+          <dt>Auto recovered</dt>
+          <dd>{metrics.recoveredAutomatically}</dd>
+        </div>
+        <div>
+          <dt>Manual recovered</dt>
+          <dd>{metrics.recoveredManually}</dd>
+        </div>
+        <div>
+          <dt>Unattended recovered</dt>
+          <dd>{metrics.recoveredByUnattendedRetry}</dd>
+        </div>
+        <div>
+          <dt>Skipped turns</dt>
+          <dd>{metrics.operatorSkipped}</dd>
+        </div>
+      </dl>
+      {snapshot.pendingFailedTurn && unattendedRetryCount > 0 && (
+        <p role="status">
+          Retry {unattendedRetryCount} of {unattendedRetryLimit}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function RecoveryLog({
+  snapshot,
+  turns,
+}: {
+  snapshot: SimulationSnapshot;
+  turns: AgentTurnRecord[];
+}) {
+  const failures = turns
+    .filter(
+      (turn) =>
+        turn.outcome === 'provider-error' ||
+        turn.outcome === 'operator-skipped',
+    )
+    .slice(-40)
+    .toReversed();
+  return (
+    <section
+      className="panel recovery-panel"
+      id="activity-recovery"
+      role="tabpanel"
+    >
+      {failures.length === 0 ? (
+        <p className="muted">No failures or recovery actions recorded.</p>
+      ) : (
+        <ol aria-label="Failures and recovery log">
+          {failures.map((turn) => {
+            const agent = snapshot.world.agents.find(
+              ({ id }) => id === turn.agentId,
+            );
+            return (
+              <li key={turn.turnNumber}>
+                <strong>
+                  Turn {turn.turnNumber} · {agent?.name ?? turn.agentId}
+                </strong>
+                <span>
+                  {turn.failure.code} ·{' '}
+                  {turn.provider?.model ??
+                    turn.failure.model ??
+                    'model unavailable'}
+                </span>
+                <small>
+                  {turn.outcome === 'operator-skipped'
+                    ? `${turn.skipKind} skip`
+                    : 'awaiting operator or recovery outcome'}
+                </small>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
   );
 }
 
 function Spinner() {
   return <span className="spinner" aria-hidden="true" />;
-}
-
-function HexMapPopup({
-  hex,
-  controller,
-  alliance,
-  onClose,
-}: {
-  hex: SimulationSnapshot['world']['hexes'][number];
-  controller?: SimulationSnapshot['world']['agents'][number];
-  alliance?: SimulationSnapshot['world']['alliances'][number];
-  onClose: () => void;
-}) {
-  const effectiveColor = alliance?.color ?? controller?.color;
-  return (
-    <section className="hex-map-popup" aria-label="Selected hex details">
-      <div className="hex-popup-heading">
-        <div>
-          <p className="panel-kicker">Selected hex</p>
-          <h2>{hex.state === 'infected' ? 'Infected' : 'Open'}</h2>
-        </div>
-        <button type="button" aria-label="Close hex details" onClick={onClose}>
-          ×
-        </button>
-      </div>
-      <dl>
-        <div>
-          <dt>H3 index</dt>
-          <dd>{hex.cell}</dd>
-        </div>
-        <div>
-          <dt>Controller</dt>
-          <dd>
-            {hex.state === 'infected' ? (
-              <>
-                <span
-                  className="agent-swatch"
-                  style={{ background: effectiveColor }}
-                />
-                {controller?.name ?? hex.controllerAgentId}
-              </>
-            ) : (
-              'Uncontrolled'
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt>Alliance</dt>
-          <dd>
-            {alliance
-              ? `${alliance.memberAgentIds.length} members`
-              : 'Unaffiliated'}
-          </dd>
-        </div>
-        <div>
-          <dt>Effective color</dt>
-          <dd>{effectiveColor ?? 'None'}</dd>
-        </div>
-      </dl>
-    </section>
-  );
 }
 
 function CommandIcon({
@@ -3033,6 +3426,8 @@ function PublicWorldChat({
     <section
       className={`panel world-chat-panel${collapsed ? ' chat-collapsed' : ''}`}
       aria-label="Public world chat"
+      id="activity-chat"
+      role="tabpanel"
     >
       <div className="dock-heading">
         <div>
@@ -4456,6 +4851,8 @@ function EventLog({
   return (
     <section
       className={`panel event-panel${collapsed ? ' dock-collapsed' : ''}`}
+      id="activity-events"
+      role="tabpanel"
     >
       <div className="dock-heading">
         <div>
