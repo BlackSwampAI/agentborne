@@ -61,6 +61,8 @@ Tenth focused slice: add versioned configurable World Lab scenarios, actual H3 g
 
 Temporary experiment hardening adds explicitly opted-in browser-lifetime unattended recovery with one to three one-call retries and one attributed skip. It does not replace the future server-owned scheduler or simultaneous-tick recovery policy.
 
+Eleventh focused slice: redesign World Lab as a persistent long-running experiment operator workspace with a single execution controller, Live and Agents workspaces, a compact agent rail, contextual Scoreboard/Agent/Hex/Run inspection, and a bounded tabbed activity dock. This reorganizes existing authoritative configuration and telemetry without adding gameplay mechanics or persistent run storage.
+
 ## PR 5 — Goals and memory
 
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.

@@ -946,8 +946,18 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+async function openOverflow(user: ReturnType<typeof userEvent.setup>) {
+  const menu = await screen.findByLabelText('More World Lab actions');
+  if (!menu.closest('details')?.hasAttribute('open')) await user.click(menu);
+}
+
+async function openAgentsWorkspace(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole('button', { name: 'Agents' }));
+}
+
 describe('WorldLab', () => {
   it('renders all controls, status, H3 readiness, and eight visible markers', async () => {
+    const user = userEvent.setup();
     render(<WorldLab />);
     expect(
       await screen.findByText(
@@ -966,6 +976,7 @@ describe('WorldLab', () => {
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Single turn' })).toBeEnabled();
+    fireEvent.click(screen.getByLabelText('More World Lab actions'));
     expect(screen.getByRole('button', { name: 'Reset world' })).toBeEnabled();
     expect(
       screen.getByRole('button', { name: 'Restore default personalities' }),
@@ -1074,7 +1085,9 @@ describe('WorldLab', () => {
             : jsonResponse(snapshot),
         ),
       );
+      const user = userEvent.setup();
       render(<WorldLab />);
+      await openAgentsWorkspace(user);
       const trigger = await screen.findByRole('button', { name: accessible });
       expect(trigger.querySelector('.setup-label')).toHaveTextContent(expected);
     },
@@ -1096,6 +1109,7 @@ describe('WorldLab', () => {
     );
     const user = userEvent.setup();
     render(<WorldLab />);
+    await openAgentsWorkspace(user);
     let setupStatus = await screen.findByRole('button', {
       name: /12 of 12 agents ready/,
     });
@@ -1113,6 +1127,7 @@ describe('WorldLab', () => {
       '12/12 ready',
     );
     await user.click(screen.getByRole('button', { name: 'Close World Setup' }));
+    await openOverflow(user);
     await user.click(screen.getByRole('button', { name: 'Reset world' }));
     setupStatus = await screen.findByRole('button', {
       name: /8 of 8 agents ready/,
@@ -1144,6 +1159,7 @@ describe('WorldLab', () => {
     );
     const user = userEvent.setup();
     render(<WorldLab />);
+    await openAgentsWorkspace(user);
     let setupStatus = await screen.findByRole('button', {
       name: /8 of 8 agents ready/,
     });
@@ -1323,6 +1339,7 @@ describe('WorldLab', () => {
       'fetch',
       vi.fn(() => jsonResponse(allied)),
     );
+    const user = userEvent.setup();
     render(<WorldLab />);
     const markers = await screen.findAllByRole('button', {
       name: /Select agent (Ember|Rook)/,
@@ -1336,12 +1353,13 @@ describe('WorldLab', () => {
     expect(
       screen.getByTestId('world-map').getAttribute('data-controller-colors'),
     ).toContain(allianceColor);
+    await user.click(screen.getByRole('tab', { name: 'Scoreboard' }));
     expect(
       screen.getByLabelText('Alliance and territory panel'),
     ).toHaveTextContent('Ember (1), Rook (0)');
     expect(
       screen.getAllByText('Ember and Rook formed an alliance.'),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   });
 
   it('deduplicates rendered H3 features before reporting readiness', async () => {
@@ -1514,6 +1532,7 @@ describe('WorldLab', () => {
     expect(
       window.localStorage.getItem('agentborne.world-lab.follow-turn'),
     ).toBe('false');
+    await openOverflow(user);
     await user.click(screen.getByRole('button', { name: 'Export' }));
     expect(
       screen.getByRole('dialog', { name: 'Experiment export' }),
@@ -1575,6 +1594,7 @@ describe('WorldLab', () => {
     await user.click(
       await screen.findByRole('button', { name: 'Single turn' }),
     );
+    await user.click(screen.getByRole('tab', { name: 'Event log' }));
     expect(
       await screen.findByText(/Waited.*direct message accepted/),
     ).toBeInTheDocument();
@@ -1650,6 +1670,7 @@ describe('WorldLab', () => {
     expect(
       await screen.findByLabelText('Direct-message history'),
     ).toHaveTextContent('Sent Rook');
+    await openOverflow(user);
     await user.click(screen.getByRole('button', { name: 'Reset world' }));
     expect(
       await screen.findByText('No direct messages for this agent yet.'),
@@ -1676,6 +1697,7 @@ describe('WorldLab', () => {
     await user.click(
       await screen.findByRole('button', { name: 'Single turn' }),
     );
+    await user.click(screen.getByRole('tab', { name: 'Event log' }));
     expect(
       await screen.findByText('Infection · ' + world.agents[0]!.currentCell),
     ).toBeInTheDocument();
@@ -1716,13 +1738,16 @@ describe('WorldLab', () => {
     await user.click(
       await screen.findByRole('button', { name: 'Select agent Ember' }),
     );
+    await user.click(screen.getByRole('tab', { name: 'Scoreboard' }));
     expect(
       await screen.findByRole('heading', { name: 'Territory scoreboard' }),
     ).toBeInTheDocument();
     const scoreboard = screen.getByLabelText('Territory scoreboard');
     expect(scoreboard).toHaveTextContent('Ember0');
     expect(scoreboard).toHaveTextContent('Rook1');
+    await user.click(screen.getByRole('tab', { name: 'Event log' }));
     expect(screen.getByText(/Rook captured .* from Ember/)).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: 'Agent' }));
     expect(screen.getByLabelText('Recent territory changes')).toHaveTextContent(
       'Lost',
     );
@@ -1765,8 +1790,47 @@ describe('WorldLab', () => {
     await user.click(await screen.findByRole('button', { name: 'Start' }));
     expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText('Playback speed'), '250');
+    await user.click(screen.getByRole('button', { name: 'Agents' }));
+    expect(
+      screen.getByRole('region', { name: 'Agent management workspace' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Live' }));
+    expect(screen.getByTestId('world-map')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Pause' }));
     expect(screen.getByRole('button', { name: 'Start' })).toBeInTheDocument();
+  });
+
+  it('routes agent and hex selections to semantic inspector tabs and keeps scoreboard reachable', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await screen.findByRole('button', { name: 'Start' });
+    expect(screen.getByRole('tab', { name: 'Agent' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await user.click(
+      (await screen.findAllByRole('button', { name: /Select agent/ }))[0]!,
+    );
+    expect(screen.getByRole('tab', { name: 'Agent' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await user.click(screen.getByRole('tab', { name: 'Scoreboard' }));
+    expect(screen.getByLabelText('Territory scoreboard')).toBeInTheDocument();
+  });
+
+  it('bounds recovery activity and exposes newest failures through the dock tab', async () => {
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    await screen.findByRole('button', { name: 'Start' });
+    await user.click(screen.getByRole('tab', { name: 'Failures & recovery' }));
+    expect(
+      screen.getByText('No failures or recovery actions recorded.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Failures and recovery log'),
+    ).not.toBeInTheDocument();
   });
 
   it('resets turn history and UI selections', async () => {
@@ -1786,9 +1850,11 @@ describe('WorldLab', () => {
         '1',
       ),
     );
+    await user.click(screen.getByRole('tab', { name: 'Event log' }));
     expect(
       await screen.findByText('Infection · ' + world.agents[0]!.currentCell),
     ).toBeInTheDocument();
+    await openOverflow(user);
     await user.click(screen.getByRole('button', { name: 'Reset world' }));
     expect(confirm).toHaveBeenCalledWith(
       expect.stringContaining('unexported telemetry'),
@@ -1820,6 +1886,11 @@ describe('WorldLab', () => {
     expect(screen.getByLabelText('Selected hex details')).toHaveTextContent(
       target,
     );
+    expect(screen.getByRole('tab', { name: 'Hex' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
     expect(screen.getByRole('heading', { name: /Ember/ })).toBeInTheDocument();
     act(() => mapLibreMock.mapBackgroundClick?.());
     expect(
@@ -1889,6 +1960,7 @@ describe('WorldLab', () => {
     );
     const user = userEvent.setup();
     render(<WorldLab />);
+    await openAgentsWorkspace(user);
     const summary = await screen.findByText('Model: Alpha');
     await user.click(summary);
     const modelConsole = within(summary.closest('.model-console')!);
@@ -2029,6 +2101,7 @@ describe('WorldLab', () => {
     );
     const user = userEvent.setup();
     render(<WorldLab />);
+    await openAgentsWorkspace(user);
     await user.click(await screen.findByText('Model: Alpha'));
     await user.click(
       screen.getByRole('button', { name: 'Test selected model' }),
@@ -2069,6 +2142,7 @@ describe('WorldLab', () => {
     );
     const user = userEvent.setup();
     render(<WorldLab />);
+    await openAgentsWorkspace(user);
     await user.click(await screen.findByText('Model: retired/model'));
     expect(
       screen.getByText(/Showing the last successful catalog/),
@@ -2150,6 +2224,7 @@ describe('WorldLab', () => {
       expect(
         document.querySelector('.cancel-request-slot button'),
       ).toBeDisabled();
+      fireEvent.click(screen.getByRole('button', { name: 'Agents' }));
       fireEvent.click(screen.getByText('Model: Alpha'));
       expect(screen.getByLabelText('Global model')).toBeEnabled();
       await act(async () => void (await vi.advanceTimersByTimeAsync(10_000)));
@@ -2197,33 +2272,26 @@ describe('WorldLab', () => {
     expect(screen.queryByText('Reconciling request…')).not.toBeInTheDocument();
   });
 
-  it('collapses and expands the bounded public chat dock', async () => {
+  it('collapses and expands the bounded activity dock', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() => jsonResponse(afterPublicMessage())),
     );
     const user = userEvent.setup();
     render(<WorldLab />);
-    const chat = await screen.findByLabelText('Public world chat');
+    await screen.findByLabelText('Public world chat');
     expect(document.querySelector('main')).toHaveClass('world-lab-shell');
-    await user.click(
-      screen.getByRole('button', { name: 'Collapse Public world chat' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Collapse activity' }));
     expect(document.querySelector('main')).toHaveClass('chat-collapsed');
-    expect(chat).not.toHaveTextContent(HOSTILE_MESSAGE);
     expect(
-      screen.getByRole('heading', { name: 'Public world chat' }),
-    ).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'Event log' })).toBeVisible();
+      screen.queryByLabelText('Public world chat'),
+    ).not.toBeInTheDocument();
     expect(screen.queryByLabelText('World event log')).not.toBeInTheDocument();
-    expect(document.querySelector('.bottom-dock .event-panel')).toHaveClass(
-      'dock-collapsed',
-    );
-    await user.click(
-      screen.getByRole('button', { name: 'Expand Public world chat' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Expand activity' }));
     expect(document.querySelector('main')).not.toHaveClass('chat-collapsed');
-    expect(chat).toHaveTextContent(HOSTILE_MESSAGE);
+    expect(screen.getByLabelText('Public world chat')).toHaveTextContent(
+      HOSTILE_MESSAGE,
+    );
   });
 
   it('pauses chat auto-scroll and offers a jump when new messages arrive above the bottom', async () => {
@@ -2385,6 +2453,7 @@ describe('WorldLab', () => {
       screen.getByRole('textbox', { name: 'Personality directive' }),
     ).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
+    await openOverflow(user);
     expect(
       screen.getByRole('button', { name: 'Restore default personalities' }),
     ).toBeDisabled();
@@ -2396,6 +2465,7 @@ describe('WorldLab', () => {
     );
     await user.click(screen.getByRole('button', { name: 'Apply' }));
     expect(screen.getByRole('button', { name: 'Applying…' })).toBeDisabled();
+    await openOverflow(user);
     expect(screen.getByRole('button', { name: 'Reset world' })).toBeDisabled();
     resolveUpdate(
       new Response(
@@ -2428,6 +2498,7 @@ describe('WorldLab', () => {
     );
     const user = userEvent.setup();
     render(<WorldLab />);
+    await openOverflow(user);
     await user.click(
       await screen.findByRole('button', { name: 'Reset world' }),
     );
@@ -2468,6 +2539,7 @@ describe('WorldLab', () => {
     await user.click(
       await screen.findByRole('button', { name: 'Select agent Ember' }),
     );
+    await openOverflow(user);
     const restore = await screen.findByRole('button', {
       name: 'Restore default personalities',
     });
@@ -2541,7 +2613,8 @@ describe('WorldLab', () => {
   it('supports agent selection and previews server-owned export', async () => {
     const user = userEvent.setup();
     render(<WorldLab />);
-    await user.click(await screen.findByRole('button', { name: 'Export' }));
+    await openOverflow(user);
+    await user.click(screen.getByRole('button', { name: 'Export' }));
     await user.click(screen.getByRole('button', { name: 'Clear' }));
     await user.click(screen.getByRole('checkbox', { name: /Ember/ }));
     expect(screen.getByRole('checkbox', { name: /Ember/ })).toBeChecked();
@@ -2593,7 +2666,8 @@ describe('WorldLab', () => {
   it('keeps export out of the details panel and dismisses its modal without losing settings', async () => {
     const user = userEvent.setup();
     render(<WorldLab />);
-    const exportButton = await screen.findByRole('button', { name: 'Export' });
+    await openOverflow(user);
+    const exportButton = screen.getByRole('button', { name: 'Export' });
     expect(
       screen.queryByRole('dialog', { name: 'Experiment export' }),
     ).toBeNull();
@@ -2604,6 +2678,7 @@ describe('WorldLab', () => {
       screen.queryByRole('dialog', { name: 'Experiment export' }),
     ).toBeNull();
     expect(exportButton).toHaveFocus();
+    await openOverflow(user);
     await user.click(exportButton);
     expect(screen.getByLabelText('Export level')).toHaveValue('standard');
     const reopenedDialog = screen.getByRole('dialog', {
@@ -2619,6 +2694,7 @@ describe('WorldLab', () => {
     expect(
       screen.queryByRole('dialog', { name: 'Experiment export' }),
     ).toBeNull();
+    await openOverflow(user);
     await user.click(exportButton);
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(
@@ -2629,7 +2705,8 @@ describe('WorldLab', () => {
   it('offers every tier, turn selector, outcome/action filters, and dependent Custom switches', async () => {
     const user = userEvent.setup();
     render(<WorldLab />);
-    await user.click(await screen.findByRole('button', { name: 'Export' }));
+    await openOverflow(user);
+    await user.click(screen.getByRole('button', { name: 'Export' }));
     const level = screen.getByLabelText('Export level');
     expect(level).toHaveTextContent('Minimal');
     expect(level).toHaveTextContent('Standard');
@@ -2711,7 +2788,8 @@ describe('WorldLab', () => {
       .spyOn(HTMLAnchorElement.prototype, 'click')
       .mockImplementation(() => undefined);
     render(<WorldLab />);
-    await user.click(await screen.findByRole('button', { name: 'Export' }));
+    await openOverflow(user);
+    await user.click(screen.getByRole('button', { name: 'Export' }));
     expect(screen.getByRole('button', { name: 'Copy JSON' })).toBeDisabled();
     expect(
       screen.getByRole('button', { name: 'Download JSON' }),
@@ -2775,6 +2853,7 @@ describe('WorldLab', () => {
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Single turn' })).toBeEnabled();
+    fireEvent.click(screen.getByLabelText('More World Lab actions'));
     expect(screen.getByRole('button', { name: 'Reset world' })).toBeEnabled();
   });
 });

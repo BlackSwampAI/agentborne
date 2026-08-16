@@ -1,5 +1,11 @@
 # Architecture
 
+## Persistent World Lab operator shell
+
+World Lab owns one browser execution controller at the root of its client component. The controller centralizes authoritative snapshot reconciliation, mutation IDs, playback timing, bounded-run targets, cancellation, and unattended recovery. Switching between the Live and Agents workspaces changes only the presented workspace; it does not unmount or duplicate the controller, its timer, or its in-flight request state.
+
+The Live workspace is a grid of independently scrolling agent rail, map, contextual inspector, and bounded activity dock. Agent and hex selections select the corresponding semantic inspector tab, while Scoreboard and Run remain directly reachable. The Agents workspace reuses the same snapshot and existing server mutations for model, reasoning, personality, and strategy assignment. Roster replacement remains a World Setup operation that creates a replacement experiment rather than mutating the active roster mid-run.
+
 Formal alliance experimentation preserves the existing one-way trust boundary:
 
 ```text
