@@ -1244,7 +1244,7 @@ export function defaultWorldSetupRequest(): WorldSetupRequest {
     communicationRangeKm: DEFAULT_COMMUNICATION_RANGE_KM,
     minimumTickIntervalMinutes: DEFAULT_MINIMUM_TICK_INTERVAL_MINUTES,
     maximumTickIntervalMinutes: DEFAULT_MAXIMUM_TICK_INTERVAL_MINUTES,
-    patientZeroAgentId: null,
+    patientZeroAgentId: roster[0]!.id,
     roster,
     modelConfiguration: {
       globalModelId: null,

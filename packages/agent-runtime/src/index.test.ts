@@ -223,7 +223,7 @@ describe('OpenRouterAgentProvider', () => {
       'no provider tool call is needed',
     );
     expect(request.messages[0]!.content).toContain(
-      'recommendations may name only displayedEligibleRecipientAgentIds',
+      'recommendations may name only IDs in diplomacySummary.displayedEligiblePairs',
     );
     expect(request.messages[0]!.content).toContain('subordinate preferences');
     expect(request.messages[0]!.content).not.toMatch(
@@ -287,7 +287,7 @@ describe('OpenRouterAgentProvider', () => {
   it('makes selective communication the universal default without changing wire fields', () => {
     const guidance = buildOpenRouterRequest(observation, TEST_MODEL)
       .messages[0]!.content;
-    expect(guidance).toContain('DECISION CONTRACT (text-flat-json-v5)');
+    expect(guidance).toContain('DECISION CONTRACT (text-flat-json-v6)');
     expect(guidance).toContain(
       'communicationType "none" is the normal/default choice',
     );

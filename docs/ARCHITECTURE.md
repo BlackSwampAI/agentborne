@@ -73,7 +73,7 @@ The Game API is authoritative for session personality configuration. World reset
 
 ## Tick flow
 
-An applied scenario may designate one Patient Zero coordinator. The service
+Every current applied scenario designates one Patient Zero coordinator. The service
 adds a bounded global strategic view only to that agent's immutable
 observation; other observations retain their local/alliance bounds. The engine
 alone authorizes player-hidden Zero broadcasts and Patient-Zero-endpoint direct
@@ -81,7 +81,14 @@ range bypass. Patient Zero receives no extra movement, action, infection,
 capture, ownership, or alliance authority. Every agent observation is built
 from one frozen pre-tick snapshot.
 
-The universal `text-flat-json-v5` prompt makes `communicationType: "none"` the
+Patient Zero's global diplomacy context is a fixed-cap sparse summary of
+authoritative eligible pairs, acceptable proposals, leave availability,
+aggregate blocker counts, and prioritized blocker examples. Deterministic
+counts and truncation flags preserve global shape without a roster-sized
+feasibility expansion. Historical exports may retain a null designation, but
+that read compatibility never creates a coordinator-free live scenario.
+
+The universal `text-flat-json-v6` prompt makes `communicationType: "none"` the
 normal choice for ordinary agents and Patient Zero unless a message adds new
 decision-relevant value. Concrete requests or replies, negotiation,
 observed-fact warnings, changed plans, border/conflict coordination, and
@@ -152,11 +159,14 @@ alliance dissolves below two members.
 Each frozen observation contains engine-/service-authored diplomacy affordances:
 exact proposal recipient IDs, acceptable proposal IDs, leave availability, and
 compact stable blocker codes for a bounded set of unavailable targets. Patient
-Zero receives a bounded per-agent global feasibility summary: total eligible
-counts, at most four displayed eligible IDs, truncation flags, blocker counts by
-stable reason, and at most four prioritized blocker examples. It receives no
-pending decisions or free-form pair matrix and may recommend only displayed
-eligible IDs. The model copies listed IDs into the same flat response. Provider
+Zero receives a fixed-cap sparse global summary: total eligible pair and
+acceptable-proposal counts, at most 12 displayed pairs, eight proposal IDs,
+eight leave IDs, stable blocker totals, prioritized examples, and explicit
+truncation. It receives no pending decisions or free-form pair matrix and may
+recommend only displayed IDs. Eligible pairs use deterministic round-robin
+proposer coverage with a tick-based rotation so the fixed display budget does
+not permanently favor low-sorting agent IDs. The model copies listed IDs into
+the same flat response. Provider
 tools are not used: a tool round trip would add another
 inference boundary and tokens while duplicating deterministic engine knowledge;
 no measured token saving is claimed.

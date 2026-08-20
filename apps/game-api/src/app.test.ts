@@ -9,6 +9,8 @@ import {
 } from '@hexzero/agent-runtime';
 import {
   cancelledTurnResponseSchema,
+  apiErrorSchema,
+  defaultWorldSetupResponseSchema,
   h3CellSchema,
   experimentExportPreviewSchema,
   experimentExportResponseSchema,
@@ -64,6 +66,42 @@ describe('provider environment compatibility', () => {
 });
 
 describe('game API simulation boundary', () => {
+  it('requires a known Patient Zero through the public setup boundary', async () => {
+    const app = createApp({
+      provider: new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
+      ]),
+    });
+    const defaultsResponse = await app.request(
+      '/api/simulation/experiment/setup/default',
+    );
+    expect(defaultsResponse.status).toBe(200);
+    const defaults = defaultWorldSetupResponseSchema.parse(
+      await defaultsResponse.json(),
+    ).request;
+    expect(defaults.patientZeroAgentId).toBe(defaults.roster[0]!.id);
+
+    const invalidRequests: unknown[] = [
+      { ...defaults, patientZeroAgentId: undefined },
+      { ...defaults, patientZeroAgentId: null },
+      {
+        ...defaults,
+        patientZeroAgentId: '00000000-0000-4000-8000-000000000999',
+      },
+    ];
+    for (const request of invalidRequests) {
+      const response = await app.request('/api/simulation/experiment/setup', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request),
+      });
+      expect(response.status).toBe(400);
+      expect(apiErrorSchema.parse(await response.json())).toMatchObject({
+        error: { code: 'invalid_request' },
+      });
+    }
+  });
+
   it('coalesces repeated delivery of the same tick mutation ID', async () => {
     let calls = 0;
     const app = createApp({

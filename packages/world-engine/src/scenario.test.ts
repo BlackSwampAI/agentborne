@@ -27,6 +27,9 @@ describe('configurable world scenarios', () => {
     expect(first.feasible && first.scenario.decisionContractVersion).toBe(
       AGENT_DECISION_CONTRACT_VERSION,
     );
+    expect(first.feasible && first.scenario.patientZeroAgentId).toBe(
+      DEVELOPMENT_AGENT_BLUEPRINTS[0]!.id,
+    );
     expect(
       first.feasible &&
         first.world.agents.map(({ id, currentCell }) => ({ id, currentCell })),

@@ -3,6 +3,9 @@ import {
   MODEL_SUMMARY_MAX_LENGTH,
   AGENT_DECISION_CONTRACT_VERSION,
   PREVIOUS_AGENT_DECISION_CONTRACT_VERSION,
+  FLUID_ALLIANCE_AGENT_DECISION_CONTRACT_VERSION,
+  PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS,
+  WORLD_SCENARIO_LIMITS,
   OBJECTIVE_PROMPT_VERSION,
   MESSAGE_MAX_LENGTH,
   PERSONALITY_MAX_LENGTH,
@@ -32,6 +35,7 @@ import {
   updateAgentPersonalityResponseSchema,
   allianceSchema,
   allianceProposalSchema,
+  patientZeroDiplomacySummarySchema,
   diplomacyIntentSchema,
   diplomacyResultSchema,
   DEVELOPMENT_WORLD_CONFIG,
@@ -157,6 +161,7 @@ const snapshot = {
     spawnSeed: 'spawn',
     minimumSpawnSeparation: 0,
     communicationRangeKm: 12,
+    patientZeroAgentId: worldAgents[0]!.id,
     roster: worldAgents.map(({ currentCell: _currentCell, ...agent }) => agent),
     modelConfiguration: {
       globalModelId: 'author/compatible-model',
@@ -177,6 +182,7 @@ const snapshot = {
     },
     objectiveVersion: 'durable-influence-v2',
     capabilities: { communication: true, diplomacy: true },
+    decisionContractVersion: AGENT_DECISION_CONTRACT_VERSION,
     exactCellCount: 1,
     areaSquareKilometers: 0.1,
     startingCells: worldAgents.map(() => cell),
@@ -250,9 +256,78 @@ const snapshot = {
 };
 
 describe('agent observation and decision schemas', () => {
+  it('keeps the maximum sparse Patient Zero diplomacy shape within budget', () => {
+    const agentIds = Array.from({ length: 32 }, (_, index) =>
+      agentIdSchema.parse(
+        `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      ),
+    );
+    const proposalIds = Array.from(
+      { length: PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.acceptableProposals },
+      (_, index) =>
+        `20000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+    );
+    const reasons = [
+      'current-ally',
+      'out-of-range',
+      'outgoing-proposal-exists',
+      'incoming-proposal-exists',
+      'alliance-to-alliance-merge',
+    ] as const;
+    const summary = patientZeroDiplomacySummarySchema.parse({
+      eligiblePairCount:
+        WORLD_SCENARIO_LIMITS.maximumAgents *
+        (WORLD_SCENARIO_LIMITS.maximumAgents - 1),
+      displayedEligiblePairs: Array.from(
+        {
+          length: PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.displayedEligiblePairs,
+        },
+        (_, index) => ({
+          proposerId: agentIds[index]!,
+          recipientId: agentIds[(index + 1) % agentIds.length]!,
+        }),
+      ),
+      eligiblePairsTruncated: true,
+      acceptableProposals: proposalIds.map((proposalId, index) => ({
+        agentId: agentIds[index]!,
+        proposalId,
+      })),
+      acceptableProposalCount: WORLD_SCENARIO_LIMITS.maximumAgents,
+      acceptableProposalsTruncated: true,
+      leaveAvailableAgentIds: agentIds.slice(
+        0,
+        PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.leaveAvailableAgentIds,
+      ),
+      leaveAvailableCount: WORLD_SCENARIO_LIMITS.maximumAgents,
+      leaveAvailableTruncated: true,
+      blockedCounts: reasons.map((reason) => ({
+        reason,
+        count:
+          WORLD_SCENARIO_LIMITS.maximumAgents *
+          (WORLD_SCENARIO_LIMITS.maximumAgents - 1),
+      })),
+      blockerExamples: Array.from(
+        { length: PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.blockerExamples },
+        (_, index) => ({
+          proposerId: agentIds[index + 12]!,
+          recipientId: agentIds[index + 13]!,
+          reason: reasons[index % reasons.length]!,
+        }),
+      ),
+    });
+    expect(
+      new TextEncoder().encode(JSON.stringify(summary)).byteLength,
+    ).toBeLessThanOrEqual(
+      PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.serializedUtf8Bytes,
+    );
+  });
+
   it('preserves established engine contract identifiers through branding changes', () => {
-    expect(AGENT_DECISION_CONTRACT_VERSION).toBe('text-flat-json-v5');
+    expect(AGENT_DECISION_CONTRACT_VERSION).toBe('text-flat-json-v6');
     expect(PREVIOUS_AGENT_DECISION_CONTRACT_VERSION).toBe('text-flat-json-v4');
+    expect(FLUID_ALLIANCE_AGENT_DECISION_CONTRACT_VERSION).toBe(
+      'text-flat-json-v5',
+    );
     expect(OBJECTIVE_PROMPT_VERSION).toBe('durable-influence-v2');
     expect(
       modelVerificationSchema.parse({

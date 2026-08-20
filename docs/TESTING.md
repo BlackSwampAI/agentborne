@@ -9,14 +9,19 @@ schema-v10 export/archive behavior, and schema-v9 compatibility. World Lab tests
 cover Single tick, 5/10/25/50/100 targets, the default target of 25, per-agent
 cost warnings, cancellation reconciliation, and lost-tick status.
 
-Focused deterministic coverage includes physical-distance messaging across H3 resolutions, the eight-agent observation cap, alliance long-range visibility and delivery, channel privacy, seeded move-affordance ordering, effective neutral/alliance colors, and operator-only private-feed filters. Provider tests remain offline and verify the flat `text-flat-json-v5` contract, its selective-communication and diplomacy-affordance policy text, unchanged wire parsing, and legacy v3/v4 attribution compatibility.
+Focused deterministic coverage includes physical-distance messaging across H3 resolutions, the eight-agent observation cap, alliance long-range visibility and delivery, channel privacy, seeded move-affordance ordering, effective neutral/alliance colors, and operator-only private-feed filters. Provider tests remain offline and verify the flat `text-flat-json-v6` contract, its selective-communication and bounded diplomacy-affordance policy text, unchanged wire parsing, and legacy v3/v4/v5 attribution compatibility.
 
-Patient Zero coverage verifies disabled/legacy scenario defaults, valid roster
+Patient Zero coverage verifies mandatory current-run defaults and rejection of
+missing/null/unknown selections while preserving null legacy exports, valid roster
 designation, bounded exclusive global awareness, Zero authority and private
 fan-out, Patient-Zero-endpoint direct replies, ordinary range enforcement,
 immutable retry observations, normal world-action legality, export telemetry,
 and restrained World Lab role/filter rendering. Provider tests use
-`text-flat-json-v5`; no live provider or geocoder is involved.
+`text-flat-json-v6`; no live provider or geocoder is involved. A worst-case
+32-agent test requires the serialized diplomacy summary to remain at or below
+4,096 UTF-8 bytes with deterministic ordering, fixed caps, stable blocker
+counts, explicit truncation, maximum-cap fixtures, diverse proposer coverage,
+and deterministic tick rotation.
 
 Selective communication is evaluated empirically with a same-model,
 same-scenario 10-tick comparison. Fewer than 40 messages across 80 decisions
@@ -86,7 +91,7 @@ consumption, cancellation during backoff, and the unchanged two-call ceiling.
 
 - Centralized development-contract tests prove radius 6 produces exactly 127 unique open/uncontrolled cells, eight unique deterministic starts, stable IDs/default personalities, and an eight-entry scoreboard with up to seven other-agent observations.
 - Alliance engine/schema tests cover 10- and 32-agent feasibility, full-roster membership, a maximum-count five-alliance partition without color capacity, free-agent formation, member invitations, unaffiliated join requests to allied recipients, recipient-only acceptance, proposal conflicts, exact two-tick expiry for tick callers, legacy two-roster-round expiry, stale invalidation, one-alliance membership, unilateral leave/switch semantics, deterministic accessible color reuse, and allied-capture rejection.
-- Simulation tests cover frozen exact diplomacy affordances and blocker codes, Patient Zero's bounded global feasibility view, same-tick resolution races, independent world/communication/diplomacy outcomes, isolated lost ticks, bounded authoritative alliance observations, reset/default semantics, multi-agent telemetry relevance, alliance territory sums, and complete eight-record tick groups.
+- Simulation tests cover frozen exact diplomacy affordances and blocker codes, Patient Zero's fixed-cap sparse global diplomacy view, same-tick resolution races, independent world/communication/diplomacy outcomes, isolated lost ticks, bounded authoritative alliance observations, reset/default semantics, multi-agent telemetry relevance, alliance territory sums, and complete eight-record tick groups.
 
 Prompt tests verify that models copy only exact supplied diplomacy IDs, treat
 range/membership/capacity blockers as authoritative, avoid repeating unavailable

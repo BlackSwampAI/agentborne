@@ -6,6 +6,7 @@ import type { AgentProvider, ProviderDecision } from '@hexzero/agent-runtime';
 import {
   LEGACY_AGENT_DECISION_CONTRACT_VERSION,
   PREVIOUS_AGENT_DECISION_CONTRACT_VERSION,
+  FLUID_ALLIANCE_AGENT_DECISION_CONTRACT_VERSION,
   experimentExportDocumentSchema,
   type AgentObservation,
   type ExperimentExportDocument,
@@ -151,7 +152,7 @@ describe('experiment archive', () => {
         id: '3f5e8994-cf39-44e0-9424-b829eb246e55',
         includeTopLevelVersion: false,
       },
-    ].map(({ id, includeTopLevelVersion }) => {
+    ].map(({ id, includeTopLevelVersion }, index) => {
       const raw = structuredClone(current) as unknown as {
         experiment: Record<string, unknown> & {
           scenario?: Record<string, unknown>;
@@ -164,6 +165,8 @@ describe('experiment archive', () => {
       else delete raw.experiment.decisionContractVersion;
       if (raw.experiment.scenario)
         delete raw.experiment.scenario.decisionContractVersion;
+      if (index === 0 && raw.experiment.scenario)
+        raw.experiment.scenario.patientZeroAgentId = null;
       return experimentExportDocumentSchema.parse(raw);
     });
     for (const legacy of legacyDocuments) {
@@ -189,6 +192,13 @@ describe('experiment archive', () => {
         decisionContractVersion: LEGACY_AGENT_DECISION_CONTRACT_VERSION,
       });
     }
+    const nullCoordinator = legacyDocuments[0]!;
+    expect(nullCoordinator.experiment.scenario?.patientZeroAgentId).toBeNull();
+    expect(
+      new ExperimentQueryService(archive).patientZero(
+        nullCoordinator.experiment.id,
+      ).rows,
+    ).toEqual([]);
     const previousRaw = structuredClone(current) as unknown as {
       experiment: Record<string, unknown> & {
         scenario?: Record<string, unknown>;
@@ -213,6 +223,19 @@ describe('experiment archive', () => {
     ).toEqual({
       decision_contract_version: PREVIOUS_AGENT_DECISION_CONTRACT_VERSION,
     });
+    const fluidRaw = structuredClone(current) as unknown as {
+      experiment: Record<string, unknown> & {
+        scenario?: Record<string, unknown>;
+      };
+    };
+    fluidRaw.experiment.id = '5f5e8994-cf39-44e0-9424-b829eb246e55';
+    fluidRaw.experiment.decisionContractVersion =
+      FLUID_ALLIANCE_AGENT_DECISION_CONTRACT_VERSION;
+    if (fluidRaw.experiment.scenario)
+      fluidRaw.experiment.scenario.decisionContractVersion =
+        FLUID_ALLIANCE_AGENT_DECISION_CONTRACT_VERSION;
+    const fluid = experimentExportDocumentSchema.parse(fluidRaw);
+    expect(() => importExperimentExport(archive, fluid)).not.toThrow();
     archive.close();
   });
 

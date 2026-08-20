@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appliedScenarioSchema,
+  archivedAppliedScenarioSchema,
   assignBehavior,
   behaviorConfigurationSchema,
   worldSetupPreviewResponseSchema,
@@ -28,6 +29,7 @@ const request = {
   spawnSeed: 'spawn',
   minimumSpawnSeparation: 1,
   communicationRangeKm: 12,
+  patientZeroAgentId: roster[0].id,
   roster: [...roster],
   modelConfiguration: {
     globalModelId: null,
@@ -124,10 +126,19 @@ describe('scenario contracts', () => {
     ).toBe(false);
   });
 
-  it('defaults legacy scenarios to disabled Patient Zero and validates designation', () => {
+  it('requires a known Patient Zero for current setup requests', () => {
     expect(
-      worldSetupRequestSchema.parse(request).patientZeroAgentId,
-    ).toBeNull();
+      worldSetupRequestSchema.safeParse({
+        ...request,
+        patientZeroAgentId: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      worldSetupRequestSchema.safeParse({
+        ...request,
+        patientZeroAgentId: null,
+      }).success,
+    ).toBe(false);
     expect(
       worldSetupRequestSchema.parse({
         ...request,
@@ -158,5 +169,55 @@ describe('scenario contracts', () => {
         setupWarnings: [],
       }).decisionContractVersion,
     ).toBe(AGENT_DECISION_CONTRACT_VERSION);
+  });
+
+  it('preserves null only for strict archived applied scenarios with common refinements', () => {
+    const archivedRoster = [
+      ...request.roster,
+      {
+        ...request.roster[0],
+        id: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
+        name: 'Rook',
+      },
+    ];
+    const archived = {
+      ...worldSetupRequestSchema.parse(request),
+      patientZeroAgentId: null,
+      roster: archivedRoster,
+      behaviorConfiguration: {
+        ...request.behaviorConfiguration,
+        assignments: assignBehavior(
+          archivedRoster.map(({ id }) => id as never),
+          request.behaviorConfiguration.seed,
+          'balanced-random',
+        ),
+      },
+      exactCellCount: 2,
+      areaSquareKilometers: 0.1,
+      startingCells: ['8928308280fffff', '892a1072893ffff'],
+      setupWarnings: [],
+    };
+    expect(
+      archivedAppliedScenarioSchema.parse(archived).patientZeroAgentId,
+    ).toBeNull();
+    expect(
+      archivedAppliedScenarioSchema.safeParse({
+        ...archived,
+        maximumTickIntervalMinutes: 1,
+        minimumTickIntervalMinutes: 2,
+      }).success,
+    ).toBe(false);
+    expect(
+      archivedAppliedScenarioSchema.safeParse({
+        ...archived,
+        startingCells: archived.startingCells.slice(0, -1),
+      }).success,
+    ).toBe(false);
+    expect(
+      archivedAppliedScenarioSchema.safeParse({
+        ...archived,
+        unknownHistoricalField: true,
+      }).success,
+    ).toBe(false);
   });
 });

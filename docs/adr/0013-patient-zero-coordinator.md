@@ -1,9 +1,10 @@
 # ADR 0013: Experimental Patient Zero coordinator
 
-Status: accepted experiment
+Status: accepted experiment; optional designation superseded by ADR 0017
 
-Scenarios may designate one roster agent as Patient Zero, or `null` for a
-baseline. Patient Zero remains a physical agent governed by the ordinary
+Historical scenarios may designate one roster agent as Patient Zero, or `null`
+for a legacy baseline. ADR 0017 requires the designation for all current/live
+scenarios. Patient Zero remains a physical agent governed by the ordinary
 move, infect, capture, wait, ownership, and diplomacy rules. It receives one
 bounded authoritative global strategic summary and may attach one private
 `zero` broadcast to its normal decision. The broadcast reaches every other

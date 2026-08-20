@@ -27,9 +27,8 @@ and a former member may later join or request another alliance.
 
 Every ordinary frozen observation carries exact legal proposal target IDs,
 acceptable proposal IDs, leave availability, and compact bounded blocker data.
-Patient Zero receives per-agent eligible totals, at most four displayed legal
-IDs, explicit truncation, blocker totals grouped by stable reason, and at most
-four prioritized blocker examples. It receives no private reasoning, pending
+Patient Zero's per-agent feasibility shape is superseded by ADR 0017's fixed-cap
+sparse coordinator summary. It receives no private reasoning, pending
 decisions, future same-tick actions, or unbounded pair matrix and may recommend
 only displayed eligible IDs. Resolution remains authoritative and may reject an
 intent when an earlier deterministic same-tick intent changes membership or

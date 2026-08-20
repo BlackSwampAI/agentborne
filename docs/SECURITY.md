@@ -8,6 +8,9 @@ recent authoritative events. It never serializes the complete world, future
 turn information, provider payloads, credentials, or live player GPS. Direct
 range bypass is engine-authoritative and applies only when Patient Zero is one
 endpoint; invalid channel/recipient combinations do not mutate state.
+The diplomacy portion has roster-independent caps: at most 12 displayed legal
+pairs, eight acceptable proposals, eight leave IDs, and eight prioritized
+blocker examples, plus aggregate stable blocker counts and explicit truncation.
 
 ## Secrets and deployment
 
@@ -56,10 +59,10 @@ The model is explicitly instructed to return only one flat JSON decision with on
 Agent-authored messages, personalities, summaries, scoreboards, alliance events, proposals, and natural-language alliance claims are bounded untrusted data. They appear only inside the immutable user observation, never the fixed system instruction. Direct eligibility is derived from the pre-action snapshot. Recipient/range, infection, controller-presence, alliance membership, proposal eligibility, system ID/color allocation, and capture validation remain authoritative in the world engine. Models cannot choose alliance IDs, colors, membership lists, or metadata. Only accepted typed diplomacy changes alliance state, and rejected components cannot partially mutate or corrupt one another. World Lab renders model text through React text nodes and never raw HTML.
 
 Frozen observations expose only runtime-validated exact diplomacy IDs and
-bounded stable blocker codes. Patient Zero's global feasibility summary uses
-counts, explicit truncation, and at most four eligible IDs and four blocker
-examples per agent; it contains neither pending decisions nor future same-tick
-actions. These affordances avoid a provider-controlled tool boundary; submitted
+bounded stable blocker codes. Patient Zero's sparse global diplomacy summary
+uses fixed caps, aggregate counts, deterministic priority, and explicit
+truncation; it contains neither pending decisions nor future same-tick actions.
+These affordances avoid a provider-controlled tool boundary; submitted
 intents still pass authoritative engine validation during deterministic
 resolution.
 

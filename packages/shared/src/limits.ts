@@ -21,3 +21,11 @@ export const WORLD_RADIUS_PRESETS = {
   large: { radius: 20, expectedCellCount: 1_261 },
   'very-large': { radius: 40, expectedCellCount: 4_921 },
 } as const;
+
+export const PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS = {
+  displayedEligiblePairs: 12,
+  acceptableProposals: 8,
+  leaveAvailableAgentIds: 8,
+  blockerExamples: 8,
+  serializedUtf8Bytes: 4_096,
+} as const;
