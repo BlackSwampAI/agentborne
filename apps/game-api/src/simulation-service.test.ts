@@ -10,6 +10,7 @@ import {
   AGENT_DECISION_CONTRACT_VERSION,
   ALLIANCE_COLOR_PALETTE,
   PERSONALITY_MAX_LENGTH,
+  PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS,
   assignBehavior,
   agentIdSchema,
   allianceIdSchema,
@@ -93,6 +94,28 @@ function exportRequest(level: 'minimal' | 'standard' | 'full-safe' | 'custom') {
 }
 
 describe('SimulationService', () => {
+  it('requires a known Patient Zero at the live setup boundary', () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
+      ]),
+    );
+    const setup = defaultWorldSetupRequest();
+    expect(setup.patientZeroAgentId).toBe(setup.roster[0]!.id);
+    expect(() =>
+      simulation.applyWorldSetup({ ...setup, patientZeroAgentId: null }),
+    ).toThrow(SimulationValidationError);
+    expect(() =>
+      simulation.applyWorldSetup({
+        ...setup,
+        patientZeroAgentId: '00000000-0000-4000-8000-000000000999',
+      }),
+    ).toThrow(SimulationValidationError);
+    expect(simulation.getSnapshot().scenario.patientZeroAgentId).toBe(
+      setup.patientZeroAgentId,
+    );
+  });
+
   it('prioritizes free diplomacy blocker examples before allied relationships', () => {
     const base = toWorldState(createDevelopmentWorld({ generatedAt: now() }));
     const agents = [...base.agents.values()];
@@ -651,32 +674,28 @@ describe('SimulationService', () => {
     const directive = await simulation.executeNextTurn();
     const reply = await simulation.executeNextTurn();
     expect(directive.observation.patientZeroGlobalView?.agents).toHaveLength(8);
-    expect(
-      directive.observation.patientZeroGlobalView?.diplomacyFeasibility,
-    ).toHaveLength(8);
-    expect(
-      directive.observation.patientZeroGlobalView?.diplomacyFeasibility.find(
-        ({ agentId }) => agentId === patientZeroId,
-      ),
-    ).toMatchObject({
-      agentId: patientZeroId,
-      eligibleRecipientCount: 7,
-      eligibleRecipientsTruncated: true,
-      leaveAvailable: false,
+    const diplomacySummary =
+      directive.observation.patientZeroGlobalView?.diplomacySummary;
+    expect(diplomacySummary).toMatchObject({
+      eligiblePairCount: 56,
+      eligiblePairsTruncated: true,
+      acceptableProposals: [],
+      acceptableProposalCount: 0,
+      acceptableProposalsTruncated: false,
+      leaveAvailableAgentIds: [],
+      leaveAvailableCount: 0,
+      leaveAvailableTruncated: false,
+      blockedCounts: [],
+      blockerExamples: [],
     });
+    expect(diplomacySummary?.displayedEligiblePairs).toHaveLength(12);
     expect(
-      directive.observation.patientZeroGlobalView?.diplomacyFeasibility.find(
-        ({ agentId }) => agentId === patientZeroId,
-      )?.displayedEligibleRecipientAgentIds,
-    ).toHaveLength(4);
-    expect(
-      directive.observation.diplomacyAvailability.propose
-        .eligibleRecipientAgentIds,
-    ).toHaveLength(
-      directive.observation.patientZeroGlobalView?.diplomacyFeasibility.find(
-        ({ agentId }) => agentId === patientZeroId,
-      )?.eligibleRecipientCount ?? -1,
-    );
+      new Set(
+        diplomacySummary?.displayedEligiblePairs.map(
+          ({ proposerId }) => proposerId,
+        ),
+      ).size,
+    ).toBe(8);
     expect(reply.observation.patientZeroGlobalView).toBeNull();
     expect(
       JSON.stringify(directive.observation.patientZeroGlobalView),
@@ -742,26 +761,10 @@ describe('SimulationService', () => {
       },
     });
     const record = await simulation.executeNextTurn();
-    const feasibility =
-      record.observation.patientZeroGlobalView?.diplomacyFeasibility;
-    expect(feasibility).toHaveLength(32);
-    expect(
-      feasibility?.every(
-        (entry) =>
-          entry.displayedEligibleRecipientAgentIds.length <= 4 &&
-          entry.blockerExamples.length <= 4 &&
-          !('eligibleRecipientAgentIds' in entry) &&
-          entry.blockerExamples.every(
-            ({ agentId }) => agentId !== entry.agentId,
-          ),
-      ),
-    ).toBe(true);
-    const patientZeroFeasibility = feasibility?.find(
-      ({ agentId }) => agentId === patientZeroAgentId,
-    );
-    expect(patientZeroFeasibility).toMatchObject({
-      eligibleRecipientCount: 0,
-      eligibleRecipientsTruncated: false,
+    const summary = record.observation.patientZeroGlobalView?.diplomacySummary;
+    expect(summary).toMatchObject({
+      eligiblePairCount: 0,
+      eligiblePairsTruncated: false,
       blockedCounts: expect.arrayContaining([
         expect.objectContaining({ reason: 'out-of-range' }),
       ]),
@@ -769,6 +772,72 @@ describe('SimulationService', () => {
         expect.objectContaining({ reason: 'out-of-range' }),
       ]),
     });
+    expect(summary?.displayedEligiblePairs).toHaveLength(0);
+    expect(summary?.blockerExamples.length).toBeLessThanOrEqual(8);
+    expect(
+      new TextEncoder().encode(JSON.stringify(summary)).byteLength,
+    ).toBeLessThanOrEqual(
+      PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.serializedUtf8Bytes,
+    );
+  });
+
+  it('fairly and deterministically rotates sparse diplomacy pairs across ticks', async () => {
+    const decisions = Array.from({ length: 64 }, () => ({
+      worldAction: { type: 'wait' as const },
+      summary: 'Wait.',
+    }));
+    const createSimulation = () => {
+      const simulation = service(new ScriptedAgentProvider(decisions));
+      const setup = defaultWorldSetupRequest();
+      const roster = generateDeterministicRoster(32, 'pz-fair-pairs');
+      simulation.applyWorldSetup({
+        ...setup,
+        radius: 12,
+        communicationRangeKm: 100,
+        roster,
+        patientZeroAgentId: roster[0]!.id,
+        modelConfiguration: {
+          ...setup.modelConfiguration,
+          globalModelId: 'deterministic-script',
+        },
+        behaviorConfiguration: {
+          ...setup.behaviorConfiguration,
+          assignments: assignBehavior(
+            roster.map(({ id }) => id),
+            setup.behaviorConfiguration.seed,
+            'balanced-random',
+          ),
+        },
+      });
+      return simulation;
+    };
+    const first = createSimulation();
+    const duplicate = createSimulation();
+    const firstTick = (await first.executeNextTick()).find(
+      ({ observation }) => observation.patientZero.isPatientZero,
+    )?.observation.patientZeroGlobalView?.diplomacySummary;
+    const duplicateTick = (await duplicate.executeNextTick()).find(
+      ({ observation }) => observation.patientZero.isPatientZero,
+    )?.observation.patientZeroGlobalView?.diplomacySummary;
+    expect(firstTick?.displayedEligiblePairs).toEqual(
+      duplicateTick?.displayedEligiblePairs,
+    );
+    expect(
+      new Set(
+        firstTick?.displayedEligiblePairs.map(({ proposerId }) => proposerId),
+      ).size,
+    ).toBe(12);
+    const secondTick = (await first.executeNextTick()).find(
+      ({ observation }) => observation.patientZero.isPatientZero,
+    )?.observation.patientZeroGlobalView?.diplomacySummary;
+    expect(secondTick?.displayedEligiblePairs).not.toEqual(
+      firstTick?.displayedEligiblePairs,
+    );
+    expect(
+      new Set(
+        secondTick?.displayedEligiblePairs.map(({ proposerId }) => proposerId),
+      ).size,
+    ).toBe(12);
   });
 
   it('reproduces move ordering for identical inputs and varies it across agents', async () => {

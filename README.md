@@ -2,11 +2,12 @@
 
 Hex Zero is an agent-first geographic experiment. A configurable roster of model-backed agents moves, infects, captures contested territory, communicates, and conducts formal alliance diplomacy while the World Lab exposes every safe decision record.
 
-Scenarios may optionally designate one experimental Patient Zero coordinator.
+Every new or live scenario designates one roster agent as the Patient Zero
+coordinator; the deterministic default is the first default-roster agent.
 The role receives bounded global strategic information and can send private
 advisory directives, but remains subject to the same movement and world-action
 rules as every other agent. The universal flat provider contract is
-`text-flat-json-v5`; the objective remains `durable-influence-v2`. For every
+`text-flat-json-v6`; the objective remains `durable-influence-v2`. For every
 agent, including Patient Zero, no message is the normal choice unless a message
 adds new decision-relevant value; routine action narration and filler are
 explicitly discouraged.
@@ -87,6 +88,11 @@ rule. Free agents may form a new alliance, allied members may invite a free
 agent, and a free agent may request entry from an allied recipient. Frozen
 observations supply exact legal diplomacy IDs and bounded blocker codes so the
 same single model request does not need provider tools or infer engine rules.
+Patient Zero receives a fixed-cap sparse global diplomacy summary rather than a
+per-agent feasibility expansion. Counts and explicit truncation describe
+omitted options, while recommendations may use only displayed authoritative
+agent and proposal IDs. Legacy archived experiments without a Patient Zero
+remain readable and retain their historical null attribution.
 
 When every development cell is infected, World Lab automatically pauses
 playback and disables Start to avoid accidental provider calls. Reset and export

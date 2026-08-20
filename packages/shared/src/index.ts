@@ -1,7 +1,10 @@
 import { z } from 'zod';
 export * from './behavior';
 export * from './limits';
-import { WORLD_SCENARIO_LIMITS } from './limits';
+import {
+  PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS,
+  WORLD_SCENARIO_LIMITS,
+} from './limits';
 import {
   assignBehavior,
   behaviorAssignmentSchema,
@@ -32,10 +35,13 @@ export const OPENROUTER_PROVIDER_TIMEOUT_MS = 75_000;
 export const OPENROUTER_429_FALLBACK_BACKOFF_MS = 1_500;
 export const LEGACY_AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v3';
 export const PREVIOUS_AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v4';
-export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v5';
+export const FLUID_ALLIANCE_AGENT_DECISION_CONTRACT_VERSION =
+  'text-flat-json-v5';
+export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v6';
 export const agentDecisionContractVersionSchema = z.enum([
   LEGACY_AGENT_DECISION_CONTRACT_VERSION,
   PREVIOUS_AGENT_DECISION_CONTRACT_VERSION,
+  FLUID_ALLIANCE_AGENT_DECISION_CONTRACT_VERSION,
   AGENT_DECISION_CONTRACT_VERSION,
 ]);
 export const OBJECTIVE_PROMPT_VERSION = 'durable-influence-v2';
@@ -862,7 +868,14 @@ export const patientZeroDiplomacyFeasibilitySchema = z
         z
           .object({
             reason: diplomacyProposalBlockReasonSchema,
-            count: z.number().int().positive(),
+            count: z
+              .number()
+              .int()
+              .positive()
+              .max(
+                WORLD_SCENARIO_LIMITS.maximumAgents *
+                  (WORLD_SCENARIO_LIMITS.maximumAgents - 1),
+              ),
           })
           .strict(),
       )
@@ -906,6 +919,130 @@ export const patientZeroDiplomacyFeasibilitySchema = z
           'Patient Zero diplomacy samples must be unique and attributed.',
       });
   });
+export const patientZeroDiplomacySummarySchema = z
+  .object({
+    eligiblePairCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(
+        WORLD_SCENARIO_LIMITS.maximumAgents *
+          (WORLD_SCENARIO_LIMITS.maximumAgents - 1),
+      ),
+    displayedEligiblePairs: z
+      .array(
+        z
+          .object({
+            proposerId: agentIdSchema,
+            recipientId: agentIdSchema,
+          })
+          .strict(),
+      )
+      .max(PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.displayedEligiblePairs),
+    eligiblePairsTruncated: z.boolean(),
+    acceptableProposals: z
+      .array(
+        z
+          .object({
+            agentId: agentIdSchema,
+            proposalId: allianceProposalIdSchema,
+          })
+          .strict(),
+      )
+      .max(PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.acceptableProposals),
+    acceptableProposalCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
+    acceptableProposalsTruncated: z.boolean(),
+    leaveAvailableAgentIds: z
+      .array(agentIdSchema)
+      .max(PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.leaveAvailableAgentIds),
+    leaveAvailableCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
+    leaveAvailableTruncated: z.boolean(),
+    blockedCounts: z
+      .array(
+        z
+          .object({
+            reason: diplomacyProposalBlockReasonSchema,
+            count: z
+              .number()
+              .int()
+              .positive()
+              .max(
+                WORLD_SCENARIO_LIMITS.maximumAgents *
+                  (WORLD_SCENARIO_LIMITS.maximumAgents - 1),
+              ),
+          })
+          .strict(),
+      )
+      .max(diplomacyProposalBlockReasonSchema.options.length),
+    blockerExamples: z
+      .array(
+        z
+          .object({
+            proposerId: agentIdSchema,
+            recipientId: agentIdSchema,
+            reason: diplomacyProposalBlockReasonSchema,
+          })
+          .strict(),
+      )
+      .max(PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.blockerExamples),
+  })
+  .strict()
+  .superRefine((summary, context) => {
+    if (
+      summary.eligiblePairsTruncated !==
+        summary.eligiblePairCount > summary.displayedEligiblePairs.length ||
+      summary.leaveAvailableTruncated !==
+        summary.leaveAvailableCount > summary.leaveAvailableAgentIds.length ||
+      summary.acceptableProposalsTruncated !==
+        summary.acceptableProposalCount > summary.acceptableProposals.length
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Patient Zero diplomacy truncation must match counts.',
+      });
+    const pairKeys = summary.displayedEligiblePairs.map(
+      ({ proposerId, recipientId }) => `${proposerId}:${recipientId}`,
+    );
+    const proposalKeys = summary.acceptableProposals.map(
+      ({ proposalId }) => proposalId,
+    );
+    const blockerKeys = summary.blockerExamples.map(
+      ({ proposerId, recipientId }) => `${proposerId}:${recipientId}`,
+    );
+    if (
+      summary.displayedEligiblePairs.length > summary.eligiblePairCount ||
+      summary.acceptableProposals.length > summary.acceptableProposalCount ||
+      summary.leaveAvailableAgentIds.length > summary.leaveAvailableCount ||
+      new Set(pairKeys).size !== pairKeys.length ||
+      summary.displayedEligiblePairs.some(
+        ({ proposerId, recipientId }) => proposerId === recipientId,
+      ) ||
+      new Set(proposalKeys).size !== proposalKeys.length ||
+      new Set(summary.leaveAvailableAgentIds).size !==
+        summary.leaveAvailableAgentIds.length ||
+      new Set(summary.blockedCounts.map(({ reason }) => reason)).size !==
+        summary.blockedCounts.length ||
+      new Set(blockerKeys).size !== blockerKeys.length ||
+      summary.blockerExamples.some(
+        ({ proposerId, recipientId, reason }) =>
+          proposerId === recipientId ||
+          !summary.blockedCounts.some((entry) => entry.reason === reason),
+      )
+    )
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Patient Zero diplomacy samples must be unique and attributed.',
+      });
+  });
 export const patientZeroGlobalViewSchema = z
   .object({
     agents: z
@@ -929,6 +1066,7 @@ export const patientZeroGlobalViewSchema = z
       .array(patientZeroDiplomacyFeasibilitySchema)
       .max(WORLD_SCENARIO_LIMITS.maximumAgents)
       .default([]),
+    diplomacySummary: patientZeroDiplomacySummarySchema.optional(),
   })
   .superRefine((view, context) => {
     if (
@@ -1706,7 +1844,7 @@ const scenarioRosterSchema = z
     });
   });
 
-export const worldSetupRequestSchema = z
+const worldSetupRequestObjectSchema = z
   .object({
     scenarioVersion: scenarioContractVersionSchema.default('world-scenario-v1'),
     locationLabel: z.string().trim().min(1).max(120).optional(),
@@ -1746,7 +1884,7 @@ export const worldSetupRequestSchema = z
       .min(WORLD_SCENARIO_LIMITS.minimumTickIntervalMinutes)
       .max(WORLD_SCENARIO_LIMITS.maximumTickIntervalMinutes)
       .default(DEFAULT_MAXIMUM_TICK_INTERVAL_MINUTES),
-    patientZeroAgentId: agentIdSchema.nullable().default(null),
+    patientZeroAgentId: agentIdSchema,
     roster: scenarioRosterSchema,
     modelConfiguration: experimentModelConfigurationSchema,
     behaviorConfiguration: behaviorConfigurationSchema,
@@ -1757,77 +1895,106 @@ export const worldSetupRequestSchema = z
       .object({ communication: z.boolean(), diplomacy: z.boolean() })
       .strict(),
   })
-  .strict()
-  .superRefine((request, context) => {
-    if (request.minimumTickIntervalMinutes > request.maximumTickIntervalMinutes)
-      context.addIssue({
-        code: 'custom',
-        path: ['maximumTickIntervalMinutes'],
-        message: 'Maximum tick interval must be at least the minimum.',
-      });
-    const ids = new Set(request.roster.map(({ id }) => id));
-    if (
-      request.behaviorConfiguration.assignments.length !== ids.size ||
-      request.behaviorConfiguration.assignments.some(
-        ({ agentId }) => !ids.has(agentId),
-      )
+  .strict();
+
+type WorldSetupValidationInput = Omit<
+  z.infer<typeof worldSetupRequestObjectSchema>,
+  'patientZeroAgentId'
+> & { patientZeroAgentId: AgentId | null };
+
+function validateWorldSetupRequest(
+  request: WorldSetupValidationInput,
+  context: z.RefinementCtx,
+) {
+  if (request.minimumTickIntervalMinutes > request.maximumTickIntervalMinutes)
+    context.addIssue({
+      code: 'custom',
+      path: ['maximumTickIntervalMinutes'],
+      message: 'Maximum tick interval must be at least the minimum.',
+    });
+  const ids = new Set(request.roster.map(({ id }) => id));
+  if (
+    request.behaviorConfiguration.assignments.length !== ids.size ||
+    request.behaviorConfiguration.assignments.some(
+      ({ agentId }) => !ids.has(agentId),
     )
-      context.addIssue({
-        code: 'custom',
-        path: ['behaviorConfiguration', 'assignments'],
-        message: 'Behavior assignments must cover the roster exactly.',
-      });
-    if (
-      request.modelConfiguration.overrides.some(
-        ({ agentId }) => !ids.has(agentId),
-      )
+  )
+    context.addIssue({
+      code: 'custom',
+      path: ['behaviorConfiguration', 'assignments'],
+      message: 'Behavior assignments must cover the roster exactly.',
+    });
+  if (
+    request.modelConfiguration.overrides.some(
+      ({ agentId }) => !ids.has(agentId),
     )
-      context.addIssue({
-        code: 'custom',
-        path: ['modelConfiguration', 'overrides'],
-        message: 'Model overrides may reference only roster agents.',
-      });
-    if (
-      request.patientZeroAgentId !== null &&
-      !ids.has(request.patientZeroAgentId)
-    )
-      context.addIssue({
-        code: 'custom',
-        path: ['patientZeroAgentId'],
-        message: 'Patient Zero must belong to the active roster.',
-      });
-  });
+  )
+    context.addIssue({
+      code: 'custom',
+      path: ['modelConfiguration', 'overrides'],
+      message: 'Model overrides may reference only roster agents.',
+    });
+  if (
+    request.patientZeroAgentId !== null &&
+    !ids.has(request.patientZeroAgentId)
+  )
+    context.addIssue({
+      code: 'custom',
+      path: ['patientZeroAgentId'],
+      message: 'Patient Zero must belong to the active roster.',
+    });
+}
+
+export const worldSetupRequestSchema =
+  worldSetupRequestObjectSchema.superRefine(validateWorldSetupRequest);
 export type WorldSetupRequest = z.infer<typeof worldSetupRequestSchema>;
 export const defaultWorldSetupResponseSchema = z.object({
   request: worldSetupRequestSchema,
 });
 
-export const appliedScenarioSchema = worldSetupRequestSchema
-  .safeExtend({
-    decisionContractVersion: agentDecisionContractVersionSchema.default(
-      AGENT_DECISION_CONTRACT_VERSION,
-    ),
-    exactCellCount: z
-      .number()
-      .int()
-      .min(1)
-      .max(WORLD_SCENARIO_LIMITS.maximumGeneratedCells),
-    areaSquareKilometers: z.number().finite().positive(),
-    startingCells: z
-      .array(h3CellSchema)
-      .min(1)
-      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
-    setupWarnings: z.array(setupIssueSchema),
-  })
-  .superRefine((scenario, context) => {
-    if (scenario.startingCells.length !== scenario.roster.length)
-      context.addIssue({
-        code: 'custom',
-        path: ['startingCells'],
-        message: 'Every roster agent requires one starting cell.',
-      });
-  });
+const appliedScenarioShape = {
+  decisionContractVersion: agentDecisionContractVersionSchema.default(
+    AGENT_DECISION_CONTRACT_VERSION,
+  ),
+  exactCellCount: z
+    .number()
+    .int()
+    .min(1)
+    .max(WORLD_SCENARIO_LIMITS.maximumGeneratedCells),
+  areaSquareKilometers: z.number().finite().positive(),
+  startingCells: z
+    .array(h3CellSchema)
+    .min(1)
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents),
+  setupWarnings: z.array(setupIssueSchema),
+};
+
+function validateAppliedScenario(
+  scenario: WorldSetupValidationInput & {
+    startingCells: H3Cell[];
+  },
+  context: z.RefinementCtx,
+) {
+  validateWorldSetupRequest(scenario, context);
+  if (scenario.startingCells.length !== scenario.roster.length)
+    context.addIssue({
+      code: 'custom',
+      path: ['startingCells'],
+      message: 'Every roster agent requires one starting cell.',
+    });
+}
+
+export const appliedScenarioSchema = worldSetupRequestObjectSchema
+  .extend(appliedScenarioShape)
+  .superRefine(validateAppliedScenario);
 export type AppliedScenario = z.infer<typeof appliedScenarioSchema>;
+/** Read-only compatibility for exports created before Patient Zero was required. */
+export const archivedAppliedScenarioSchema = worldSetupRequestObjectSchema
+  .extend({
+    patientZeroAgentId: agentIdSchema.nullable(),
+    ...appliedScenarioShape,
+  })
+  .superRefine(validateAppliedScenario);
 
 export const worldSetupPreviewResponseSchema = z.discriminatedUnion(
   'feasible',
@@ -2319,7 +2486,7 @@ export const experimentManifestSchema = z.preprocess(
       decisionContractVersion: agentDecisionContractVersionSchema,
       modelConfiguration: experimentModelConfigurationSchema.optional(),
       behaviorConfiguration: behaviorConfigurationSchema.optional(),
-      scenario: appliedScenarioSchema.optional(),
+      scenario: archivedAppliedScenarioSchema.optional(),
       initialAgents: z
         .array(agentProfileSchema)
         .min(WORLD_SCENARIO_LIMITS.minimumAgents)

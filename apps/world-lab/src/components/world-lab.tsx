@@ -1890,7 +1890,7 @@ function WorldSetupPanel({
         patientZeroAgentId:
           current.patientZeroAgentId && ids.has(current.patientZeroAgentId)
             ? current.patientZeroAgentId
-            : null,
+            : roster[0]!.id,
         modelConfiguration: {
           ...current.modelConfiguration,
           overrides: current.modelConfiguration.overrides.filter(
@@ -2351,16 +2351,14 @@ function WorldSetupPanel({
           Patient Zero
           <select
             aria-label="Patient Zero"
-            value={draft.patientZeroAgentId ?? ''}
+            value={draft.patientZeroAgentId}
             onChange={(event) =>
               setDraft({
                 ...draft,
-                patientZeroAgentId: (event.target.value ||
-                  null) as AgentId | null,
+                patientZeroAgentId: event.target.value as AgentId,
               })
             }
           >
-            <option value="">None</option>
             {draft.roster.map((agent) => (
               <option key={agent.id} value={agent.id}>
                 {agent.name}

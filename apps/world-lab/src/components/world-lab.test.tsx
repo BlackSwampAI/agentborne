@@ -922,6 +922,7 @@ function twelveAgentSnapshot(readyCount = 12): SimulationSnapshot {
     ...request,
     radius: 12,
     roster,
+    patientZeroAgentId: roster[0]!.id,
     modelConfiguration,
     behaviorConfiguration,
   });
@@ -1163,7 +1164,11 @@ describe('WorldLab', () => {
     expect(screen.getByRole('button', { name: 'Zero' })).toBeInTheDocument();
     await openOverflow(user);
     await user.click(screen.getByRole('button', { name: 'World setup' }));
-    expect(screen.getByLabelText('Patient Zero')).toHaveValue(patientZero.id);
+    const selector = screen.getByLabelText('Patient Zero');
+    expect(selector).toHaveValue(patientZero.id);
+    expect(within(selector).queryByRole('option', { name: 'None' })).toBeNull();
+    await user.click(screen.getAllByRole('button', { name: 'Remove' })[0]!);
+    expect(selector).toHaveValue(initial.world.agents[1]!.id);
   });
 
   it('removes sequential recovery controls and explains per-tick provider cost', async () => {
@@ -1481,7 +1486,9 @@ describe('WorldLab', () => {
   it('waits for an H3 source update and render cycle before inspecting readiness', async () => {
     mapLibreMock.autoRender = false;
     render(<WorldLab />);
-    await screen.findByRole('button', { name: 'Select agent Ember' });
+    await screen.findByRole('button', {
+      name: 'Select agent Ember, Patient Zero',
+    });
     expect(screen.getByText(/H3 overlay initializing/)).toBeInTheDocument();
     expect(mapLibreMock.queryRenderedFeatures).not.toHaveBeenCalled();
 
@@ -1694,7 +1701,9 @@ describe('WorldLab', () => {
     const user = userEvent.setup();
     render(<WorldLab />);
     await user.click(
-      await screen.findByRole('button', { name: 'Select agent Ember' }),
+      await screen.findByRole('button', {
+        name: 'Select agent Ember, Patient Zero',
+      }),
     );
     await user.click(
       await screen.findByRole('button', { name: 'Single tick' }),
@@ -1814,7 +1823,9 @@ describe('WorldLab', () => {
     const user = userEvent.setup();
     render(<WorldLab />);
     await user.click(
-      await screen.findByRole('button', { name: 'Select agent Ember' }),
+      await screen.findByRole('button', {
+        name: 'Select agent Ember, Patient Zero',
+      }),
     );
     expect(
       await screen.findByLabelText('Direct-message history'),
@@ -1841,7 +1852,9 @@ describe('WorldLab', () => {
     const user = userEvent.setup();
     render(<WorldLab />);
     await user.click(
-      await screen.findByRole('button', { name: 'Select agent Ember' }),
+      await screen.findByRole('button', {
+        name: 'Select agent Ember, Patient Zero',
+      }),
     );
     await user.click(
       await screen.findByRole('button', { name: 'Single tick' }),
@@ -1885,7 +1898,9 @@ describe('WorldLab', () => {
     );
     render(<WorldLab />);
     await user.click(
-      await screen.findByRole('button', { name: 'Select agent Ember' }),
+      await screen.findByRole('button', {
+        name: 'Select agent Ember, Patient Zero',
+      }),
     );
     await user.click(screen.getByRole('tab', { name: 'Scoreboard' }));
     expect(
@@ -2024,7 +2039,9 @@ describe('WorldLab', () => {
 
   it('supports hex selection independently of agent selection', async () => {
     render(<WorldLab />);
-    await screen.findByRole('button', { name: 'Select agent Ember' });
+    await screen.findByRole('button', {
+      name: 'Select agent Ember, Patient Zero',
+    });
     const target = world.hexes[1]!.cell;
     act(() => {
       mapLibreMock.mapClick?.({
@@ -2068,7 +2085,9 @@ describe('WorldLab', () => {
 
   it('reserves a compact cancel slot when no request is active', async () => {
     render(<WorldLab />);
-    await screen.findByRole('button', { name: 'Select agent Ember' });
+    await screen.findByRole('button', {
+      name: 'Select agent Ember, Patient Zero',
+    });
     const cancel = document.querySelector<HTMLButtonElement>(
       '.cancel-request-slot button',
     );
@@ -2681,7 +2700,9 @@ describe('WorldLab', () => {
     const user = userEvent.setup();
     render(<WorldLab />);
     await user.click(
-      await screen.findByRole('button', { name: 'Select agent Ember' }),
+      await screen.findByRole('button', {
+        name: 'Select agent Ember, Patient Zero',
+      }),
     );
     await openOverflow(user);
     const restore = await screen.findByRole('button', {
@@ -2717,7 +2738,9 @@ describe('WorldLab', () => {
     const user = userEvent.setup();
     render(<WorldLab />);
     await user.click(
-      await screen.findByRole('button', { name: 'Select agent Ember' }),
+      await screen.findByRole('button', {
+        name: 'Select agent Ember, Patient Zero',
+      }),
     );
     expect(
       await screen.findByText('New active personality.'),
@@ -2743,7 +2766,9 @@ describe('WorldLab', () => {
     const user = userEvent.setup();
     render(<WorldLab />);
     await user.click(
-      await screen.findByRole('button', { name: 'Select agent Ember' }),
+      await screen.findByRole('button', {
+        name: 'Select agent Ember, Patient Zero',
+      }),
     );
     expect(
       await screen.findByLabelText('Current experiment usage'),

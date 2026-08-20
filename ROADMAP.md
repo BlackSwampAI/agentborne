@@ -2,11 +2,18 @@
 
 ## Experimental Patient Zero coordinator
 
-The current focused slice designates one normal physical agent, provides a
+The current focused slice requires one normal physical agent, provides a
 bounded global strategic summary, and adds private advisory Zero broadcasts
 plus direct replies. It intentionally excludes extra movement/actions,
 numerical bonuses, forced compliance, live player GPS, capture succession,
-simulated players, and simultaneous tick scheduling.
+and simulated players. The coordinator participates in the same frozen-world,
+simultaneous tick transaction as every other active agent.
+
+Post-foundation milestone 0024 makes the designation mandatory for every new
+or live scenario and replaces the roster-sized Patient Zero diplomacy expansion
+with a deterministic fixed-cap sparse summary. Historical null attribution
+remains readable. Proposal-outcome memory, Patient Zero analytics corrections,
+and further communication tuning remain separate milestones.
 
 Player development begins only after the agent milestones below demonstrate compelling behavior. Each milestone is intended to remain a focused pull request; do not implement ahead of the current milestone.
 

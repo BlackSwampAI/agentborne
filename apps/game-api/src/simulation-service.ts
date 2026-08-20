@@ -32,6 +32,7 @@ import {
   OPENROUTER_PROVIDER_TIMEOUT_MS,
   OPENROUTER_429_FALLBACK_BACKOFF_MS,
   WORLD_SCENARIO_LIMITS,
+  PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS,
   personalitySchema,
   simulationSnapshotSchema,
   type Agent,
@@ -55,6 +56,7 @@ import {
   type SimulationStatus,
   type WorldEvent,
   type AllianceEvent,
+  type AllianceProposalId,
   worldSetupRequestSchema,
   type AppliedScenario,
   type WorldSetupPreviewResponse,
@@ -606,7 +608,7 @@ export class SimulationService {
     )
       throw new SimulationValidationError(
         'invalid_model_configuration',
-        'Only schema-version 5 through 9 experiment exports can be imported.',
+        'Only schema-version 5 through 10 experiment exports can be imported.',
       );
     if (version === 5) {
       const legacyConfiguration: ExperimentModelConfiguration = {
@@ -620,7 +622,6 @@ export class SimulationService {
         legacyConfiguration,
       );
       this.#modelConfiguration = legacyConfiguration;
-      this.#scenario = { ...this.#scenario, patientZeroAgentId: null };
       return {
         snapshot: this.getSnapshot(),
         legacy: true,
@@ -698,7 +699,8 @@ export class SimulationService {
     this.#modelConfiguration = importedConfiguration;
     this.#scenario = {
       ...this.#scenario,
-      patientZeroAgentId: importedPatientZero,
+      patientZeroAgentId:
+        importedPatientZero ?? this.#scenario.patientZeroAgentId,
     };
     return {
       snapshot: this.getSnapshot(),
@@ -2024,57 +2026,8 @@ export class SimulationService {
               activeAllianceProposals: [
                 ...(this.#state.pendingAllianceProposals?.values() ?? []),
               ],
-              diplomacyFeasibility: [...this.#state.agents.keys()]
-                .toSorted()
-                .map((candidateId) => {
-                  const availability = this.#diplomacyAvailability(
-                    candidateId,
-                    WORLD_SCENARIO_LIMITS.maximumAgents,
-                  );
-                  const eligible =
-                    availability.propose.eligibleRecipientAgentIds;
-                  const displayedEligibleRecipientAgentIds = eligible.slice(
-                    0,
-                    4,
-                  );
-                  const blockedCounts = [
-                    ...new Set(
-                      availability.propose.blockedRecipients.map(
-                        ({ reason }) => reason,
-                      ),
-                    ),
-                  ].map((reason) => ({
-                    reason,
-                    count: availability.propose.blockedRecipients.filter(
-                      (blocked) => blocked.reason === reason,
-                    ).length,
-                  }));
-                  const blockerPriority = [
-                    'out-of-range',
-                    'alliance-to-alliance-merge',
-                    'current-ally',
-                    'incoming-proposal-exists',
-                    'outgoing-proposal-exists',
-                  ] as const;
-                  return {
-                    agentId: candidateId,
-                    eligibleRecipientCount: eligible.length,
-                    displayedEligibleRecipientAgentIds,
-                    eligibleRecipientsTruncated:
-                      eligible.length >
-                      displayedEligibleRecipientAgentIds.length,
-                    blockedCounts,
-                    blockerExamples: selectDiplomacyBlockerExamples(
-                      this.#state,
-                      candidateId,
-                      availability.propose.blockedRecipients,
-                      blockerPriority,
-                    ),
-                    acceptableProposalIds:
-                      availability.accept.acceptableProposalIds,
-                    leaveAvailable: availability.leave.available,
-                  };
-                }),
+              diplomacyFeasibility: [],
+              diplomacySummary: this.#patientZeroDiplomacySummary(),
               recentStrategicEvents: this.#state.events
                 .filter(isAllianceEvent)
                 .slice(-RECENT_ZERO_STRATEGIC_EVENT_LIMIT)
@@ -2203,6 +2156,145 @@ export class SimulationService {
             allianceId: null,
             reason: 'The agent is not currently in an alliance.',
           },
+    };
+  }
+
+  #patientZeroDiplomacySummary() {
+    const eligiblePairs: Array<{
+      proposerId: AgentId;
+      recipientId: AgentId;
+    }> = [];
+    const acceptableProposals: Array<{
+      agentId: AgentId;
+      proposalId: AllianceProposalId;
+    }> = [];
+    const leaveAvailableAgentIds: AgentId[] = [];
+    const blockedCounts = new Map<string, number>();
+    const blockers: Array<{
+      proposerId: AgentId;
+      recipientId: AgentId;
+      reason:
+        | 'current-ally'
+        | 'out-of-range'
+        | 'outgoing-proposal-exists'
+        | 'incoming-proposal-exists'
+        | 'alliance-to-alliance-merge';
+    }> = [];
+    for (const proposerAgentId of [...this.#state.agents.keys()].toSorted()) {
+      const availability = this.#diplomacyAvailability(
+        proposerAgentId,
+        WORLD_SCENARIO_LIMITS.maximumAgents,
+      );
+      for (const recipientAgentId of availability.propose
+        .eligibleRecipientAgentIds)
+        eligiblePairs.push({
+          proposerId: proposerAgentId,
+          recipientId: recipientAgentId,
+        });
+      for (const blocked of availability.propose.blockedRecipients) {
+        blockedCounts.set(
+          blocked.reason,
+          (blockedCounts.get(blocked.reason) ?? 0) + 1,
+        );
+        blockers.push({
+          proposerId: proposerAgentId,
+          recipientId: blocked.agentId,
+          reason: blocked.reason,
+        });
+      }
+      for (const proposalId of availability.accept.acceptableProposalIds)
+        acceptableProposals.push({
+          agentId: proposerAgentId,
+          proposalId,
+        });
+      if (availability.leave.available)
+        leaveAvailableAgentIds.push(proposerAgentId);
+    }
+    const blockerPriority = [
+      'out-of-range',
+      'alliance-to-alliance-merge',
+      'current-ally',
+      'incoming-proposal-exists',
+      'outgoing-proposal-exists',
+    ] as const;
+    blockers.sort(
+      (a, b) =>
+        blockerPriority.indexOf(a.reason) - blockerPriority.indexOf(b.reason) ||
+        a.proposerId.localeCompare(b.proposerId) ||
+        a.recipientId.localeCompare(b.recipientId),
+    );
+    const displayedEligiblePairs: typeof eligiblePairs = [];
+    const proposerBuckets = [...this.#state.agents.keys()]
+      .toSorted()
+      .map((proposerAgentId) => ({
+        proposerAgentId,
+        recipientAgentIds: eligiblePairs
+          .filter((pair) => pair.proposerId === proposerAgentId)
+          .map(({ recipientId }) => recipientId),
+      }))
+      .filter(({ recipientAgentIds }) => recipientAgentIds.length > 0);
+    if (proposerBuckets.length) {
+      const offset =
+        (this.#completedTickCount *
+          PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.displayedEligiblePairs) %
+        proposerBuckets.length;
+      const rotated = [
+        ...proposerBuckets.slice(offset),
+        ...proposerBuckets.slice(0, offset),
+      ];
+      for (
+        let recipientIndex = 0;
+        displayedEligiblePairs.length <
+        PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.displayedEligiblePairs;
+        recipientIndex += 1
+      ) {
+        let added = false;
+        for (const bucket of rotated) {
+          const recipientAgentId = bucket.recipientAgentIds[recipientIndex];
+          if (!recipientAgentId) continue;
+          displayedEligiblePairs.push({
+            proposerId: bucket.proposerAgentId,
+            recipientId: recipientAgentId,
+          });
+          added = true;
+          if (
+            displayedEligiblePairs.length ===
+            PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.displayedEligiblePairs
+          )
+            break;
+        }
+        if (!added) break;
+      }
+    }
+    return {
+      eligiblePairCount: eligiblePairs.length,
+      displayedEligiblePairs,
+      eligiblePairsTruncated:
+        eligiblePairs.length > displayedEligiblePairs.length,
+      acceptableProposals: acceptableProposals.slice(
+        0,
+        PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.acceptableProposals,
+      ),
+      acceptableProposalCount: acceptableProposals.length,
+      acceptableProposalsTruncated:
+        acceptableProposals.length >
+        PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.acceptableProposals,
+      leaveAvailableAgentIds: leaveAvailableAgentIds.slice(
+        0,
+        PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.leaveAvailableAgentIds,
+      ),
+      leaveAvailableCount: leaveAvailableAgentIds.length,
+      leaveAvailableTruncated:
+        leaveAvailableAgentIds.length >
+        PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.leaveAvailableAgentIds,
+      blockedCounts: blockerPriority.flatMap((reason) => {
+        const count = blockedCounts.get(reason);
+        return count ? [{ reason, count }] : [];
+      }),
+      blockerExamples: blockers.slice(
+        0,
+        PATIENT_ZERO_DIPLOMACY_SUMMARY_LIMITS.blockerExamples,
+      ),
     };
   }
 
