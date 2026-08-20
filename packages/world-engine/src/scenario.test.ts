@@ -97,23 +97,29 @@ describe('configurable world scenarios', () => {
     ).toBeNull();
   });
 
-  it('supports a non-default dynamic roster with exact behavior coverage', () => {
-    const roster = generateDeterministicRoster(12, 'twelve');
-    const request = defaultWorldSetupRequest();
-    const result = previewWorldSetup({
-      ...request,
-      radius: 12,
-      roster,
-      behaviorConfiguration: {
-        ...request.behaviorConfiguration,
-        assignments: assignBehavior(
-          roster.map(({ id }) => id),
-          request.behaviorConfiguration.seed,
-          'balanced-random',
-        ),
-      },
-    });
-    expect(result.feasible && result.world.agents).toHaveLength(12);
-    expect(DEVELOPMENT_AGENT_BLUEPRINTS).toHaveLength(8);
-  });
+  it.each([10, 32])(
+    'supports a %s-agent roster with exact behavior coverage',
+    (agentCount) => {
+      const roster = generateDeterministicRoster(
+        agentCount,
+        `roster-${agentCount}`,
+      );
+      const request = defaultWorldSetupRequest();
+      const result = previewWorldSetup({
+        ...request,
+        radius: 12,
+        roster,
+        behaviorConfiguration: {
+          ...request.behaviorConfiguration,
+          assignments: assignBehavior(
+            roster.map(({ id }) => id),
+            request.behaviorConfiguration.seed,
+            'balanced-random',
+          ),
+        },
+      });
+      expect(result.feasible && result.world.agents).toHaveLength(agentCount);
+      expect(DEVELOPMENT_AGENT_BLUEPRINTS).toHaveLength(8);
+    },
+  );
 });

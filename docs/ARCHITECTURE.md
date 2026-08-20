@@ -81,7 +81,7 @@ range bypass. Patient Zero receives no extra movement, action, infection,
 capture, ownership, or alliance authority. Every agent observation is built
 from one frozen pre-tick snapshot.
 
-The universal `text-flat-json-v4` prompt makes `communicationType: "none"` the
+The universal `text-flat-json-v5` prompt makes `communicationType: "none"` the
 normal choice for ordinary agents and Patient Zero unless a message adds new
 decision-relevant value. Concrete requests or replies, negotiation,
 observed-fact warnings, changed plans, border/conflict coordination, and
@@ -127,18 +127,44 @@ active requests and commits no world, events, records, tick, or virtual time.
 
 ## Formal alliance state
 
-World state owns up to four active alliances and bounded pending proposals.
-Alliance and proposal IDs are system-generated typed UUIDs. Each alliance
-contains two to eight unique agents, each agent belongs to at most one alliance,
-and the engine allocates the first free color from a fixed four-color accessible
-palette. A proposal records proposer, recipient, proposer alliance at creation,
+World state supports every feasible partition of the active roster into
+alliances and bounded pending proposals. Alliance and proposal IDs are
+system-generated typed UUIDs. Each alliance contains two agents through the
+entire active roster, and each agent belongs to at most one alliance. The engine
+uses deterministic accessible display colors and may reuse the palette; display
+identity is never a gameplay capacity rule. A proposal records proposer,
+recipient, both participants' alliance attribution at creation,
 the globally unique originating record ordinal, and tick authority. Created at
 tick `N`, it expires at tick `N + 2` without inference; legacy schema-v9 turn
 fields retain their two-roster-round lifetime. The one expiry pass is attributed
 to the final record in deterministic resolution order so its safe telemetry is
 not lost.
 
-Free agents may propose only to free agents; allied agents may invite a free agent into their current alliance. Recipient-only acceptance either forms a two-agent alliance or recruits into the recorded unchanged alliance. Membership changes invalidate impossible proposals. Departure is unilateral; individual hex control never changes, and an alliance dissolves below two members. Hexes store only individual `controllerAgentId`; effective marker and territory color is derived from the controller's current alliance, or its permanent base color when unaffiliated. Capture eligibility rejects `allied-controller`.
+Free agents may form an alliance with another free agent or request entry by
+proposing to a member of an existing alliance. Allied agents may invite a free
+agent. Recipient-only acceptance either forms a two-agent alliance or admits
+the unaffiliated participant into the recorded unchanged alliance.
+Alliance-to-alliance merging remains invalid. Membership changes invalidate
+impossible proposals. Departure is unilateral; an agent may later request or
+accept membership elsewhere. Individual hex control never changes, and an
+alliance dissolves below two members.
+
+Each frozen observation contains engine-/service-authored diplomacy affordances:
+exact proposal recipient IDs, acceptable proposal IDs, leave availability, and
+compact stable blocker codes for a bounded set of unavailable targets. Patient
+Zero receives a bounded per-agent global feasibility summary: total eligible
+counts, at most four displayed eligible IDs, truncation flags, blocker counts by
+stable reason, and at most four prioritized blocker examples. It receives no
+pending decisions or free-form pair matrix and may recommend only displayed
+eligible IDs. The model copies listed IDs into the same flat response. Provider
+tools are not used: a tool round trip would add another
+inference boundary and tokens while duplicating deterministic engine knowledge;
+no measured token saving is claimed.
+
+Formal proposal creation uses the scenario `communicationRangeKm` against
+frozen pre-action positions. Same-tick movement cannot make a target newly
+eligible. Patient Zero's direct-message endpoint bypass is limited to direct
+communication and never bypasses formal diplomacy range.
 
 Public communication is visible to every agent without a range check. Direct communication authoritatively trims and bounds text, requires a distinct existing recipient, and accepts inclusive pre-action H3 distances 0–3. Moving closer in the same decision cannot change eligibility. Accepted communications enter the bounded world-event stream; rejected attempts remain safe structured turn telemetry with a reason, sender, channel, recipient when applicable, nullable computed distance, timestamp, event ID, and trimmed text. No raw provider response is retained.
 
@@ -191,6 +217,7 @@ Contested control, capture, territory authority, and schema-v3 selection semanti
 Decoupled communication and schema-v4 selection semantics are recorded in [ADR 0007](adr/0007-decoupled-world-communication.md).
 Selective agent communication and `text-flat-json-v4` attribution are recorded in [ADR 0015](adr/0015-selective-agent-communication.md).
 Formal alliances, the expanded experiment, and schema-v5 semantics are recorded in [ADR 0008](adr/0008-formal-alliances-experiment.md).
+Fluid alliance capacity, join requests, and authoritative diplomacy affordances supersede its fixed-size/color-capacity rules in [ADR 0016](adr/0016-fluid-alliances-and-diplomacy-affordances.md).
 Capability-driven model discovery and experiment assignments are recorded in [ADR 0009](adr/0009-capability-driven-model-catalog.md).
 Versioned behavior profiles, seeded assignment, and authoritative diplomacy affordances are recorded in [ADR 0010](adr/0010-versioned-agent-behavior.md).
 

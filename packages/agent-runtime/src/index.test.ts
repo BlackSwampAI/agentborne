@@ -210,6 +210,21 @@ describe('OpenRouterAgentProvider', () => {
     expect(request.messages[0]!.content).toContain(
       'actionAvailability and observation.diplomacyAvailability as authoritative',
     );
+    expect(request.messages[0]!.content).toContain(
+      'diplomacyAvailability.propose.eligibleRecipientAgentIds',
+    );
+    expect(request.messages[0]!.content).toContain(
+      'Never infer range, membership, or proposal legality from prose',
+    );
+    expect(request.messages[0]!.content).toContain(
+      'do not repeat an unavailable unchanged diplomacy plan',
+    );
+    expect(request.messages[0]!.content).toContain(
+      'no provider tool call is needed',
+    );
+    expect(request.messages[0]!.content).toContain(
+      'recommendations may name only displayedEligibleRecipientAgentIds',
+    );
     expect(request.messages[0]!.content).toContain('subordinate preferences');
     expect(request.messages[0]!.content).not.toMatch(
       /nearby player|player threat|capturing player|player gps/i,
@@ -272,7 +287,7 @@ describe('OpenRouterAgentProvider', () => {
   it('makes selective communication the universal default without changing wire fields', () => {
     const guidance = buildOpenRouterRequest(observation, TEST_MODEL)
       .messages[0]!.content;
-    expect(guidance).toContain('DECISION CONTRACT (text-flat-json-v4)');
+    expect(guidance).toContain('DECISION CONTRACT (text-flat-json-v5)');
     expect(guidance).toContain(
       'communicationType "none" is the normal/default choice',
     );
@@ -435,7 +450,7 @@ describe('OpenRouterAgentProvider', () => {
     },
   );
 
-  it('keeps the v4 prompt compatible with the prior flat JSON wire shape', () => {
+  it('keeps the v5 prompt compatible with the prior flat JSON wire shape', () => {
     expect(
       normalizeFlatDecision({
         worldActionType: 'wait',

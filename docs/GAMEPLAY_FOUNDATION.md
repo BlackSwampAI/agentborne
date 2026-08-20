@@ -145,6 +145,9 @@ Agents know that human opposition exists, but receive only engine-produced evide
 - Recent cells gained and lost.
 - Nearby disinfection patterns.
 - Current alliance membership and relevant proposals.
+- Exact formal-diplomacy affordances derived from frozen pre-action positions.
+  Proposal creation uses the scenario `communicationRangeKm`; Patient Zero's
+  direct-message range bypass does not bypass formal diplomacy range.
 - Allied warnings and captures.
 - Last-known player encounters with age and location.
 - Explicit priority notifications for nearby territory loss.

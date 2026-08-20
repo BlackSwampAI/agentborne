@@ -71,6 +71,8 @@ export interface EngineContext {
   communicationRangeKm: number;
   patientZeroAgentId: AgentId | null;
   tickNumber?: number;
+  /** Frozen pre-action positions used only for diplomacy range authority. */
+  diplomacyRangeState?: WorldState;
 }
 
 export interface AppliedAction {
@@ -86,6 +88,56 @@ export interface AppliedCommunication {
 export interface AppliedDiplomacy {
   state: WorldState;
   result: DiplomacyResult;
+}
+
+export type ProposalTargetBlockReason =
+  | 'current-ally'
+  | 'alliance-to-alliance-merge'
+  | 'out-of-range'
+  | 'outgoing-proposal-exists'
+  | 'incoming-proposal-exists';
+
+export type ProposalTargetEligibility =
+  { eligible: true } | { eligible: false; reason: ProposalTargetBlockReason };
+
+/** Pure proposal-target authority shared by observations and final submission. */
+export function getProposalTargetEligibility(
+  state: WorldState,
+  proposerAgentId: AgentId,
+  recipientAgentId: AgentId,
+  communicationRangeKm: number,
+  rangeState: WorldState = state,
+): ProposalTargetEligibility {
+  const proposerAlliance = getAgentAlliance(state, proposerAgentId);
+  const recipientAlliance = getAgentAlliance(state, recipientAgentId);
+  if (proposerAlliance?.id === recipientAlliance?.id && proposerAlliance)
+    return { eligible: false, reason: 'current-ally' };
+  if (proposerAlliance && recipientAlliance)
+    return { eligible: false, reason: 'alliance-to-alliance-merge' };
+  const rangeSender = rangeState.agents.get(proposerAgentId);
+  const rangeRecipient = rangeState.agents.get(recipientAgentId);
+  const distance =
+    rangeSender && rangeRecipient
+      ? physicalDistanceKm(rangeSender.currentCell, rangeRecipient.currentCell)
+      : null;
+  if (distance === null || distance > communicationRangeKm)
+    return { eligible: false, reason: 'out-of-range' };
+  const proposals = [...(state.pendingAllianceProposals?.values() ?? [])];
+  if (
+    proposals.some(
+      ({ proposerAgentId: pendingProposer }) =>
+        pendingProposer === proposerAgentId,
+    )
+  )
+    return { eligible: false, reason: 'outgoing-proposal-exists' };
+  if (
+    proposals.some(
+      ({ recipientAgentId: pendingRecipient }) =>
+        pendingRecipient === recipientAgentId,
+    )
+  )
+    return { eligible: false, reason: 'incoming-proposal-exists' };
+  return { eligible: true };
 }
 
 const defaultContext: EngineContext = {
@@ -489,46 +541,48 @@ export function applyDiplomacy(
       );
     const proposerAlliance = getAgentAlliance(state, agentId);
     const recipientAlliance = getAgentAlliance(state, recipient.id);
-    if (recipientAlliance?.id === proposerAlliance?.id && recipientAlliance)
+    const rangeState = context.diplomacyRangeState ?? state;
+    const targetEligibility = getProposalTargetEligibility(
+      state,
+      agentId,
+      recipient.id,
+      resolved.communicationRangeKm,
+      rangeState,
+    );
+    if (!targetEligibility.eligible) {
+      const rejection = {
+        'current-ally': {
+          reason: 'current-ally' as const,
+          details: 'The recipient is already an ally.',
+        },
+        'alliance-to-alliance-merge': {
+          reason: 'recipient-allied' as const,
+          details: 'Allied agents cannot merge one alliance into another.',
+        },
+        'out-of-range': {
+          reason: 'recipient-out-of-range' as const,
+          details: 'The recipient is outside formal diplomacy range.',
+        },
+        'outgoing-proposal-exists': {
+          reason: 'outgoing-proposal-exists' as const,
+          details: 'The proposer already has a pending outgoing proposal.',
+        },
+        'incoming-proposal-exists': {
+          reason: 'incoming-proposal-exists' as const,
+          details: 'The recipient already has a pending incoming proposal.',
+        },
+      }[targetEligibility.reason];
       return diplomacyRejected(
         state,
         { type: intent.type, recipientId: intent.recipientId },
-        'current-ally',
-        'The recipient is already an ally.',
+        rejection.reason,
+        rejection.details,
       );
-    if (recipientAlliance)
-      return diplomacyRejected(
-        state,
-        { type: intent.type, recipientId: intent.recipientId },
-        'recipient-allied',
-        'Formal proposals may target only unaffiliated agents.',
-      );
+    }
+    const targetAlliance = proposerAlliance ?? recipientAlliance;
     if (
-      [...proposals.values()].some(
-        (proposal) => proposal.proposerAgentId === agentId,
-      )
-    )
-      return diplomacyRejected(
-        state,
-        { type: intent.type, recipientId: intent.recipientId },
-        'outgoing-proposal-exists',
-        'The proposer already has a pending outgoing proposal.',
-      );
-    if (
-      [...proposals.values()].some(
-        (proposal) => proposal.recipientAgentId === recipient.id,
-      )
-    )
-      return diplomacyRejected(
-        state,
-        { type: intent.type, recipientId: intent.recipientId },
-        'incoming-proposal-exists',
-        'The recipient already has a pending incoming proposal.',
-      );
-    if (
-      proposerAlliance &&
-      proposerAlliance.memberAgentIds.length >=
-        WORLD_SCENARIO_LIMITS.maximumAllianceMembers
+      targetAlliance &&
+      targetAlliance.memberAgentIds.length >= state.agents.size
     )
       return diplomacyRejected(
         state,
@@ -544,6 +598,7 @@ export function applyDiplomacy(
       proposerAgentId: agentId,
       recipientAgentId: recipient.id,
       proposerAllianceId: proposerAlliance?.id ?? null,
+      recipientAllianceId: recipientAlliance?.id ?? null,
       originatingTurn: turnNumber,
       expirationTurn: turnNumber + state.agents.size * 2,
       ...(context.tickNumber === undefined
@@ -559,7 +614,8 @@ export function applyDiplomacy(
       type: 'alliance-proposed',
       proposalId,
       recipientAgentId: recipient.id,
-      allianceId: proposal.proposerAllianceId,
+      allianceId:
+        proposal.proposerAllianceId ?? proposal.recipientAllianceId ?? null,
       expirationTurn: proposal.expirationTurn,
     };
     return diplomacyAccepted(
@@ -592,10 +648,13 @@ export function applyDiplomacy(
     const proposerAlliance = getAgentAlliance(state, proposal.proposerAgentId);
     const recipientAlliance = getAgentAlliance(state, agentId);
     const stillValid =
-      !recipientAlliance &&
       (proposal.proposerAllianceId === null
         ? !proposerAlliance
-        : proposerAlliance?.id === proposal.proposerAllianceId);
+        : proposerAlliance?.id === proposal.proposerAllianceId) &&
+      (proposal.recipientAllianceId === null
+        ? !recipientAlliance
+        : recipientAlliance?.id === proposal.recipientAllianceId) &&
+      !(proposerAlliance && recipientAlliance);
     if (!stillValid) {
       proposals.delete(proposal.id);
       const event = proposalClosedEvent(
@@ -618,20 +677,17 @@ export function applyDiplomacy(
     proposals.delete(proposal.id);
     const events: AllianceEvent[] = [];
     let alliance: Alliance;
-    if (!proposerAlliance) {
-      const color = ALLIANCE_COLOR_PALETTE.find(
-        (candidate) =>
-          ![...alliances.values()].some((active) => active.color === candidate),
-      );
-      if (!color)
-        return diplomacyRejected(
-          state,
-          { type: intent.type, proposalId: intent.proposalId },
-          'alliance-capacity',
-          'No alliance display color is available.',
-        );
+    if (!proposerAlliance && !recipientAlliance) {
+      const allianceId = allianceIdSchema.parse(resolved.createAllianceId());
+      const color =
+        ALLIANCE_COLOR_PALETTE.find(
+          (candidate) =>
+            ![...alliances.values()].some(
+              (active) => active.color === candidate,
+            ),
+        ) ?? deterministicAllianceColor(allianceId);
       alliance = {
-        id: allianceIdSchema.parse(resolved.createAllianceId()),
+        id: allianceId,
         color,
         memberAgentIds: [proposal.proposerAgentId, agentId],
       };
@@ -644,9 +700,13 @@ export function applyDiplomacy(
         memberAgentIds: alliance.memberAgentIds as [AgentId, AgentId],
       });
     } else {
+      const existingAlliance = proposerAlliance ?? recipientAlliance!;
+      const joiningAgentId = proposerAlliance
+        ? agentId
+        : proposal.proposerAgentId;
       alliance = {
-        ...proposerAlliance,
-        memberAgentIds: [...proposerAlliance.memberAgentIds, agentId],
+        ...existingAlliance,
+        memberAgentIds: [...existingAlliance.memberAgentIds, joiningAgentId],
       };
       alliances.set(alliance.id, alliance);
       events.push({
@@ -654,7 +714,7 @@ export function applyDiplomacy(
         type: 'agent-joined-alliance',
         allianceId: alliance.id,
         allianceColor: alliance.color,
-        joinedAgentId: agentId,
+        joinedAgentId: joiningAgentId,
         memberAgentIds: alliance.memberAgentIds,
       });
     }
@@ -841,10 +901,13 @@ function invalidateImpossibleProposals(
       proposal.recipientAgentId,
     );
     const valid =
-      !recipientAlliance &&
       (proposal.proposerAllianceId === null
         ? !proposerAlliance
-        : proposerAlliance?.id === proposal.proposerAllianceId);
+        : proposerAlliance?.id === proposal.proposerAllianceId) &&
+      (proposal.recipientAllianceId === null
+        ? !recipientAlliance
+        : recipientAlliance?.id === proposal.recipientAllianceId) &&
+      !(proposerAlliance && recipientAlliance);
     if (!valid) {
       proposals.delete(proposal.id);
       events.push(
@@ -853,6 +916,16 @@ function invalidateImpossibleProposals(
     }
   }
   return { proposals, events };
+}
+
+/** Display identity is deterministic and may reuse the accessible palette. */
+export function deterministicAllianceColor(
+  allianceId: AllianceId,
+): (typeof ALLIANCE_COLOR_PALETTE)[number] {
+  let hash = 0;
+  for (const character of allianceId)
+    hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return ALLIANCE_COLOR_PALETTE[hash % ALLIANCE_COLOR_PALETTE.length]!;
 }
 
 function safeGridDistance(from: H3Cell, to: H3Cell): number | null {

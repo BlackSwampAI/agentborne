@@ -8,11 +8,16 @@ import {
 } from '@hexzero/agent-runtime';
 import {
   AGENT_DECISION_CONTRACT_VERSION,
+  ALLIANCE_COLOR_PALETTE,
   PERSONALITY_MAX_LENGTH,
+  assignBehavior,
   agentIdSchema,
+  allianceIdSchema,
   agentTurnRecordSchema,
   experimentExportDocumentSchema,
   h3CellSchema,
+  type Alliance,
+  type AgentId,
   type AgentObservation,
   type AgentTurnRecord,
   type CompatibleModel,
@@ -20,14 +25,19 @@ import {
 } from '@hexzero/shared';
 import {
   DEVELOPMENT_AGENT_BLUEPRINTS,
+  createDevelopmentWorld,
   defaultWorldSetupRequest,
+  generateDeterministicRoster,
   physicalDistanceKm,
+  toWorldState,
+  type WorldState,
 } from '@hexzero/world-engine';
 import {
   SimulationConflictError,
   SimulationService,
   SimulationTurnCancelledError,
   SimulationValidationError,
+  selectDiplomacyBlockerExamples,
 } from './simulation-service';
 import {
   calculateExperimentMetrics,
@@ -83,6 +93,98 @@ function exportRequest(level: 'minimal' | 'standard' | 'full-safe' | 'custom') {
 }
 
 describe('SimulationService', () => {
+  it('prioritizes free diplomacy blocker examples before allied relationships', () => {
+    const base = toWorldState(createDevelopmentWorld({ generatedAt: now() }));
+    const agents = [...base.agents.values()];
+    const allianceEntries: Array<[Alliance['id'], Alliance]> = Array.from(
+      { length: 3 },
+      (_, index) => {
+        const id = allianceIdSchema.parse(
+          `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+        );
+        return [
+          id,
+          {
+            id,
+            color: ALLIANCE_COLOR_PALETTE[index]!,
+            memberAgentIds: [agents[index * 2]!.id, agents[index * 2 + 1]!.id],
+          },
+        ];
+      },
+    );
+    const state: WorldState = {
+      ...base,
+      alliances: new Map(allianceEntries),
+    };
+    const firstFreeId = agents[6]!.id;
+    const distantFreeCounterpartId = agents[7]!.id;
+    const blockersFor = (actingAgentId: AgentId) =>
+      agents
+        .filter(({ id }) => id !== actingAgentId)
+        .map(({ id }) => ({ agentId: id, reason: 'out-of-range' as const }));
+    expect(
+      selectDiplomacyBlockerExamples(
+        state,
+        firstFreeId,
+        blockersFor(firstFreeId),
+        ['out-of-range'],
+      )[0]?.agentId,
+    ).toBe(distantFreeCounterpartId);
+    expect(
+      selectDiplomacyBlockerExamples(
+        state,
+        distantFreeCounterpartId,
+        blockersFor(distantFreeCounterpartId),
+        ['out-of-range'],
+      )[0]?.agentId,
+    ).toBe(firstFreeId);
+    expect(
+      selectDiplomacyBlockerExamples(
+        state,
+        agents[0]!.id,
+        blockersFor(agents[0]!.id),
+        ['out-of-range'],
+      )
+        .slice(0, 2)
+        .map(({ agentId }) => agentId),
+    ).toEqual([firstFreeId, distantFreeCounterpartId].toSorted());
+  });
+
+  it('authors exact range-blocked diplomacy affordances before inference', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
+      ]),
+    );
+    const setup = defaultWorldSetupRequest();
+    simulation.applyWorldSetup({
+      ...setup,
+      communicationRangeKm: 0.1,
+      modelConfiguration: {
+        ...setup.modelConfiguration,
+        globalModelId: 'deterministic-script',
+      },
+    });
+    const record = await simulation.executeNextTurn();
+    expect(
+      record.observation.diplomacyAvailability.propose.blockedRecipients,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ reason: 'out-of-range' }),
+      ]),
+    );
+    expect(
+      simulation.generateExperimentExport(exportRequest('full-safe')).turns[0]
+        ?.observation?.diplomacyAvailability,
+    ).toMatchObject({
+      propose: {
+        blockedRecipients: expect.arrayContaining([
+          expect.objectContaining({ reason: 'out-of-range' }),
+        ]),
+      },
+    });
+  });
+
   it('freezes all observations, dispatches concurrently, and commits one complete tick', async () => {
     const observations: AgentObservation[] = [];
     const deadlines = new Set<number | undefined>();
@@ -178,7 +280,9 @@ describe('SimulationService', () => {
   });
 
   it('resolves same-tick diplomacy contention in deterministic phase order', async () => {
-    const recipientId = DEVELOPMENT_AGENT_BLUEPRINTS[0]!.id;
+    const recipientId = agentIdSchema.parse(
+      DEVELOPMENT_AGENT_BLUEPRINTS[0]!.id,
+    );
     const simulation = service({
       mode: 'scripted-test',
       model: 'deterministic-script',
@@ -214,6 +318,15 @@ describe('SimulationService', () => {
         record.outcome !== 'provider-error' &&
         record.outcome !== 'operator-skipped',
     );
+    expect(
+      completed
+        .filter(({ agentId }) => agentId !== recipientId)
+        .every(({ observation }) =>
+          observation.diplomacyAvailability.propose.eligibleRecipientAgentIds.includes(
+            recipientId,
+          ),
+        ),
+    ).toBe(true);
     const requested = completed.filter(
       (record) => record.diplomacyResult.requested,
     );
@@ -538,6 +651,32 @@ describe('SimulationService', () => {
     const directive = await simulation.executeNextTurn();
     const reply = await simulation.executeNextTurn();
     expect(directive.observation.patientZeroGlobalView?.agents).toHaveLength(8);
+    expect(
+      directive.observation.patientZeroGlobalView?.diplomacyFeasibility,
+    ).toHaveLength(8);
+    expect(
+      directive.observation.patientZeroGlobalView?.diplomacyFeasibility.find(
+        ({ agentId }) => agentId === patientZeroId,
+      ),
+    ).toMatchObject({
+      agentId: patientZeroId,
+      eligibleRecipientCount: 7,
+      eligibleRecipientsTruncated: true,
+      leaveAvailable: false,
+    });
+    expect(
+      directive.observation.patientZeroGlobalView?.diplomacyFeasibility.find(
+        ({ agentId }) => agentId === patientZeroId,
+      )?.displayedEligibleRecipientAgentIds,
+    ).toHaveLength(4);
+    expect(
+      directive.observation.diplomacyAvailability.propose
+        .eligibleRecipientAgentIds,
+    ).toHaveLength(
+      directive.observation.patientZeroGlobalView?.diplomacyFeasibility.find(
+        ({ agentId }) => agentId === patientZeroId,
+      )?.eligibleRecipientCount ?? -1,
+    );
     expect(reply.observation.patientZeroGlobalView).toBeNull();
     expect(
       JSON.stringify(directive.observation.patientZeroGlobalView),
@@ -572,6 +711,64 @@ describe('SimulationService', () => {
         firstZeroDirectiveTurn: 1,
       },
     );
+  });
+
+  it('keeps 32-agent Patient Zero diplomacy guidance compact and surfaces a distant free-agent blocker', async () => {
+    const simulation = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'Wait.' },
+      ]),
+    );
+    const setup = defaultWorldSetupRequest();
+    const roster = generateDeterministicRoster(32, 'pz-diplomacy-bound');
+    const patientZeroAgentId = roster[0]!.id;
+    simulation.applyWorldSetup({
+      ...setup,
+      radius: 12,
+      communicationRangeKm: 0.1,
+      roster,
+      patientZeroAgentId,
+      modelConfiguration: {
+        ...setup.modelConfiguration,
+        globalModelId: 'deterministic-script',
+      },
+      behaviorConfiguration: {
+        ...setup.behaviorConfiguration,
+        assignments: assignBehavior(
+          roster.map(({ id }) => id),
+          setup.behaviorConfiguration.seed,
+          'balanced-random',
+        ),
+      },
+    });
+    const record = await simulation.executeNextTurn();
+    const feasibility =
+      record.observation.patientZeroGlobalView?.diplomacyFeasibility;
+    expect(feasibility).toHaveLength(32);
+    expect(
+      feasibility?.every(
+        (entry) =>
+          entry.displayedEligibleRecipientAgentIds.length <= 4 &&
+          entry.blockerExamples.length <= 4 &&
+          !('eligibleRecipientAgentIds' in entry) &&
+          entry.blockerExamples.every(
+            ({ agentId }) => agentId !== entry.agentId,
+          ),
+      ),
+    ).toBe(true);
+    const patientZeroFeasibility = feasibility?.find(
+      ({ agentId }) => agentId === patientZeroAgentId,
+    );
+    expect(patientZeroFeasibility).toMatchObject({
+      eligibleRecipientCount: 0,
+      eligibleRecipientsTruncated: false,
+      blockedCounts: expect.arrayContaining([
+        expect.objectContaining({ reason: 'out-of-range' }),
+      ]),
+      blockerExamples: expect.arrayContaining([
+        expect.objectContaining({ reason: 'out-of-range' }),
+      ]),
+    });
   });
 
   it('reproduces move ordering for identical inputs and varies it across agents', async () => {

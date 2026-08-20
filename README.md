@@ -6,7 +6,7 @@ Scenarios may optionally designate one experimental Patient Zero coordinator.
 The role receives bounded global strategic information and can send private
 advisory directives, but remains subject to the same movement and world-action
 rules as every other agent. The universal flat provider contract is
-`text-flat-json-v4`; the objective remains `durable-influence-v2`. For every
+`text-flat-json-v5`; the objective remains `durable-influence-v2`. For every
 agent, including Patient Zero, no message is the normal choice unless a message
 adds new decision-relevant value; routine action narration and filler are
 explicitly discouraged.
@@ -79,6 +79,14 @@ The command reads only `OPENROUTER_API_KEY` from the repository-root `.env`; its
 The compatible default centers on Toledo, Ohio (`41.6528, -83.5379`) at H3 resolution 9 and renders the same deterministic radius-six disk of exactly 127 cells with eight fixed perimeter starts. World Setup previews and applies resolution 8–11 scenarios with 1–32 agents, radius at most 40, at most 5,000 actual generated cells, and a 12 km default physical communication range. Schema-v9 exports preserve the authoritative scenario and `durable-influence-v2` attribution. MapLibre uses CARTO Dark Matter's tokenless raster tiles with `© OpenStreetMap contributors © CARTO` attribution.
 
 Alliance leadership, merging, custom metadata, combat systems, relationship scores, group chat, persistent memory, player mechanics, restartable world persistence, and autonomous scheduling remain deferred.
+
+Formal alliances may grow to the entire configured roster and active worlds may
+use every feasible roster partition. Accessible alliance colors are
+deterministic presentation and may be reused; they are not an engine capacity
+rule. Free agents may form a new alliance, allied members may invite a free
+agent, and a free agent may request entry from an allied recipient. Frozen
+observations supply exact legal diplomacy IDs and bounded blocker codes so the
+same single model request does not need provider tools or infer engine rules.
 
 When every development cell is infected, World Lab automatically pauses
 playback and disables Start to avoid accidental provider calls. Reset and export

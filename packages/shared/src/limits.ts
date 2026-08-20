@@ -5,7 +5,6 @@ export const WORLD_SCENARIO_LIMITS = {
   maximumResolution: 11,
   maximumGeneratedCells: 5_000,
   maximumRadius: 40,
-  maximumAllianceMembers: 8,
   highDensityCellsPerAgent: 10,
   observedOtherAgents: 7,
   maximumNearbyAgentObservations: 8,

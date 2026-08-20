@@ -55,6 +55,14 @@ The model is explicitly instructed to return only one flat JSON decision with on
 
 Agent-authored messages, personalities, summaries, scoreboards, alliance events, proposals, and natural-language alliance claims are bounded untrusted data. They appear only inside the immutable user observation, never the fixed system instruction. Direct eligibility is derived from the pre-action snapshot. Recipient/range, infection, controller-presence, alliance membership, proposal eligibility, system ID/color allocation, and capture validation remain authoritative in the world engine. Models cannot choose alliance IDs, colors, membership lists, or metadata. Only accepted typed diplomacy changes alliance state, and rejected components cannot partially mutate or corrupt one another. World Lab renders model text through React text nodes and never raw HTML.
 
+Frozen observations expose only runtime-validated exact diplomacy IDs and
+bounded stable blocker codes. Patient Zero's global feasibility summary uses
+counts, explicit truncation, and at most four eligible IDs and four blocker
+examples per agent; it contains neither pending decisions nor future same-tick
+actions. These affordances avoid a provider-controlled tool boundary; submitted
+intents still pass authoritative engine validation during deterministic
+resolution.
+
 World Lab personality edits are also untrusted, bounded text. The Game API trims and runtime-validates them before changing the authoritative session, and rejects changes during active model execution. The runtime supplies the active personality only inside the immutable observation as subordinate behavioral context. It is never interpolated into the fixed system instruction and cannot grant actions, weaken engine validation, request secrets, or authorize prompt/reasoning disclosure. React renders active and historical personality text as text rather than HTML.
 
 Personality mutation errors use typed, generic response bodies. They do not expose raw prompts, provider responses, credentials, diagnostics, stack traces, or internal service details. There is still no authentication or persistence; these endpoints remain limited to the loopback development surface.

@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   MODEL_SUMMARY_MAX_LENGTH,
   AGENT_DECISION_CONTRACT_VERSION,
+  PREVIOUS_AGENT_DECISION_CONTRACT_VERSION,
   OBJECTIVE_PROMPT_VERSION,
   MESSAGE_MAX_LENGTH,
   PERSONALITY_MAX_LENGTH,
   apiErrorSchema,
+  agentIdSchema,
   agentDecisionSchema,
   agentObservationSchema,
   agentTurnRecordSchema,
@@ -24,6 +26,7 @@ import {
   providerMetadataSchema,
   restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
+  worldSnapshotSchema,
   singleTickResponseSchema,
   updateAgentPersonalityRequestSchema,
   updateAgentPersonalityResponseSchema,
@@ -248,7 +251,8 @@ const snapshot = {
 
 describe('agent observation and decision schemas', () => {
   it('preserves established engine contract identifiers through branding changes', () => {
-    expect(AGENT_DECISION_CONTRACT_VERSION).toBe('text-flat-json-v4');
+    expect(AGENT_DECISION_CONTRACT_VERSION).toBe('text-flat-json-v5');
+    expect(PREVIOUS_AGENT_DECISION_CONTRACT_VERSION).toBe('text-flat-json-v4');
     expect(OBJECTIVE_PROMPT_VERSION).toBe('durable-influence-v2');
     expect(
       modelVerificationSchema.parse({
@@ -283,15 +287,15 @@ describe('agent observation and decision schemas', () => {
       }).success,
     ).toBe(true);
     expect(
-      allianceProposalSchema.safeParse({
+      allianceProposalSchema.parse({
         id: proposalId,
         proposerAgentId: scoreboard[0]!.agentId,
         recipientAgentId: scoreboard[1]!.agentId,
         proposerAllianceId: null,
         originatingTurn: 1,
         expirationTurn: 17,
-      }).success,
-    ).toBe(true);
+      }).recipientAllianceId,
+    ).toBeNull();
     expect(
       diplomacyIntentSchema.safeParse({ type: 'accept-alliance', proposalId })
         .success,
@@ -301,10 +305,110 @@ describe('agent observation and decision schemas', () => {
     );
   });
 
-  it('accepts a bounded state-bearing observation', () => {
-    expect(agentObservationSchema.parse(observation).currentCell.state).toBe(
-      'open',
+  it('accepts a full-roster alliance and a maximum-count ten-agent partition with reused colors', () => {
+    const ids = Array.from({ length: 32 }, (_, index) =>
+      agentIdSchema.parse(
+        `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      ),
     );
+    expect(
+      allianceSchema.safeParse({
+        id: 'a1111111-1111-4111-8111-111111111111',
+        color: '#0072B2',
+        memberAgentIds: ids,
+      }).success,
+    ).toBe(true);
+    const tenAgents = ids.slice(0, 10).map((id, index) => ({
+      id,
+      name: `Agent ${index}`,
+      color: '#ff6b57',
+      personality: 'Coordinates deliberately.',
+      currentCell: cell,
+    }));
+    expect(
+      worldSnapshotSchema.safeParse({
+        generatedAt: '2026-08-13T12:00:00.000Z',
+        hexes: [{ cell, state: 'open', controllerAgentId: null }],
+        agents: tenAgents,
+        events: [],
+        alliances: Array.from({ length: 5 }, (_, index) => ({
+          id: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+          color: '#0072B2',
+          memberAgentIds: [ids[index * 2]!, ids[index * 2 + 1]!],
+        })),
+        pendingAllianceProposals: [],
+      }).success,
+    ).toBe(true);
+    const participantState = {
+      generatedAt: '2026-08-13T12:00:00.000Z',
+      hexes: [{ cell, state: 'open', controllerAgentId: null }],
+      agents: tenAgents,
+      events: [],
+      alliances: [
+        {
+          id: '10000000-0000-4000-8000-000000000000',
+          color: '#0072B2',
+          memberAgentIds: [ids[0]!, ids[1]!],
+        },
+      ],
+    };
+    const proposalBase = {
+      id: '20000000-0000-4000-8000-000000000000',
+      originatingTurn: 1,
+      expirationTurn: 21,
+      proposerAllianceId: null,
+      recipientAllianceId: null,
+    };
+    const legacyProposalBase: Partial<typeof proposalBase> = {
+      ...proposalBase,
+    };
+    delete legacyProposalBase.recipientAllianceId;
+    expect(
+      worldSnapshotSchema.safeParse({
+        ...participantState,
+        alliances: [],
+        pendingAllianceProposals: [
+          {
+            ...legacyProposalBase,
+            proposerAgentId: ids[2],
+            recipientAgentId: ids[3],
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      worldSnapshotSchema.safeParse({
+        ...participantState,
+        pendingAllianceProposals: [
+          {
+            ...proposalBase,
+            proposerAgentId: ids[0],
+            recipientAgentId: ids[2],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      worldSnapshotSchema.safeParse({
+        ...participantState,
+        pendingAllianceProposals: [
+          {
+            ...proposalBase,
+            proposerAgentId: ids[2],
+            recipientAgentId: ids[0],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts a bounded state-bearing observation', () => {
+    const parsed = agentObservationSchema.parse(observation);
+    expect(parsed.currentCell.state).toBe('open');
+    expect(parsed.diplomacyAvailability.propose).toMatchObject({
+      available: false,
+      blockedRecipients: [],
+    });
   });
 
   it.each([
