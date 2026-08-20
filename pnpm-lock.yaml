@@ -128,6 +128,25 @@ importers:
         specifier: 4.1.10
         version: 4.1.10(@types/node@24.13.3)(jsdom@30.0.1)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12))
 
+  packages/experiment-archive:
+    dependencies:
+      '@agentborne/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      '@agentborne/agent-runtime':
+        specifier: workspace:*
+        version: link:../agent-runtime
+      '@agentborne/world-engine':
+        specifier: workspace:*
+        version: link:../world-engine
+      tsx:
+        specifier: 4.23.12
+        version: 4.23.12
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@types/node@24.13.3)(jsdom@30.0.1)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12))
+
   packages/shared:
     dependencies:
       zod:
