@@ -524,6 +524,76 @@ describe('wait and deterministic development world', () => {
 });
 
 describe('formal alliances', () => {
+  it.each([
+    { agentCount: 8, lifetime: 16 },
+    { agentCount: 20, lifetime: 40 },
+  ])(
+    'gives proposals a $lifetime-turn lifetime for an $agentCount-agent roster',
+    ({ agentCount, lifetime }) => {
+      const base = toWorldState(
+        createDevelopmentWorld({ generatedAt: context.now() }),
+      );
+      const agents = [...base.agents.values()];
+      for (let index = agents.length; index < agentCount; index += 1) {
+        const id = agentIdSchema.parse(
+          `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+        );
+        agents.push({ ...agents[0]!, id, name: `Agent ${index + 1}` });
+      }
+      const initial = {
+        ...base,
+        agents: new Map(agents.map((item) => [item.id, item])),
+      };
+      const [proposer, recipient] = agents;
+
+      const proposed = applyDiplomacy(
+        initial,
+        proposer!.id,
+        { type: 'propose-alliance', recipientId: recipient!.id },
+        1,
+        context,
+      );
+      const proposal = [
+        ...proposed.state.pendingAllianceProposals!.values(),
+      ][0]!;
+
+      expect(proposal.expirationTurn).toBe(1 + lifetime);
+    },
+  );
+
+  it('keeps a proposal open for two scheduled recipient opportunities', () => {
+    const initial = toWorldState(
+      createDevelopmentWorld({ generatedAt: context.now() }),
+    );
+    const [proposer, recipient] = [...initial.agents.values()];
+    const proposed = applyDiplomacy(
+      initial,
+      proposer!.id,
+      { type: 'propose-alliance', recipientId: recipient!.id },
+      1,
+      context,
+    );
+
+    const afterFirstOpportunity = expireAllianceProposals(
+      proposed.state,
+      2,
+      context,
+    );
+    const afterSecondOpportunity = expireAllianceProposals(
+      afterFirstOpportunity,
+      10,
+      context,
+    );
+    expect(afterSecondOpportunity.pendingAllianceProposals?.size).toBe(1);
+
+    const expired = expireAllianceProposals(
+      afterSecondOpportunity,
+      17,
+      context,
+    );
+    expect(expired.pendingAllianceProposals?.size).toBe(0);
+  });
+
   it('forms, colors, leaves, dissolves, and expires proposals deterministically', () => {
     const initial = toWorldState(
       createDevelopmentWorld({ generatedAt: context.now() }),
@@ -616,7 +686,7 @@ describe('formal alliances', () => {
       10,
       context,
     );
-    const expired = expireAllianceProposals(laterProposal.state, 18, context);
+    const expired = expireAllianceProposals(laterProposal.state, 26, context);
     expect(expired.pendingAllianceProposals?.size).toBe(0);
     expect(expired.events.at(-1)).toMatchObject({
       type: 'alliance-proposal-closed',
