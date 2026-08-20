@@ -9,14 +9,14 @@ schema-v10 export/archive behavior, and schema-v9 compatibility. World Lab tests
 cover Single tick, 5/10/25/50/100 targets, the default target of 25, per-agent
 cost warnings, cancellation reconciliation, and lost-tick status.
 
-Focused deterministic coverage includes physical-distance messaging across H3 resolutions, the eight-agent observation cap, alliance long-range visibility and delivery, channel privacy, seeded move-affordance ordering, effective neutral/alliance colors, and operator-only private-feed filters. Provider tests remain offline and verify the flat `text-flat-json-v4` contract, its selective-communication policy text, unchanged wire parsing, and legacy v3 attribution compatibility.
+Focused deterministic coverage includes physical-distance messaging across H3 resolutions, the eight-agent observation cap, alliance long-range visibility and delivery, channel privacy, seeded move-affordance ordering, effective neutral/alliance colors, and operator-only private-feed filters. Provider tests remain offline and verify the flat `text-flat-json-v5` contract, its selective-communication and diplomacy-affordance policy text, unchanged wire parsing, and legacy v3/v4 attribution compatibility.
 
 Patient Zero coverage verifies disabled/legacy scenario defaults, valid roster
 designation, bounded exclusive global awareness, Zero authority and private
 fan-out, Patient-Zero-endpoint direct replies, ordinary range enforcement,
 immutable retry observations, normal world-action legality, export telemetry,
 and restrained World Lab role/filter rendering. Provider tests use
-`text-flat-json-v4`; no live provider or geocoder is involved.
+`text-flat-json-v5`; no live provider or geocoder is involved.
 
 Selective communication is evaluated empirically with a same-model,
 same-scenario 10-tick comparison. Fewer than 40 messages across 80 decisions
@@ -85,8 +85,15 @@ valid `Retry-After`, the bounded missing/invalid-header fallback, shared-deadlin
 consumption, cancellation during backoff, and the unchanged two-call ceiling.
 
 - Centralized development-contract tests prove radius 6 produces exactly 127 unique open/uncontrolled cells, eight unique deterministic starts, stable IDs/default personalities, and an eight-entry scoreboard with up to seven other-agent observations.
-- Alliance engine tests cover free-agent formation, recruitment, recipient-only acceptance, proposal conflicts, exact two-tick expiry for tick callers, legacy two-roster-round expiry, stale invalidation, one-alliance membership, unilateral departure/dissolution, unchanged individual control, deterministic color reuse, and allied-capture rejection.
-- Simulation tests cover frozen observations, independent world/communication/diplomacy outcomes, isolated lost ticks, bounded authoritative alliance observations, reset/default semantics, multi-agent telemetry relevance, alliance territory sums, and complete eight-record tick groups.
+- Alliance engine/schema tests cover 10- and 32-agent feasibility, full-roster membership, a maximum-count five-alliance partition without color capacity, free-agent formation, member invitations, unaffiliated join requests to allied recipients, recipient-only acceptance, proposal conflicts, exact two-tick expiry for tick callers, legacy two-roster-round expiry, stale invalidation, one-alliance membership, unilateral leave/switch semantics, deterministic accessible color reuse, and allied-capture rejection.
+- Simulation tests cover frozen exact diplomacy affordances and blocker codes, Patient Zero's bounded global feasibility view, same-tick resolution races, independent world/communication/diplomacy outcomes, isolated lost ticks, bounded authoritative alliance observations, reset/default semantics, multi-agent telemetry relevance, alliance territory sums, and complete eight-record tick groups.
+
+Prompt tests verify that models copy only exact supplied diplomacy IDs, treat
+range/membership/capacity blockers as authoritative, avoid repeating unavailable
+plans, and retain the single flat response without tools or another inference.
+These are deterministic contract tests, not claims of measured token savings or
+model compliance.
+
 - Runtime mocks cover the explicit per-turn model and reasoning profile, universal text-only request, flat JSON extraction/repair, exact default/off/effort payloads, absent provider-specific controls, malformed or missing output, cancellation, output exhaustion, metadata preservation, and the unchanged one-request boundary without OpenRouter calls.
 - Catalog fixtures cover required-capability inclusion/exclusion, text modalities, context floor, pricing parsing, malformed entries, timeout/failure, cache TTL, stale fallback, manual refresh, and credential non-disclosure without network access.
 - Schema-v5 export tests cover eight-agent selection, state-only alliance/proposal snapshots, diplomacy/event metrics and preview counts, selected-agent proposal/membership relevance, unrelated direct/rejected exclusion, cost handling, retention, and all four safe tiers.

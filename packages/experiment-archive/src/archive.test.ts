@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { AgentProvider, ProviderDecision } from '@hexzero/agent-runtime';
 import {
   LEGACY_AGENT_DECISION_CONTRACT_VERSION,
+  PREVIOUS_AGENT_DECISION_CONTRACT_VERSION,
   experimentExportDocumentSchema,
   type AgentObservation,
   type ExperimentExportDocument,
@@ -188,6 +189,30 @@ describe('experiment archive', () => {
         decisionContractVersion: LEGACY_AGENT_DECISION_CONTRACT_VERSION,
       });
     }
+    const previousRaw = structuredClone(current) as unknown as {
+      experiment: Record<string, unknown> & {
+        scenario?: Record<string, unknown>;
+      };
+    };
+    previousRaw.experiment.id = '4f5e8994-cf39-44e0-9424-b829eb246e55';
+    previousRaw.experiment.decisionContractVersion =
+      PREVIOUS_AGENT_DECISION_CONTRACT_VERSION;
+    if (previousRaw.experiment.scenario)
+      delete previousRaw.experiment.scenario.decisionContractVersion;
+    const previous = experimentExportDocumentSchema.parse(previousRaw);
+    expect(previous.experiment.scenario?.decisionContractVersion).toBe(
+      PREVIOUS_AGENT_DECISION_CONTRACT_VERSION,
+    );
+    expect(() => importExperimentExport(archive, previous)).not.toThrow();
+    expect(
+      archive.database
+        .prepare(
+          'SELECT decision_contract_version FROM experiments WHERE id = ?',
+        )
+        .get(previous.experiment.id),
+    ).toEqual({
+      decision_contract_version: PREVIOUS_AGENT_DECISION_CONTRACT_VERSION,
+    });
     archive.close();
   });
 

@@ -31,9 +31,11 @@ export const OPENROUTER_MAX_OUTPUT_TOKENS = 4_096;
 export const OPENROUTER_PROVIDER_TIMEOUT_MS = 75_000;
 export const OPENROUTER_429_FALLBACK_BACKOFF_MS = 1_500;
 export const LEGACY_AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v3';
-export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v4';
+export const PREVIOUS_AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v4';
+export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v5';
 export const agentDecisionContractVersionSchema = z.enum([
   LEGACY_AGENT_DECISION_CONTRACT_VERSION,
+  PREVIOUS_AGENT_DECISION_CONTRACT_VERSION,
   AGENT_DECISION_CONTRACT_VERSION,
 ]);
 export const OBJECTIVE_PROMPT_VERSION = 'durable-influence-v2';
@@ -172,7 +174,7 @@ export const allianceSchema = z.object({
   memberAgentIds: z
     .array(agentIdSchema)
     .min(2)
-    .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers)
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents)
     .refine((ids) => new Set(ids).size === ids.length, {
       message: 'Alliance members must be unique.',
     }),
@@ -185,6 +187,7 @@ export const allianceProposalSchema = z
     proposerAgentId: agentIdSchema,
     recipientAgentId: agentIdSchema,
     proposerAllianceId: allianceIdSchema.nullable(),
+    recipientAllianceId: allianceIdSchema.nullable().default(null),
     originatingTurn: z.number().int().positive(),
     expirationTurn: z.number().int().positive(),
     originatingTick: z.number().int().positive().optional(),
@@ -261,7 +264,7 @@ export const allianceMessageEventSchema = worldEventBaseSchema.extend({
   recipientIds: z
     .array(agentIdSchema)
     .min(1)
-    .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers - 1),
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents - 1),
   message: messageContentSchema,
   playerVisible: z.literal(false).default(false),
 });
@@ -336,7 +339,7 @@ export const agentJoinedAllianceEventSchema = allianceEventBaseSchema.extend({
   memberAgentIds: z
     .array(agentIdSchema)
     .min(2)
-    .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers),
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents),
 });
 export const agentLeftAllianceEventSchema = allianceEventBaseSchema.extend({
   type: z.literal('agent-left-alliance'),
@@ -345,7 +348,7 @@ export const agentLeftAllianceEventSchema = allianceEventBaseSchema.extend({
   leftAgentId: agentIdSchema,
   remainingMemberAgentIds: z
     .array(agentIdSchema)
-    .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers),
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents),
 });
 export const allianceDissolvedEventSchema = allianceEventBaseSchema.extend({
   type: z.literal('alliance-dissolved'),
@@ -354,7 +357,7 @@ export const allianceDissolvedEventSchema = allianceEventBaseSchema.extend({
   formerMemberAgentIds: z
     .array(agentIdSchema)
     .min(1)
-    .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers),
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents),
 });
 export const allianceEventSchema = z.discriminatedUnion('type', [
   allianceProposedEventSchema,
@@ -494,6 +497,7 @@ export const diplomacyRejectionReasonSchema = z.enum([
   'self-proposal',
   'recipient-allied',
   'current-ally',
+  'recipient-out-of-range',
   'outgoing-proposal-exists',
   'incoming-proposal-exists',
   'unknown-proposal',
@@ -544,7 +548,10 @@ const worldSnapshotObjectSchema = z.object({
     .min(WORLD_SCENARIO_LIMITS.minimumAgents)
     .max(WORLD_SCENARIO_LIMITS.maximumAgents),
   events: z.array(worldEventSchema).max(120),
-  alliances: z.array(allianceSchema).max(4).default([]),
+  alliances: z
+    .array(allianceSchema)
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents)
+    .default([]),
   pendingAllianceProposals: z
     .array(allianceProposalSchema)
     .max(WORLD_SCENARIO_LIMITS.maximumAgents)
@@ -568,7 +575,6 @@ function validateWorldControllers(
       });
   }
   const memberships = new Set<AgentId>();
-  const colors = new Set<string>();
   const allianceIds = new Set<AllianceId>();
   for (const [index, alliance] of world.alliances.entries()) {
     if (allianceIds.has(alliance.id))
@@ -578,13 +584,6 @@ function validateWorldControllers(
         message: 'Active alliance IDs must be unique.',
       });
     allianceIds.add(alliance.id);
-    if (colors.has(alliance.color))
-      context.addIssue({
-        code: 'custom',
-        path: ['alliances', index, 'color'],
-        message: 'Active alliance colors must be unique.',
-      });
-    colors.add(alliance.color);
     for (const memberId of alliance.memberAgentIds) {
       if (!agentIds.has(memberId))
         context.addIssue({
@@ -648,31 +647,22 @@ function validateWorldControllers(
         message:
           'Proposal expiration must allow two ticks or two legacy roster rounds.',
       });
+    const proposerAlliance = world.alliances.find(({ memberAgentIds }) =>
+      memberAgentIds.includes(proposal.proposerAgentId),
+    );
+    const recipientAlliance = world.alliances.find(({ memberAgentIds }) =>
+      memberAgentIds.includes(proposal.recipientAgentId),
+    );
     if (
-      proposal.proposerAllianceId &&
-      !world.alliances.some(({ id }) => id === proposal.proposerAllianceId)
+      proposal.proposerAllianceId !== (proposerAlliance?.id ?? null) ||
+      proposal.recipientAllianceId !== (recipientAlliance?.id ?? null) ||
+      (proposerAlliance !== undefined && recipientAlliance !== undefined)
     )
       context.addIssue({
         code: 'custom',
-        path: ['pendingAllianceProposals', index, 'proposerAllianceId'],
-        message: 'A recorded proposer alliance must be active.',
-      });
-    if (
-      proposal.proposerAllianceId &&
-      !world.alliances
-        .find(({ id }) => id === proposal.proposerAllianceId)
-        ?.memberAgentIds.includes(proposal.proposerAgentId)
-    )
-      context.addIssue({
-        code: 'custom',
-        path: ['pendingAllianceProposals', index, 'proposerAllianceId'],
-        message: 'The proposer must remain in the recorded alliance.',
-      });
-    if (memberships.has(proposal.recipientAgentId))
-      context.addIssue({
-        code: 'custom',
-        path: ['pendingAllianceProposals', index, 'recipientAgentId'],
-        message: 'A proposal recipient must remain unaffiliated.',
+        path: ['pendingAllianceProposals', index, 'recipientAllianceId'],
+        message:
+          'Proposal alliance attribution must match current participant membership.',
       });
     outgoing.add(proposal.proposerAgentId);
     incoming.add(proposal.recipientAgentId);
@@ -818,7 +808,7 @@ export const allianceTerritorySummarySchema = z
         }),
       )
       .min(2)
-      .max(WORLD_SCENARIO_LIMITS.maximumAllianceMembers),
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
   })
   .refine(
     ({ totalControlledCellCount, members }) =>
@@ -844,23 +834,123 @@ export const patientZeroGlobalAgentSchema = z.object({
   personality: personalitySchema,
   strategyId: strategyProfileIdSchema,
 });
-export const patientZeroGlobalViewSchema = z.object({
-  agents: z
-    .array(patientZeroGlobalAgentSchema)
-    .max(WORLD_SCENARIO_LIMITS.maximumAgents),
-  individualTerritory: territoryScoreboardSchema,
-  allianceTerritory: z.array(allianceTerritorySummarySchema).max(4),
-  alliances: z.array(allianceSchema).max(4),
-  activeAllianceProposals: z
-    .array(allianceProposalSchema)
-    .max(WORLD_SCENARIO_LIMITS.maximumAgents),
-  recentStrategicEvents: z
-    .array(observedAllianceEventSchema)
-    .max(RECENT_ZERO_STRATEGIC_EVENT_LIMIT),
-  recentTerritoryChanges: z
-    .array(hexCapturedWorldEventSchema)
-    .max(RECENT_CONTROL_CHANGE_LIMIT),
-});
+export const diplomacyProposalBlockReasonSchema = z.enum([
+  'current-ally',
+  'out-of-range',
+  'outgoing-proposal-exists',
+  'incoming-proposal-exists',
+  'alliance-to-alliance-merge',
+]);
+export const diplomacyProposalBlockSchema = z
+  .object({
+    agentId: agentIdSchema,
+    reason: diplomacyProposalBlockReasonSchema,
+  })
+  .strict();
+export const patientZeroDiplomacyFeasibilitySchema = z
+  .object({
+    agentId: agentIdSchema,
+    eligibleRecipientCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents - 1),
+    displayedEligibleRecipientAgentIds: z.array(agentIdSchema).max(4),
+    eligibleRecipientsTruncated: z.boolean(),
+    blockedCounts: z
+      .array(
+        z
+          .object({
+            reason: diplomacyProposalBlockReasonSchema,
+            count: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .max(diplomacyProposalBlockReasonSchema.options.length),
+    blockerExamples: z.array(diplomacyProposalBlockSchema).max(4),
+    acceptableProposalIds: z
+      .array(allianceProposalIdSchema)
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
+    leaveAvailable: z.boolean(),
+  })
+  .strict()
+  .superRefine((entry, context) => {
+    if (
+      entry.displayedEligibleRecipientAgentIds.length >
+        entry.eligibleRecipientCount ||
+      entry.eligibleRecipientsTruncated !==
+        entry.eligibleRecipientCount >
+          entry.displayedEligibleRecipientAgentIds.length
+    )
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Patient Zero eligible-recipient truncation must match counts.',
+      });
+    if (
+      new Set(entry.displayedEligibleRecipientAgentIds).size !==
+        entry.displayedEligibleRecipientAgentIds.length ||
+      new Set(entry.blockedCounts.map(({ reason }) => reason)).size !==
+        entry.blockedCounts.length ||
+      new Set(entry.blockerExamples.map(({ agentId }) => agentId)).size !==
+        entry.blockerExamples.length ||
+      entry.blockerExamples.some(
+        ({ agentId, reason }) =>
+          agentId === entry.agentId ||
+          !entry.blockedCounts.some((count) => count.reason === reason),
+      )
+    )
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Patient Zero diplomacy samples must be unique and attributed.',
+      });
+  });
+export const patientZeroGlobalViewSchema = z
+  .object({
+    agents: z
+      .array(patientZeroGlobalAgentSchema)
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
+    individualTerritory: territoryScoreboardSchema,
+    allianceTerritory: z
+      .array(allianceTerritorySummarySchema)
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
+    alliances: z.array(allianceSchema).max(WORLD_SCENARIO_LIMITS.maximumAgents),
+    activeAllianceProposals: z
+      .array(allianceProposalSchema)
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents),
+    recentStrategicEvents: z
+      .array(observedAllianceEventSchema)
+      .max(RECENT_ZERO_STRATEGIC_EVENT_LIMIT),
+    recentTerritoryChanges: z
+      .array(hexCapturedWorldEventSchema)
+      .max(RECENT_CONTROL_CHANGE_LIMIT),
+    diplomacyFeasibility: z
+      .array(patientZeroDiplomacyFeasibilitySchema)
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents)
+      .default([]),
+  })
+  .superRefine((view, context) => {
+    if (
+      view.diplomacyFeasibility.length > 0 &&
+      (view.diplomacyFeasibility.length !== view.agents.length ||
+        view.diplomacyFeasibility.some(
+          (entry) =>
+            entry.eligibleRecipientCount +
+              entry.blockedCounts.reduce(
+                (sum, blocked) => sum + blocked.count,
+                0,
+              ) !==
+            view.agents.length - 1,
+        ))
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['diplomacyFeasibility'],
+        message:
+          'Patient Zero diplomacy counts must cover every other active agent.',
+      });
+  });
 
 const agentObservationObjectSchema = z.object({
   agentId: agentIdSchema,
@@ -925,13 +1015,24 @@ const agentObservationObjectSchema = z.object({
         z
           .object({
             available: z.literal(true),
-            eligibleRecipientAgentIds: z.array(agentIdSchema).min(1).max(7),
+            eligibleRecipientAgentIds: z
+              .array(agentIdSchema)
+              .min(1)
+              .max(WORLD_SCENARIO_LIMITS.maximumAgents - 1),
+            blockedRecipients: z
+              .array(diplomacyProposalBlockSchema)
+              .max(WORLD_SCENARIO_LIMITS.maximumNearbyAgentObservations)
+              .default([]),
           })
           .strict(),
         z
           .object({
             available: z.literal(false),
             eligibleRecipientAgentIds: z.array(agentIdSchema).length(0),
+            blockedRecipients: z
+              .array(diplomacyProposalBlockSchema)
+              .max(WORLD_SCENARIO_LIMITS.maximumNearbyAgentObservations)
+              .default([]),
             reason: z.string().trim().min(1).max(120),
           })
           .strict(),
@@ -943,7 +1044,7 @@ const agentObservationObjectSchema = z.object({
             acceptableProposalIds: z
               .array(allianceProposalIdSchema)
               .min(1)
-              .max(4),
+              .max(WORLD_SCENARIO_LIMITS.maximumAgents),
           })
           .strict(),
         z
@@ -1032,7 +1133,9 @@ const agentObservationObjectSchema = z.object({
   territoryScoreboard: territoryScoreboardSchema,
   actingAllianceId: allianceIdSchema.nullable(),
   actingAlliance: allianceTerritorySummarySchema.nullable(),
-  activeAlliances: z.array(allianceTerritorySummarySchema).max(4),
+  activeAlliances: z
+    .array(allianceTerritorySummarySchema)
+    .max(WORLD_SCENARIO_LIMITS.maximumAgents),
   inboundAllianceProposals: z.array(allianceProposalSchema).max(1),
   outboundAllianceProposals: z.array(allianceProposalSchema).max(1),
   recentAllianceEvents: z
@@ -1085,6 +1188,7 @@ export const agentObservationSchema = agentObservationObjectSchema.transform(
       propose: {
         available: false as const,
         eligibleRecipientAgentIds: [],
+        blockedRecipients: [],
         reason: 'Authoritative recipient availability was not supplied.',
       },
       accept: observation.inboundAllianceProposals.length
@@ -1832,7 +1936,9 @@ export const simulationSnapshotSchema = z
       complete: z.boolean(),
       metrics: z.lazy(() => experimentMetricsSchema),
       currentTerritory: territoryScoreboardSchema,
-      currentAlliances: z.array(allianceTerritorySummarySchema).max(4),
+      currentAlliances: z
+        .array(allianceTerritorySummarySchema)
+        .max(WORLD_SCENARIO_LIMITS.maximumAgents),
     }),
   })
   .superRefine((snapshot, context) => {
@@ -2180,10 +2286,12 @@ export const experimentManifestSchema = z.preprocess(
     if (typeof input !== 'object' || input === null || Array.isArray(input))
       return input;
     const manifest = input as Record<string, unknown>;
-    const resolvedVersion =
-      manifest.decisionContractVersion === AGENT_DECISION_CONTRACT_VERSION
-        ? AGENT_DECISION_CONTRACT_VERSION
-        : LEGACY_AGENT_DECISION_CONTRACT_VERSION;
+    const parsedVersion = agentDecisionContractVersionSchema.safeParse(
+      manifest.decisionContractVersion,
+    );
+    const resolvedVersion = parsedVersion.success
+      ? parsedVersion.data
+      : LEGACY_AGENT_DECISION_CONTRACT_VERSION;
     const scenario = manifest.scenario;
     return {
       ...manifest,
@@ -2794,7 +2902,10 @@ export const experimentExportDocumentSchema = z
     configurationEvents: z.array(experimentConfigurationEventSchema).optional(),
     metrics: experimentMetricsSchema.optional(),
     currentTerritory: territoryScoreboardSchema.optional(),
-    currentAlliances: z.array(allianceTerritorySummarySchema).max(4).optional(),
+    currentAlliances: z
+      .array(allianceTerritorySummarySchema)
+      .max(WORLD_SCENARIO_LIMITS.maximumAgents)
+      .optional(),
     initialWorld: experimentExportWorldStateSchema.optional(),
     currentWorld: experimentExportWorldStateSchema.optional(),
     worldEvents: z.array(nonCommunicationWorldEventSchema).optional(),

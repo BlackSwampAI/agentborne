@@ -31,6 +31,7 @@ import {
   PERSONALITY_MAX_LENGTH,
   OPENROUTER_PROVIDER_TIMEOUT_MS,
   OPENROUTER_429_FALLBACK_BACKOFF_MS,
+  WORLD_SCENARIO_LIMITS,
   personalitySchema,
   simulationSnapshotSchema,
   type Agent,
@@ -72,6 +73,7 @@ import {
   getCaptureEligibility,
   getAgentAlliance,
   getEffectiveAgentColor,
+  getProposalTargetEligibility,
   physicalDistanceKm,
   expireAllianceProposals,
   seededTickIntervalMinutes,
@@ -966,6 +968,7 @@ export class SimulationService {
         communicationRangeKm: this.#scenario.communicationRangeKm,
         patientZeroAgentId: this.#scenario.patientZeroAgentId,
         tickNumber,
+        diplomacyRangeState: preTickState,
       };
       const recordOrdinal = new Map(
         order.map((agentId, index) => [
@@ -1390,6 +1393,7 @@ export class SimulationService {
         createProposalId: this.#createProposalId,
         communicationRangeKm: this.#scenario.communicationRangeKm,
         patientZeroAgentId: this.#scenario.patientZeroAgentId,
+        diplomacyRangeState: preActionState,
       };
       const appliedAction = applyWorldAction(
         preActionState,
@@ -2020,6 +2024,57 @@ export class SimulationService {
               activeAllianceProposals: [
                 ...(this.#state.pendingAllianceProposals?.values() ?? []),
               ],
+              diplomacyFeasibility: [...this.#state.agents.keys()]
+                .toSorted()
+                .map((candidateId) => {
+                  const availability = this.#diplomacyAvailability(
+                    candidateId,
+                    WORLD_SCENARIO_LIMITS.maximumAgents,
+                  );
+                  const eligible =
+                    availability.propose.eligibleRecipientAgentIds;
+                  const displayedEligibleRecipientAgentIds = eligible.slice(
+                    0,
+                    4,
+                  );
+                  const blockedCounts = [
+                    ...new Set(
+                      availability.propose.blockedRecipients.map(
+                        ({ reason }) => reason,
+                      ),
+                    ),
+                  ].map((reason) => ({
+                    reason,
+                    count: availability.propose.blockedRecipients.filter(
+                      (blocked) => blocked.reason === reason,
+                    ).length,
+                  }));
+                  const blockerPriority = [
+                    'out-of-range',
+                    'alliance-to-alliance-merge',
+                    'current-ally',
+                    'incoming-proposal-exists',
+                    'outgoing-proposal-exists',
+                  ] as const;
+                  return {
+                    agentId: candidateId,
+                    eligibleRecipientCount: eligible.length,
+                    displayedEligibleRecipientAgentIds,
+                    eligibleRecipientsTruncated:
+                      eligible.length >
+                      displayedEligibleRecipientAgentIds.length,
+                    blockedCounts,
+                    blockerExamples: selectDiplomacyBlockerExamples(
+                      this.#state,
+                      candidateId,
+                      availability.propose.blockedRecipients,
+                      blockerPriority,
+                    ),
+                    acceptableProposalIds:
+                      availability.accept.acceptableProposalIds,
+                    leaveAvailable: availability.leave.available,
+                  };
+                }),
               recentStrategicEvents: this.#state.events
                 .filter(isAllianceEvent)
                 .slice(-RECENT_ZERO_STRATEGIC_EVENT_LIMIT)
@@ -2063,7 +2118,10 @@ export class SimulationService {
     });
   }
 
-  #diplomacyAvailability(agentId: AgentId) {
+  #diplomacyAvailability(
+    agentId: AgentId,
+    blockedRecipientLimit: number = WORLD_SCENARIO_LIMITS.maximumNearbyAgentObservations,
+  ) {
     const proposals = [
       ...(this.#state.pendingAllianceProposals?.values() ?? []),
     ];
@@ -2071,43 +2129,72 @@ export class SimulationService {
     const hasOutgoing = proposals.some(
       ({ proposerAgentId }) => proposerAgentId === agentId,
     );
-    const eligibleRecipientAgentIds = hasOutgoing
-      ? []
-      : [...this.#state.agents.keys()]
-          .filter(
-            (candidateId) =>
-              candidateId !== agentId &&
-              !getAgentAlliance(this.#state, candidateId) &&
-              !proposals.some(
-                ({ recipientAgentId }) => recipientAgentId === candidateId,
-              ),
-          )
-          .toSorted()
-          .slice(0, 7);
-    const acceptableProposalIds = actingAlliance
-      ? []
-      : proposals
-          .filter(({ recipientAgentId }) => recipientAgentId === agentId)
-          .map(({ id }) => id);
+    const eligibleRecipientAgentIds: AgentId[] = [];
+    const blockedRecipients: Array<{
+      agentId: AgentId;
+      reason:
+        | 'current-ally'
+        | 'out-of-range'
+        | 'outgoing-proposal-exists'
+        | 'incoming-proposal-exists'
+        | 'alliance-to-alliance-merge';
+    }> = [];
+    for (const candidateId of [...this.#state.agents.keys()].toSorted()) {
+      let reason: (typeof blockedRecipients)[number]['reason'] | null = null;
+      if (candidateId === agentId) continue;
+      const eligibility = getProposalTargetEligibility(
+        this.#state,
+        agentId,
+        candidateId,
+        this.#scenario.communicationRangeKm,
+        this.#state,
+      );
+      if (!eligibility.eligible) reason = eligibility.reason;
+      if (reason) {
+        if (blockedRecipients.length < blockedRecipientLimit)
+          blockedRecipients.push({ agentId: candidateId, reason });
+      } else eligibleRecipientAgentIds.push(candidateId);
+    }
+    const acceptableProposalIds = proposals
+      .filter((proposal) => {
+        if (proposal.recipientAgentId !== agentId) return false;
+        const proposerAlliance = getAgentAlliance(
+          this.#state,
+          proposal.proposerAgentId,
+        );
+        return (
+          (proposal.proposerAllianceId === null
+            ? !proposerAlliance
+            : proposerAlliance?.id === proposal.proposerAllianceId) &&
+          (proposal.recipientAllianceId === null
+            ? !actingAlliance
+            : actingAlliance?.id === proposal.recipientAllianceId) &&
+          !(proposerAlliance && actingAlliance)
+        );
+      })
+      .map(({ id }) => id);
     return {
       neutral: { available: true as const },
       propose: eligibleRecipientAgentIds.length
-        ? { available: true as const, eligibleRecipientAgentIds }
+        ? {
+            available: true as const,
+            eligibleRecipientAgentIds,
+            blockedRecipients,
+          }
         : {
             available: false as const,
             eligibleRecipientAgentIds: [],
+            blockedRecipients,
             reason: hasOutgoing
               ? 'A pending outgoing formal proposal already exists.'
-              : 'No unaffiliated eligible recipient is available.',
+              : 'No eligible formal proposal recipient is available.',
           },
       accept: acceptableProposalIds.length
         ? { available: true as const, acceptableProposalIds }
         : {
             available: false as const,
             acceptableProposalIds: [],
-            reason: actingAlliance
-              ? 'Allied agents cannot accept another proposal.'
-              : 'No acceptable inbound formal alliance proposal exists.',
+            reason: 'No acceptable inbound formal alliance proposal exists.',
           },
       leave: actingAlliance
         ? { available: true as const, allianceId: actingAlliance.id }
@@ -2165,6 +2252,33 @@ export class SimulationService {
       };
     });
   }
+}
+
+export function selectDiplomacyBlockerExamples<
+  T extends { agentId: AgentId; reason: string },
+>(
+  state: WorldState,
+  actingAgentId: AgentId,
+  blockers: readonly T[],
+  reasonPriority: readonly T['reason'][],
+): T[] {
+  const actingAlliance = getAgentAlliance(state, actingAgentId);
+  const relationshipPriority = (blockedAgentId: AgentId) => {
+    const blockedAlliance = getAgentAlliance(state, blockedAgentId);
+    if (!actingAlliance) return blockedAlliance ? 1 : 0;
+    if (!blockedAlliance) return 0;
+    return blockedAlliance.id === actingAlliance.id ? 2 : 1;
+  };
+  return blockers
+    .toSorted(
+      (left, right) =>
+        relationshipPriority(left.agentId) -
+          relationshipPriority(right.agentId) ||
+        reasonPriority.indexOf(left.reason) -
+          reasonPriority.indexOf(right.reason) ||
+        left.agentId.localeCompare(right.agentId),
+    )
+    .slice(0, 4);
 }
 
 function isAllianceEvent(event: WorldEvent): event is AllianceEvent {

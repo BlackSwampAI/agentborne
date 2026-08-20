@@ -1,13 +1,21 @@
 import { gridDisk, gridDistance, latLngToCell } from 'h3-js';
 import { describe, expect, it } from 'vitest';
-import { agentIdSchema, h3CellSchema, type Agent } from '@hexzero/shared';
+import {
+  agentIdSchema,
+  allianceIdSchema,
+  allianceProposalIdSchema,
+  h3CellSchema,
+  type Agent,
+} from '@hexzero/shared';
 import {
   applyCommunication,
   applyDiplomacy,
   applyWorldAction,
   areAdjacent,
   createDevelopmentWorld,
+  deterministicAllianceColor,
   getCaptureEligibility,
+  getProposalTargetEligibility,
   expireAllianceProposals,
   seededTickIntervalMinutes,
   seededTickOrder,
@@ -600,6 +608,194 @@ describe('wait and deterministic development world', () => {
 });
 
 describe('formal alliances', () => {
+  it('uses one proposal-target authority for affordances and rejection reasons', () => {
+    const base = toWorldState(
+      createDevelopmentWorld({ generatedAt: context.now() }),
+    );
+    const [ember, rook, mingle, morrow] = [...base.agents.values()];
+    const firstAllianceId = allianceIdSchema.parse(
+      'a1111111-1111-4111-8111-111111111111',
+    );
+    const secondAllianceId = allianceIdSchema.parse(
+      'e5555555-5555-4555-8555-555555555555',
+    );
+    const alliedState = {
+      ...base,
+      alliances: new Map([
+        [
+          firstAllianceId,
+          {
+            id: firstAllianceId,
+            color: '#0072B2' as const,
+            memberAgentIds: [ember!.id, rook!.id],
+          },
+        ],
+        [
+          secondAllianceId,
+          {
+            id: secondAllianceId,
+            color: '#D55E00' as const,
+            memberAgentIds: [mingle!.id, morrow!.id],
+          },
+        ],
+      ]),
+    };
+    const cases = [
+      {
+        state: alliedState,
+        proposerId: ember!.id,
+        recipientId: rook!.id,
+        range: 12,
+        helperReason: 'current-ally' as const,
+        rejectionReason: 'current-ally' as const,
+      },
+      {
+        state: alliedState,
+        proposerId: ember!.id,
+        recipientId: mingle!.id,
+        range: 12,
+        helperReason: 'alliance-to-alliance-merge' as const,
+        rejectionReason: 'recipient-allied' as const,
+      },
+      {
+        state: base,
+        proposerId: ember!.id,
+        recipientId: rook!.id,
+        range: 0.001,
+        helperReason: 'out-of-range' as const,
+        rejectionReason: 'recipient-out-of-range' as const,
+      },
+    ];
+    for (const item of cases) {
+      expect(
+        getProposalTargetEligibility(
+          item.state,
+          item.proposerId,
+          item.recipientId,
+          item.range,
+        ),
+      ).toEqual({ eligible: false, reason: item.helperReason });
+      expect(
+        applyDiplomacy(
+          item.state,
+          item.proposerId,
+          { type: 'propose-alliance', recipientId: item.recipientId },
+          1,
+          { ...context, communicationRangeKm: item.range },
+        ).result,
+      ).toMatchObject({
+        requested: true,
+        accepted: false,
+        reason: item.rejectionReason,
+      });
+    }
+
+    const movedTogetherState = {
+      ...base,
+      agents: new Map(
+        [...base.agents.values()].map((candidate) => [
+          candidate.id,
+          candidate.id === rook!.id
+            ? { ...candidate, currentCell: ember!.currentCell }
+            : candidate,
+        ]),
+      ),
+    };
+    expect(
+      getProposalTargetEligibility(
+        movedTogetherState,
+        ember!.id,
+        rook!.id,
+        0.1,
+        base,
+      ),
+    ).toEqual({ eligible: false, reason: 'out-of-range' });
+    expect(
+      applyDiplomacy(
+        movedTogetherState,
+        ember!.id,
+        { type: 'propose-alliance', recipientId: rook!.id },
+        1,
+        {
+          ...context,
+          communicationRangeKm: 0.1,
+          diplomacyRangeState: base,
+        },
+      ).result,
+    ).toMatchObject({ reason: 'recipient-out-of-range' });
+
+    const pendingProposal = {
+      id: allianceProposalIdSchema.parse(
+        'b2222222-2222-4222-8222-222222222222',
+      ),
+      proposerAgentId: ember!.id,
+      recipientAgentId: rook!.id,
+      proposerAllianceId: null,
+      recipientAllianceId: null,
+      originatingTurn: 1,
+      expirationTurn: 17,
+    };
+    const outgoingState = {
+      ...base,
+      pendingAllianceProposals: new Map([
+        [pendingProposal.id, pendingProposal],
+      ]),
+    };
+    const incomingState = {
+      ...base,
+      pendingAllianceProposals: new Map([
+        [
+          pendingProposal.id,
+          { ...pendingProposal, proposerAgentId: mingle!.id },
+        ],
+      ]),
+    };
+    for (const item of [
+      {
+        state: outgoingState,
+        proposerId: ember!.id,
+        recipientId: mingle!.id,
+        reason: 'outgoing-proposal-exists' as const,
+      },
+      {
+        state: incomingState,
+        proposerId: ember!.id,
+        recipientId: rook!.id,
+        reason: 'incoming-proposal-exists' as const,
+      },
+    ]) {
+      expect(
+        getProposalTargetEligibility(
+          item.state,
+          item.proposerId,
+          item.recipientId,
+          12,
+        ),
+      ).toEqual({ eligible: false, reason: item.reason });
+      expect(
+        applyDiplomacy(
+          item.state,
+          item.proposerId,
+          { type: 'propose-alliance', recipientId: item.recipientId },
+          2,
+          context,
+        ).result,
+      ).toMatchObject({
+        requested: true,
+        accepted: false,
+        reason: item.reason,
+      });
+    }
+  });
+
+  it('derives stable accessible colors when the display palette must be reused', () => {
+    const id = allianceIdSchema.parse('f6666666-6666-4666-8666-666666666666');
+    expect(deterministicAllianceColor(id)).toBe(deterministicAllianceColor(id));
+    expect(['#0072B2', '#D55E00', '#009E73', '#CC79A7']).toContain(
+      deterministicAllianceColor(id),
+    );
+  });
+
   it.each([
     { agentCount: 8, lifetime: 16 },
     { agentCount: 20, lifetime: 40 },
@@ -669,6 +865,57 @@ describe('formal alliances', () => {
       tickNumber: 3,
     });
     expect(expired.pendingAllianceProposals?.size).toBe(0);
+  });
+
+  it('recruits the final free agent into a 31-member alliance', () => {
+    const base = toWorldState(
+      createDevelopmentWorld({ generatedAt: context.now() }),
+    );
+    const template = [...base.agents.values()][0]!;
+    const agents = Array.from({ length: 32 }, (_, index) => ({
+      ...template,
+      id: agentIdSchema.parse(
+        `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      ),
+      name: `Agent ${index}`,
+    }));
+    const allianceId = allianceIdSchema.parse(
+      'a1111111-1111-4111-8111-111111111111',
+    );
+    const initial = {
+      ...base,
+      agents: new Map(agents.map((candidate) => [candidate.id, candidate])),
+      alliances: new Map([
+        [
+          allianceId,
+          {
+            id: allianceId,
+            color: '#0072B2' as const,
+            memberAgentIds: agents.slice(0, 31).map(({ id }) => id),
+          },
+        ],
+      ]),
+    };
+    const proposed = applyDiplomacy(
+      initial,
+      agents[0]!.id,
+      { type: 'propose-alliance', recipientId: agents[31]!.id },
+      1,
+      context,
+    );
+    const accepted = applyDiplomacy(
+      proposed.state,
+      agents[31]!.id,
+      {
+        type: 'accept-alliance',
+        proposalId: [...proposed.state.pendingAllianceProposals!.keys()][0]!,
+      },
+      2,
+      context,
+    );
+    expect(
+      [...accepted.state.alliances!.values()][0]!.memberAgentIds,
+    ).toHaveLength(32);
   });
 
   it('forms, colors, leaves, dissolves, and expires proposals deterministically', () => {
@@ -768,6 +1015,118 @@ describe('formal alliances', () => {
     expect(expired.events.at(-1)).toMatchObject({
       type: 'alliance-proposal-closed',
       reason: 'expired',
+    });
+  });
+
+  it('lets an unaffiliated proposer request entry from an allied recipient', () => {
+    const initial = toWorldState(
+      createDevelopmentWorld({ generatedAt: context.now() }),
+    );
+    const [ember, rook, mingle, morrow] = [...initial.agents.values()];
+    const invitation = applyDiplomacy(
+      initial,
+      ember!.id,
+      { type: 'propose-alliance', recipientId: rook!.id },
+      1,
+      context,
+    );
+    const invitationId = [
+      ...invitation.state.pendingAllianceProposals!.keys(),
+    ][0]!;
+    const formed = applyDiplomacy(
+      invitation.state,
+      rook!.id,
+      { type: 'accept-alliance', proposalId: invitationId },
+      2,
+      context,
+    );
+    const request = applyDiplomacy(
+      formed.state,
+      mingle!.id,
+      { type: 'propose-alliance', recipientId: rook!.id },
+      3,
+      {
+        ...context,
+        createProposalId: () => 'c3333333-3333-4333-8333-333333333333',
+      },
+    );
+    expect(
+      [...request.state.pendingAllianceProposals!.values()][0],
+    ).toMatchObject({
+      proposerAgentId: mingle!.id,
+      recipientAgentId: rook!.id,
+      proposerAllianceId: null,
+      recipientAllianceId: [...formed.state.alliances!.keys()][0],
+    });
+    const requestId = [...request.state.pendingAllianceProposals!.keys()][0]!;
+    const joined = applyDiplomacy(
+      request.state,
+      rook!.id,
+      { type: 'accept-alliance', proposalId: requestId },
+      4,
+      context,
+    );
+    expect([...joined.state.alliances!.values()][0]!.memberAgentIds).toEqual([
+      ember!.id,
+      rook!.id,
+      mingle!.id,
+    ]);
+    expect(joined.result).toMatchObject({
+      requested: true,
+      accepted: true,
+      events: [{ type: 'agent-joined-alliance', joinedAgentId: mingle!.id }],
+    });
+    const left = applyDiplomacy(
+      joined.state,
+      mingle!.id,
+      { type: 'leave-alliance' },
+      5,
+      context,
+    );
+    const switchedProposal = applyDiplomacy(
+      left.state,
+      mingle!.id,
+      { type: 'propose-alliance', recipientId: morrow!.id },
+      6,
+      {
+        ...context,
+        createProposalId: () => 'd4444444-4444-4444-8444-444444444444',
+      },
+    );
+    const switched = applyDiplomacy(
+      switchedProposal.state,
+      morrow!.id,
+      {
+        type: 'accept-alliance',
+        proposalId: [
+          ...switchedProposal.state.pendingAllianceProposals!.keys(),
+        ][0]!,
+      },
+      7,
+      {
+        ...context,
+        createAllianceId: () => 'e5555555-5555-4555-8555-555555555555',
+      },
+    );
+    expect(
+      [...switched.state.alliances!.values()].some(
+        ({ memberAgentIds }) =>
+          memberAgentIds.includes(mingle!.id) &&
+          memberAgentIds.includes(morrow!.id),
+      ),
+    ).toBe(true);
+    expect(
+      applyDiplomacy(
+        switched.state,
+        ember!.id,
+        { type: 'propose-alliance', recipientId: morrow!.id },
+        8,
+        context,
+      ).result,
+    ).toMatchObject({
+      requested: true,
+      accepted: false,
+      reason: 'recipient-allied',
     });
   });
 });

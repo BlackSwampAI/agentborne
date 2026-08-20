@@ -72,7 +72,6 @@ describe('scenario contracts', () => {
       maximumResolution: 11,
       maximumGeneratedCells: 5000,
       maximumRadius: 40,
-      maximumAllianceMembers: 8,
     });
   });
 
@@ -143,7 +142,7 @@ describe('scenario contracts', () => {
     ).toBe(false);
   });
 
-  it('keeps prompt attribution out of setup input and attributes applied scenarios to v4', () => {
+  it('keeps prompt attribution out of setup input and attributes applied scenarios to the current contract', () => {
     expect(
       worldSetupRequestSchema.safeParse({
         ...request,
