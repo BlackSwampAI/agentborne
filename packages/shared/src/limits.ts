@@ -11,6 +11,8 @@ export const WORLD_SCENARIO_LIMITS = {
   maximumNearbyAgentObservations: 8,
   minimumCommunicationRangeKm: 0.1,
   maximumCommunicationRangeKm: 100,
+  minimumTickIntervalMinutes: 1,
+  maximumTickIntervalMinutes: 60,
 } as const;
 
 export const WORLD_RADIUS_PRESETS = {

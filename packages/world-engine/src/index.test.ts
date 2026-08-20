@@ -9,6 +9,8 @@ import {
   createDevelopmentWorld,
   getCaptureEligibility,
   expireAllianceProposals,
+  seededTickIntervalMinutes,
+  seededTickOrder,
   toWorldState,
 } from '.';
 
@@ -35,6 +37,19 @@ const context = {
   createProposalId: () => 'b2222222-2222-4222-8222-222222222222',
   now: () => '2026-08-13T12:00:00.000Z',
 };
+
+describe('simultaneous tick determinism', () => {
+  it('reproduces a shuffled resolution order and inclusive virtual interval', () => {
+    const ids = [agentId, recipientId, thirdAgentId];
+    expect(seededTickOrder(ids, 'scenario-a', 7)).toEqual(
+      seededTickOrder(ids, 'scenario-a', 7),
+    );
+    const interval = seededTickIntervalMinutes('scenario-a', 7, 5, 10);
+    expect(interval).toBeGreaterThanOrEqual(5);
+    expect(interval).toBeLessThanOrEqual(10);
+    expect(interval).toBe(seededTickIntervalMinutes('scenario-a', 7, 5, 10));
+  });
+});
 
 function stateWithAgent() {
   const base = toWorldState(
@@ -589,7 +604,7 @@ describe('formal alliances', () => {
     { agentCount: 8, lifetime: 16 },
     { agentCount: 20, lifetime: 40 },
   ])(
-    'gives proposals a $lifetime-turn lifetime for an $agentCount-agent roster',
+    'preserves a $lifetime-turn legacy lifetime for an $agentCount-agent roster',
     ({ agentCount, lifetime }) => {
       const base = toWorldState(
         createDevelopmentWorld({ generatedAt: context.now() }),
@@ -618,11 +633,12 @@ describe('formal alliances', () => {
         ...proposed.state.pendingAllianceProposals!.values(),
       ][0]!;
 
-      expect(proposal.expirationTurn).toBe(1 + lifetime);
+      expect(proposal).toMatchObject({ expirationTurn: 1 + lifetime });
+      expect(proposal.originatingTick).toBeUndefined();
     },
   );
 
-  it('keeps a proposal open for two scheduled recipient opportunities', () => {
+  it('uses explicit two-tick expiry while retaining record ordinals', () => {
     const initial = toWorldState(
       createDevelopmentWorld({ generatedAt: context.now() }),
     );
@@ -632,26 +648,26 @@ describe('formal alliances', () => {
       proposer!.id,
       { type: 'propose-alliance', recipientId: recipient!.id },
       1,
-      context,
+      { ...context, tickNumber: 1 },
     );
+    expect(
+      [...proposed.state.pendingAllianceProposals!.values()][0],
+    ).toMatchObject({
+      originatingTurn: 1,
+      expirationTurn: 17,
+      originatingTick: 1,
+      expirationTick: 3,
+    });
 
-    const afterFirstOpportunity = expireAllianceProposals(
-      proposed.state,
-      2,
-      context,
-    );
-    const afterSecondOpportunity = expireAllianceProposals(
-      afterFirstOpportunity,
-      10,
-      context,
-    );
-    expect(afterSecondOpportunity.pendingAllianceProposals?.size).toBe(1);
-
-    const expired = expireAllianceProposals(
-      afterSecondOpportunity,
-      17,
-      context,
-    );
+    const afterFirstOpportunity = expireAllianceProposals(proposed.state, 2, {
+      ...context,
+      tickNumber: 2,
+    });
+    expect(afterFirstOpportunity.pendingAllianceProposals?.size).toBe(1);
+    const expired = expireAllianceProposals(afterFirstOpportunity, 17, {
+      ...context,
+      tickNumber: 3,
+    });
     expect(expired.pendingAllianceProposals?.size).toBe(0);
   });
 

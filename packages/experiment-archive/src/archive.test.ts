@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import type { AgentProvider, ProviderDecision } from '@hexzero/agent-runtime';
 import {
+  LEGACY_AGENT_DECISION_CONTRACT_VERSION,
   experimentExportDocumentSchema,
   type AgentObservation,
   type ExperimentExportDocument,
@@ -22,6 +23,7 @@ import {
   importExperimentExport,
   resolveArchivePath,
 } from './index.js';
+import { migrations } from './migrations.js';
 
 const EXPERIMENT_ID = '10000000-0000-4000-8000-000000000001';
 const NOW = '2026-08-20T12:00:00.000Z';
@@ -33,7 +35,7 @@ function nextUuid() {
   return () => `20000000-0000-4000-8000-${String(counter++).padStart(12, '0')}`;
 }
 
-async function currentExport(): Promise<ExperimentExportDocument> {
+async function currentExport(tick = false): Promise<ExperimentExportDocument> {
   let firstOtherAgent: string | undefined;
   const provider: AgentProvider = {
     mode: 'scripted-test',
@@ -93,8 +95,10 @@ async function currentExport(): Promise<ExperimentExportDocument> {
     modelConfiguration: snapshot.modelConfiguration,
     behaviorConfiguration: snapshot.behaviorConfiguration,
   });
-  for (let index = 0; index < 10; index += 1)
-    await simulation.executeNextTurn();
+  if (tick) await simulation.executeNextTick();
+  else
+    for (let index = 0; index < 10; index += 1)
+      await simulation.executeNextTurn();
   return simulation.generateExperimentExport({
     agents: { mode: 'all' },
     turns: { mode: 'entire-retained' },
@@ -111,6 +115,82 @@ function temporaryPath(name: string): string {
 }
 
 describe('experiment archive', () => {
+  it('migrates and queries schema-v10 tick attribution while accepting schema-v9', async () => {
+    const archive = new ArchiveDatabase({ path: ':memory:' });
+    const ticked = await currentExport(true);
+    const lostTick = structuredClone(ticked);
+    lostTick.turns[0]!.outcome = 'lost-tick';
+    lostTick.turns[0]!.failure = {
+      code: 'timeout',
+      message: 'deadline',
+      retryable: false,
+    };
+    lostTick.tickSummaries![0]!.lostTicks = 1;
+    lostTick.tickSummaries![0]!.deadlineMisses = 1;
+    importExperimentExport(archive, lostTick);
+    expect(
+      new ExperimentQueryService(archive).turns(EXPERIMENT_ID).rows[0],
+    ).toMatchObject({
+      tick: 1,
+      tickPosition: 1,
+      tickIntervalMinutes: ticked.tickSummaries?.[0]?.intervalMinutes,
+    });
+    expect(
+      new ExperimentQueryService(archive).summary(EXPERIMENT_ID),
+    ).toMatchObject({
+      turns: { failed: 0, lost: 1 },
+    });
+    const current = await currentExport();
+    const legacyDocuments = [
+      {
+        id: '2f5e8994-cf39-44e0-9424-b829eb246e55',
+        includeTopLevelVersion: true,
+      },
+      {
+        id: '3f5e8994-cf39-44e0-9424-b829eb246e55',
+        includeTopLevelVersion: false,
+      },
+    ].map(({ id, includeTopLevelVersion }) => {
+      const raw = structuredClone(current) as unknown as {
+        experiment: Record<string, unknown> & {
+          scenario?: Record<string, unknown>;
+        };
+      };
+      raw.experiment.id = id;
+      if (includeTopLevelVersion)
+        raw.experiment.decisionContractVersion =
+          LEGACY_AGENT_DECISION_CONTRACT_VERSION;
+      else delete raw.experiment.decisionContractVersion;
+      if (raw.experiment.scenario)
+        delete raw.experiment.scenario.decisionContractVersion;
+      return experimentExportDocumentSchema.parse(raw);
+    });
+    for (const legacy of legacyDocuments) {
+      expect(legacy.experiment).toMatchObject({
+        decisionContractVersion: LEGACY_AGENT_DECISION_CONTRACT_VERSION,
+        scenario: {
+          decisionContractVersion: LEGACY_AGENT_DECISION_CONTRACT_VERSION,
+        },
+      });
+      expect(() => importExperimentExport(archive, legacy)).not.toThrow();
+      const stored = archive.database
+        .prepare(
+          'SELECT decision_contract_version, scenario_json FROM experiments WHERE id = ?',
+        )
+        .get(legacy.experiment.id) as {
+        decision_contract_version: string;
+        scenario_json: string;
+      };
+      expect(stored.decision_contract_version).toBe(
+        LEGACY_AGENT_DECISION_CONTRACT_VERSION,
+      );
+      expect(JSON.parse(stored.scenario_json)).toMatchObject({
+        decisionContractVersion: LEGACY_AGENT_DECISION_CONTRACT_VERSION,
+      });
+    }
+    archive.close();
+  });
+
   it('resolves canonical and legacy archive locations without moving either database', () => {
     const root = temporaryPath('workspace');
     mkdirSync(join(root, '.agentborne'), { recursive: true });
@@ -181,7 +261,7 @@ describe('experiment archive', () => {
       first.database
         .prepare('SELECT COUNT(*) AS count FROM schema_migrations')
         .get(),
-    ).toEqual({ count: 1 });
+    ).toEqual({ count: migrations.length });
     expect(first.database.prepare('PRAGMA journal_mode').get()).toEqual({
       journal_mode: 'wal',
     });
@@ -194,7 +274,7 @@ describe('experiment archive', () => {
       reopened.database
         .prepare('SELECT COUNT(*) AS count FROM schema_migrations')
         .get(),
-    ).toEqual({ count: 1 });
+    ).toEqual({ count: migrations.length });
     reopened.close();
   });
 

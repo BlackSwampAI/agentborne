@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import {
-  AGENT_DECISION_CONTRACT_VERSION,
   experimentExportDocumentSchema,
   exportedCommunicationSchema,
   type ExperimentExportDocument,
@@ -185,7 +184,7 @@ export function importExperimentExport(
           json(document.experiment.modelConfiguration),
           json(document.experiment.behaviorConfiguration),
           scenario?.objectiveVersion ?? null,
-          AGENT_DECISION_CONTRACT_VERSION,
+          document.experiment.decisionContractVersion,
           `experiment-export-schema-v${document.schemaVersion}`,
           document.retention.limit,
           document.retention.totalCompletedTurns,
@@ -207,6 +206,11 @@ export function importExperimentExport(
       db.prepare(
         `
         UPDATE experiments SET
+          schema_version = MAX(schema_version, ?),
+          observation_contract_version = CASE
+            WHEN schema_version < ? THEN ?
+            ELSE observation_contract_version
+          END,
           scenario_json = COALESCE(scenario_json, ?),
           model_configuration_json = COALESCE(model_configuration_json, ?),
           behavior_configuration_json = COALESCE(behavior_configuration_json, ?),
@@ -223,6 +227,9 @@ export function importExperimentExport(
         WHERE id = ?
       `,
       ).run(
+        document.schemaVersion,
+        document.schemaVersion,
+        `experiment-export-schema-v${document.schemaVersion}`,
         json(scenario),
         json(document.experiment.modelConfiguration),
         json(document.experiment.behaviorConfiguration),
@@ -401,7 +408,8 @@ function importTurns(
   const movement = movementAttribution(document);
   const turnStatement = archive.database.prepare(`
     INSERT OR IGNORE INTO turns(
-      id, experiment_id, turn_number, agent_id, started_at, completed_at,
+      id, experiment_id, turn_number, tick_number, tick_position,
+      virtual_time, tick_interval_minutes, agent_id, started_at, completed_at,
       outcome, action, action_accepted, action_reason, summary,
       world_action_summary, communication_summary, diplomacy_summary,
       position_before, position_after, move_direction,
@@ -411,7 +419,7 @@ function importTurns(
       cache_write_tokens, cost_credits, observation_size_bytes,
       observation_json, world_action_json, world_action_result_json,
       communication_result_json, diplomacy_result_json, failure_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const attemptStatement = archive.database.prepare(`
     INSERT OR IGNORE INTO model_attempts(
@@ -446,6 +454,10 @@ function importTurns(
         turnId,
         document.experiment.id,
         turn.turnNumber,
+        turn.tickNumber ?? null,
+        turn.tickPosition ?? null,
+        turn.virtualTime ?? null,
+        turn.tickIntervalMinutes ?? null,
         turn.agentId,
         turn.startedAt,
         turn.completedAt,

@@ -73,6 +73,18 @@ Eleventh focused slice: redesign World Lab as a persistent long-running experime
 
 Twelfth focused slice: add scenario-owned physical communication range, private alliance communications, bounded nearby awareness, deterministic legal-move ordering variety, neutral unaffiliated presentation, and operator-only private-communication observability without adding world actions or player mechanics.
 
+## Pre-PR 5 — Simultaneous tick experiment foundation
+
+Replace sequential agent turns with operator-driven simultaneous ticks. Every
+active agent observes one frozen pre-tick snapshot, provider jobs dispatch
+concurrently under a shared deadline, and the engine resolves a seeded order in
+world-action, communication, and diplomacy phases before one proposal-expiry
+pass. A deterministic virtual clock advances 5–10 configurable minutes per
+committed tick. Individual provider failures become final attributed lost ticks;
+cancellation commits nothing. Schema-v10 exports and the local archive retain
+explicit tick attribution and complete tick groups. Background scheduling,
+restart persistence, simulated players, threats, and Player Mode remain deferred.
+
 ## PR 5 — Goals and memory
 
 Pre-PR-5 observability slice: add a local append-only SQLite experiment archive, transactional schema-v9 export import, bounded human/Codex queries, normalized comparisons, and FTS-searchable curated notes. The in-memory engine remains authoritative. Crash recovery, restartable simulation state, MCP, embeddings, vector search, and a database browser remain deferred.

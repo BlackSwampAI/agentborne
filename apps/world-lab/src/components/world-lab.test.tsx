@@ -10,6 +10,7 @@ import userEvent from '@testing-library/user-event';
 import { gridDisk } from 'h3-js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  AGENT_DECISION_CONTRACT_VERSION,
   experimentExportDocumentSchema,
   assignBehavior,
   modelCatalogResponseSchema,
@@ -765,6 +766,67 @@ function jsonResponse(value: unknown) {
   return Promise.resolve(new Response(JSON.stringify(value), { status: 200 }));
 }
 
+function completeTickResponse(
+  source: SimulationSnapshot,
+  tickNumber = Math.max(1, source.tickNumber || 1),
+) {
+  const template = source.turns.at(-1) ?? afterInfection().turns[0]!;
+  const virtualTime = '2026-08-13T12:05:00.000Z';
+  const records = source.world.agents.map((agent, index) =>
+    agentTurnRecordSchema.parse({
+      ...template,
+      turnNumber: (tickNumber - 1) * source.world.agents.length + index + 1,
+      tickNumber,
+      tickPosition: index + 1,
+      virtualTime,
+      tickIntervalMinutes: 5,
+      agentId: agent.id,
+      observation: {
+        ...template.observation,
+        agentId: agent.id,
+        agentName: agent.name,
+      },
+      ...(index === 0
+        ? {}
+        : {
+            outcome: 'accepted',
+            worldAction: { type: 'wait' },
+            communication: undefined,
+            diplomacy: undefined,
+            summary: 'Waited for the next tick.',
+            worldActionResult: {
+              accepted: true,
+              event: {
+                id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+                agentId: agent.id,
+                occurredAt: virtualTime,
+                type: 'agent-waited',
+              },
+            },
+            communicationResult: { requested: false },
+            diplomacyResult: { requested: false },
+          }),
+    }),
+  );
+  const snapshot = simulationSnapshotSchema.parse({
+    ...source,
+    tickNumber,
+    turnNumber: records.at(-1)!.turnNumber,
+    virtualTime,
+    lastTickIntervalMinutes: 5,
+    resolutionOrder: records.map(({ agentId }) => agentId),
+    turns: records,
+    experiment: {
+      ...source.experiment,
+      totalCompletedTurns: records.length,
+      retainedTurns: records.length,
+      firstRetainedTurn: 1,
+      lastRetainedTurn: records.length,
+    },
+  });
+  return { snapshot, tickNumber, records };
+}
+
 const compatibleCatalog = modelCatalogResponseSchema.parse({
   models: [
     {
@@ -957,15 +1019,11 @@ async function openAgentsWorkspace(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('WorldLab', () => {
-  it('migrates valid legacy browser preferences once and rejects malformed legacy data', async () => {
+  it('migrates supported legacy browser preferences and rejects retired targets', async () => {
     window.localStorage.setItem('agentborne.world-lab.follow-turn', 'false');
     window.localStorage.setItem(
       'agentborne.world-lab.activity-dock',
       'collapsed',
-    );
-    window.localStorage.setItem(
-      'agentborne.world-lab.unattended-recovery',
-      JSON.stringify({ enabled: true, retryLimit: 3 }),
     );
     window.sessionStorage.setItem('agentborne.world-lab.run-target', '500');
     const first = render(<WorldLab />);
@@ -978,11 +1036,8 @@ describe('WorldLab', () => {
         window.localStorage.getItem('hexzero.world-lab.activity-dock'),
       ).toBe('collapsed');
       expect(
-        window.localStorage.getItem('hexzero.world-lab.unattended-recovery'),
-      ).toBe(JSON.stringify({ enabled: true, retryLimit: 3 }));
-      expect(
         window.sessionStorage.getItem('hexzero.world-lab.run-target'),
-      ).toBe('500');
+      ).toBe('25');
     });
     first.unmount();
 
@@ -993,21 +1048,12 @@ describe('WorldLab', () => {
       'false',
     );
 
-    window.localStorage.removeItem('hexzero.world-lab.unattended-recovery');
-    window.localStorage.setItem(
-      'agentborne.world-lab.unattended-recovery',
-      '{"enabled":"yes","retryLimit":99}',
-    );
     second.unmount();
     render(<WorldLab />);
     await screen.findByRole('button', { name: 'Start' });
-    expect(
-      window.localStorage.getItem('hexzero.world-lab.unattended-recovery'),
-    ).not.toBe('{"enabled":"yes","retryLimit":99}');
   });
 
   it('renders all controls, status, H3 readiness, and eight visible markers', async () => {
-    const user = userEvent.setup();
     render(<WorldLab />);
     expect(
       await screen.findByText(
@@ -1025,7 +1071,7 @@ describe('WorldLab', () => {
       screen.getByRole('heading', { name: 'World Lab' }),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Single turn' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Single tick' })).toBeEnabled();
     fireEvent.click(screen.getByLabelText('More World Lab actions'));
     expect(screen.getByRole('button', { name: 'Reset world' })).toBeEnabled();
     expect(
@@ -1042,14 +1088,14 @@ describe('WorldLab', () => {
     ).not.toBeInTheDocument();
     expect(
       screen
-        .getAllByRole('option', { name: /^(25|50|100|200|500|1000)$/ })
+        .getAllByRole('option', { name: /^(5|10|25|50|100)$/ })
         .map((option) => Number((option as HTMLOptionElement).value)),
-    ).toEqual([25, 50, 100, 200, 500, 1000]);
+    ).toEqual([5, 10, 25, 50, 100]);
     expect(
-      screen.getByLabelText('Experiment details. Turn 0, paused'),
+      screen.getByLabelText('Experiment details. Tick 0, paused'),
     ).toBeInTheDocument();
     expect(
-      screen.getByLabelText('Experiment details. Turn 0, paused'),
+      screen.getByLabelText('Experiment details. Tick 0, paused'),
     ).toHaveTextContent('0.0 credits');
     expect(
       await screen.findAllByRole('button', { name: /Select agent/ }),
@@ -1080,6 +1126,12 @@ describe('WorldLab', () => {
     expect(
       screen.getByRole('dialog', { name: 'World Setup' }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText('Minimum virtual minutes per tick'),
+    ).toHaveValue(5);
+    expect(
+      screen.getByLabelText('Maximum virtual minutes per tick'),
+    ).toHaveValue(10);
     expect(overflowTrigger.closest('details')).not.toHaveAttribute('open');
   });
 
@@ -1114,29 +1166,21 @@ describe('WorldLab', () => {
     expect(screen.getByLabelText('Patient Zero')).toHaveValue(patientZero.id);
   });
 
-  it('exposes opt-in bounded unattended recovery with provider-cost guidance', async () => {
+  it('removes sequential recovery controls and explains per-tick provider cost', async () => {
     const user = userEvent.setup();
     render(<WorldLab />);
     await screen.findByRole('button', { name: 'Start' });
     await user.click(screen.getByLabelText('More World Lab actions'));
-    const toggle = screen.getByRole('checkbox', {
-      name: 'Enable for continuous playback',
-    });
-    expect(toggle).not.toBeChecked();
-    expect(screen.getByLabelText('Unattended retry limit')).toHaveValue('2');
+    expect(screen.queryByText('Unattended recovery')).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Each retry may incur provider cost/),
-    ).toBeInTheDocument();
+      screen.queryByRole('button', { name: 'Retry' }),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByText(/World Lab tab must remain open/),
+      screen.queryByRole('button', { name: 'Skip turn' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Each tick requests every active agent/),
     ).toBeInTheDocument();
-    await user.click(toggle);
-    await user.selectOptions(
-      screen.getByLabelText('Unattended retry limit'),
-      '3',
-    );
-    expect(toggle).toBeChecked();
-    expect(screen.getByLabelText('Unattended retry limit')).toHaveValue('3');
   });
 
   it.each([
@@ -1273,20 +1317,9 @@ describe('WorldLab', () => {
     );
   });
 
-  it('runs exactly 194 additional turns from turn 6 and never schedules turn 201', async () => {
+  it('runs exactly 19 additional ticks from tick 6 and never schedules tick 26', async () => {
     vi.useFakeTimers();
-    const turnTemplate = afterInfection().turns[0]!;
-    const at6 = simulationSnapshotSchema.parse({
-      ...initial,
-      turnNumber: 6,
-      nextAgentId: world.agents[6]!.id,
-      experiment: {
-        ...initial.experiment,
-        totalCompletedTurns: 6,
-        droppedRecords: 6,
-        complete: false,
-      },
-    });
+    const at6 = completeTickResponse(initial, 6).snapshot;
     let turnRequests = 0;
     vi.stubGlobal(
       'fetch',
@@ -1297,24 +1330,9 @@ describe('WorldLab', () => {
         }
         const turnNumber = 6 + turnRequests;
         turnRequests += 1;
-        if (turnNumber > 200)
-          return Promise.reject(new Error('turn 201 must not be requested'));
-        const turn = { ...turnTemplate, turnNumber };
-        const next = simulationSnapshotSchema.parse({
-          ...at6,
-          turnNumber,
-          nextAgentId: world.agents[turnNumber % world.agents.length]!.id,
-          turns: [turn],
-          experiment: {
-            ...at6.experiment,
-            totalCompletedTurns: turnNumber,
-            retainedTurns: 1,
-            firstRetainedTurn: turnNumber,
-            lastRetainedTurn: turnNumber,
-            droppedRecords: turnNumber - 1,
-          },
-        });
-        return jsonResponse({ snapshot: next, turn });
+        if (turnNumber > 25)
+          return Promise.reject(new Error('tick 26 must not be requested'));
+        return jsonResponse(completeTickResponse(at6, turnNumber));
       }),
     );
 
@@ -1324,48 +1342,53 @@ describe('WorldLab', () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(screen.getByText('Turn 6')).toBeInTheDocument();
+      expect(screen.getByText('Tick 6')).toBeInTheDocument();
 
       await act(async () => {
-        screen.getByRole('button', { name: 'Run to 200' }).click();
+        screen.getByRole('button', { name: 'Run to tick 25' }).click();
       });
-      for (let expectedTurn = 7; expectedTurn <= 200; expectedTurn += 1) {
+      for (let expectedTurn = 7; expectedTurn <= 25; expectedTurn += 1) {
         await act(async () => {
           await vi.advanceTimersByTimeAsync(1_000);
         });
       }
 
-      expect(screen.getByText('Turn 200')).toBeInTheDocument();
+      expect(screen.getByText('Tick 25')).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
-      expect(turnRequests - 1).toBe(194);
-      expect(fetch).toHaveBeenCalledTimes(195);
+      expect(turnRequests - 1).toBe(19);
+      expect(fetch).toHaveBeenCalledTimes(20);
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10_000);
       });
-      expect(turnRequests - 1).toBe(194);
-      expect(fetch).toHaveBeenCalledTimes(195);
+      expect(turnRequests - 1).toBe(19);
+      expect(fetch).toHaveBeenCalledTimes(20);
     } finally {
       vi.useRealTimers();
     }
   }, 15_000);
 
   it('keeps run targets absolute and makes current or past targets unavailable', async () => {
+    window.sessionStorage.setItem('hexzero.world-lab.run-target', '25');
     const at50 = simulationSnapshotSchema.parse({
       ...initial,
-      turnNumber: 50,
-      experiment: { ...initial.experiment, totalCompletedTurns: 50 },
+      turnNumber: 400,
+      tickNumber: 50,
+      virtualTime: '2026-08-13T16:10:00.000Z',
+      lastTickIntervalMinutes: 5,
+      resolutionOrder: initial.world.agents.map(({ id }) => id),
+      experiment: { ...initial.experiment, totalCompletedTurns: 400 },
     });
     vi.stubGlobal(
       'fetch',
       vi.fn(() => jsonResponse(at50)),
     );
     render(<WorldLab />);
-    const selector = await screen.findByLabelText('Run target');
+    const selector = await screen.findByLabelText('Tick target');
     expect(screen.getByRole('option', { name: '25' })).toBeDisabled();
     expect(screen.getByRole('option', { name: '50' })).toBeDisabled();
     expect(screen.getByRole('option', { name: '100' })).toBeEnabled();
-    expect(selector).toHaveValue('200');
+    expect(selector).toHaveValue('100');
   });
 
   it('derives allied marker and existing-territory colors while retaining individual ownership labels', async () => {
@@ -1542,11 +1565,8 @@ describe('WorldLab', () => {
     ).toBeInTheDocument();
   });
 
-  it('defaults Follow turn on and selects the scheduled agent with a textual indicator', async () => {
-    const scheduled = simulationSnapshotSchema.parse({
-      ...initial,
-      nextAgentId: world.agents[2]!.id,
-    });
+  it('defaults Follow latest on and selects the latest resolved record', async () => {
+    const scheduled = afterInfection();
     vi.stubGlobal(
       'fetch',
       vi.fn(() => jsonResponse(scheduled)),
@@ -1554,18 +1574,18 @@ describe('WorldLab', () => {
     render(<WorldLab />);
     const roster = await screen.findByLabelText('Agent roster');
     expect(
-      within(roster).getByRole('checkbox', { name: 'Follow turn' }),
+      within(roster).getByRole('checkbox', { name: 'Follow latest' }),
     ).toBeChecked();
-    expect(within(roster).getByText('Next')).toBeInTheDocument();
+    expect(within(roster).getByText('Latest')).toBeInTheDocument();
     expect(
-      screen.getByRole('heading', { name: new RegExp(world.agents[2]!.name) }),
+      screen.getByRole('heading', { name: new RegExp(world.agents[0]!.name) }),
     ).toBeInTheDocument();
   });
 
-  it('follows an active agent and immediately returns to the scheduled agent when re-enabled', async () => {
+  it('returns to the latest resolved agent when following is re-enabled', async () => {
     const active = simulationSnapshotSchema.parse({
       ...initial,
-      activeAgentId: world.agents[3]!.id,
+      turns: [{ ...afterInfection().turns[0]!, agentId: world.agents[3]!.id }],
     });
     vi.stubGlobal(
       'fetch',
@@ -1574,7 +1594,7 @@ describe('WorldLab', () => {
     const user = userEvent.setup();
     render(<WorldLab />);
     const roster = await screen.findByLabelText('Agent roster');
-    expect(within(roster).getByText('Acting')).toBeInTheDocument();
+    expect(within(roster).getByText('Latest')).toBeInTheDocument();
     expect(
       screen.getByRole('heading', { name: new RegExp(world.agents[3]!.name) }),
     ).toBeInTheDocument();
@@ -1584,14 +1604,14 @@ describe('WorldLab', () => {
       }),
     );
     expect(
-      within(roster).getByRole('checkbox', { name: 'Follow turn' }),
+      within(roster).getByRole('checkbox', { name: 'Follow latest' }),
     ).not.toBeChecked();
     expect(
       screen.getByRole('heading', { name: new RegExp(world.agents[1]!.name) }),
     ).toBeInTheDocument();
-    expect(within(roster).getByText('Acting')).toBeInTheDocument();
+    expect(within(roster).getByText('Latest')).toBeInTheDocument();
     await user.click(
-      within(roster).getByRole('checkbox', { name: 'Follow turn' }),
+      within(roster).getByRole('checkbox', { name: 'Follow latest' }),
     );
     expect(
       screen.getByRole('heading', { name: new RegExp(world.agents[3]!.name) }),
@@ -1608,7 +1628,7 @@ describe('WorldLab', () => {
     row.focus();
     await user.keyboard('{Enter}');
     expect(
-      within(roster).getByRole('checkbox', { name: 'Follow turn' }),
+      within(roster).getByRole('checkbox', { name: 'Follow latest' }),
     ).not.toBeChecked();
     expect(window.localStorage.getItem('hexzero.world-lab.follow-turn')).toBe(
       'false',
@@ -1617,7 +1637,7 @@ describe('WorldLab', () => {
     await user.click(screen.getByRole('button', { name: 'Export' }));
     expect(
       screen.getByRole('dialog', { name: 'Experiment export' }),
-    ).not.toHaveTextContent('Follow turn');
+    ).not.toHaveTextContent('Follow latest');
   });
 
   it.each([
@@ -1630,7 +1650,7 @@ describe('WorldLab', () => {
     ['lost-response reconciliation', 'paused', null, 6],
     ['request in progress', 'running', 7, 0],
   ] as const)(
-    'selects the authoritative active/next agent after %s',
+    'selects the latest resolved agent after %s',
     async (_label, status, activeIndex, nextIndex) => {
       const current = simulationSnapshotSchema.parse({
         ...initial,
@@ -1638,20 +1658,24 @@ describe('WorldLab', () => {
         activeAgentId:
           activeIndex === null ? null : world.agents[activeIndex]!.id,
         nextAgentId: world.agents[nextIndex]!.id,
+        turns: [
+          {
+            ...afterInfection().turns[0]!,
+            agentId: world.agents[nextIndex]!.id,
+          },
+        ],
       });
       vi.stubGlobal(
         'fetch',
         vi.fn(() => jsonResponse(current)),
       );
       render(<WorldLab />);
-      const expected = world.agents[activeIndex ?? nextIndex]!;
+      const expected = world.agents[nextIndex]!;
       expect(
         await screen.findByRole('heading', { name: new RegExp(expected.name) }),
       ).toBeInTheDocument();
       expect(
-        within(screen.getByLabelText('Agent roster')).getByText(
-          activeIndex === null ? 'Next' : 'Acting',
-        ),
+        within(screen.getByLabelText('Agent roster')).getByText('Latest'),
       ).toBeInTheDocument();
     },
   );
@@ -1664,7 +1688,7 @@ describe('WorldLab', () => {
         .fn()
         .mockImplementationOnce(() => jsonResponse(initial))
         .mockImplementationOnce(() =>
-          jsonResponse({ snapshot: changed, turn: changed.turns[0] }),
+          jsonResponse(completeTickResponse(changed)),
         ),
     );
     const user = userEvent.setup();
@@ -1673,7 +1697,7 @@ describe('WorldLab', () => {
       await screen.findByRole('button', { name: 'Select agent Ember' }),
     );
     await user.click(
-      await screen.findByRole('button', { name: 'Single turn' }),
+      await screen.findByRole('button', { name: 'Single tick' }),
     );
     await user.click(screen.getByRole('tab', { name: 'Event log' }));
     expect(
@@ -1811,7 +1835,7 @@ describe('WorldLab', () => {
         .fn()
         .mockImplementationOnce(() => jsonResponse(initial))
         .mockImplementationOnce(() =>
-          jsonResponse({ snapshot: changed, turn: changed.turns[0] }),
+          jsonResponse(completeTickResponse(changed)),
         ),
     );
     const user = userEvent.setup();
@@ -1820,7 +1844,7 @@ describe('WorldLab', () => {
       await screen.findByRole('button', { name: 'Select agent Ember' }),
     );
     await user.click(
-      await screen.findByRole('button', { name: 'Single turn' }),
+      await screen.findByRole('button', { name: 'Single tick' }),
     );
     await user.click(screen.getByRole('tab', { name: 'Event log' }));
     expect(
@@ -1989,7 +2013,7 @@ describe('WorldLab', () => {
         screen.getByText('Development world loaded with 8 agents.'),
       ).toBeInTheDocument(),
     );
-    expect(screen.getByText('Turn 0')).toBeInTheDocument();
+    expect(screen.getByText('Tick 0')).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByTestId('world-map')).toHaveAttribute(
         'data-rendered-infected-cell-count',
@@ -2039,7 +2063,7 @@ describe('WorldLab', () => {
       await screen.findByText(/Model calls unavailable/),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Single turn' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Single tick' })).toBeDisabled();
   });
 
   it('reserves a compact cancel slot when no request is active', async () => {
@@ -2200,7 +2224,7 @@ describe('WorldLab', () => {
           return jsonResponse({
             verification: {
               modelId: 'example/alpha',
-              contractVersion: 'text-flat-json-v3',
+              contractVersion: AGENT_DECISION_CONTRACT_VERSION,
               status: probeCalls === 1 ? 'failed' : 'verified',
               testedAt: '2026-08-15T12:00:00.000Z',
               ...(probeCalls === 1
@@ -2240,7 +2264,7 @@ describe('WorldLab', () => {
       await screen.findByText('Runtime verified: yes'),
     ).toBeInTheDocument();
     expect(screen.getByText(/may incur a small charge/)).toBeInTheDocument();
-    expect(screen.getByText('Turn 0')).toBeInTheDocument();
+    expect(screen.getByText('Tick 0')).toBeInTheDocument();
     expect(probeProfiles).toEqual(['provider-default', 'provider-default']);
   });
 
@@ -2279,87 +2303,48 @@ describe('WorldLab', () => {
     expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
   });
 
-  it('stops playback after provider failure and unlocks model selection', async () => {
-    vi.useFakeTimers();
-    try {
-      const current = openRouterSnapshot('example/alpha');
-      const template = afterInfection().turns[0]!;
-      const failure = {
-        code: 'timeout' as const,
-        message: 'The model request timed out.',
-        retryable: true,
-        model: 'example/alpha',
-      };
-      const failedTurn = agentTurnRecordSchema.parse({
-        turnNumber: 1,
-        agentId: template.agentId,
-        startedAt: template.startedAt,
-        completedAt: template.completedAt,
-        observation: template.observation,
-        allianceEvents: [],
-        outcome: 'provider-error',
-        failure,
-      });
-      const failed = simulationSnapshotSchema.parse({
-        ...current,
-        status: 'provider-error',
-        pendingFailedTurn: {
-          turnNumber: 1,
-          agentId: failedTurn.agentId,
-          failure,
-          attempts: [
-            {
-              attemptNumber: 1,
-              kind: 'initial',
-              startedAt: failedTurn.startedAt,
-              completedAt: failedTurn.completedAt,
-              modelId: 'example/alpha',
-              reasoningProfile: 'provider-default',
-              failure,
-            },
-          ],
-        },
-      });
-      let turnRequests = 0;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: RequestInfo | URL) => {
-          const url = String(input);
-          if (url.endsWith('/models')) return jsonResponse(compatibleCatalog);
-          if (url.includes('/turn?mutationId=')) {
-            turnRequests += 1;
-            return jsonResponse({ snapshot: failed, turn: failedTurn });
-          }
-          return jsonResponse(current);
-        }),
-      );
-      render(<WorldLab />);
-      await act(async () => {
-        await Promise.resolve();
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      fireEvent.click(screen.getByRole('button', { name: 'Start' }));
-      await act(async () => void (await vi.advanceTimersByTimeAsync(1_000)));
-      expect(screen.getByText(/Turn stopped/)).toHaveTextContent(
-        'example/alpha',
-      );
-      expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
-      expect(screen.getByRole('button', { name: 'Skip turn' })).toBeEnabled();
-      expect(
-        document.querySelector('.cancel-request-slot button'),
-      ).toBeDisabled();
-      fireEvent.click(screen.getByRole('button', { name: 'Agents' }));
-      fireEvent.click(screen.getByText('Model: Alpha'));
-      expect(screen.getByLabelText('Global model')).toBeEnabled();
-      await act(async () => void (await vi.advanceTimersByTimeAsync(10_000)));
-      expect(turnRequests).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
+  it('renders a final lost tick without sequential recovery controls', async () => {
+    const current = openRouterSnapshot('example/alpha');
+    const completed = completeTickResponse(current);
+    const failure = {
+      code: 'timeout' as const,
+      message: 'The shared tick deadline elapsed.',
+      retryable: false,
+      model: 'example/alpha',
+    };
+    const lost = agentTurnRecordSchema.parse({
+      ...completed.records[0],
+      outcome: 'lost-tick',
+      failure,
+      provider: undefined,
+    });
+    const records = [lost, ...completed.records.slice(1)];
+    const snapshot = simulationSnapshotSchema.parse({
+      ...completed.snapshot,
+      turns: records,
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) =>
+        String(input).includes('/tick?mutationId=')
+          ? jsonResponse({ snapshot, tickNumber: 1, records })
+          : jsonResponse(current),
+      ),
+    );
+    render(<WorldLab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Single tick' }));
+    expect(
+      await screen.findByText(/1 agent lost this tick/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Retry' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Skip turn' }),
+    ).not.toBeInTheDocument();
   });
 
-  it('reconciles a lost turn response from the authoritative snapshot without resubmitting', async () => {
+  it('reconciles a lost tick response from the authoritative snapshot without resubmitting', async () => {
     const initial = simulationSnapshotSchema.parse({
       ...afterInfection(),
       turnNumber: 0,
@@ -2372,7 +2357,7 @@ describe('WorldLab', () => {
         lastRetainedTurn: undefined,
       },
     });
-    const completed = afterInfection();
+    const completed = completeTickResponse(initial).snapshot;
     let turnRequests = 0;
     let snapshotRequests = 0;
     vi.stubGlobal(
@@ -2380,7 +2365,7 @@ describe('WorldLab', () => {
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith('/models')) return jsonResponse(compatibleCatalog);
-        if (url.includes('/turn?mutationId=')) {
+        if (url.includes('/tick?mutationId=')) {
           turnRequests += 1;
           return Promise.reject(new TypeError('ECONNRESET'));
         }
@@ -2389,12 +2374,48 @@ describe('WorldLab', () => {
       }),
     );
     render(<WorldLab />);
-    await screen.findByText('Turn 0');
-    fireEvent.click(screen.getByRole('button', { name: 'Single turn' }));
-    await screen.findByText('Turn 1');
+    await screen.findByText('Tick 0');
+    fireEvent.click(screen.getByRole('button', { name: 'Single tick' }));
+    await screen.findByText('Tick 1');
     expect(turnRequests).toBe(1);
-    expect(screen.getByRole('button', { name: 'Single turn' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Single tick' })).toBeEnabled();
     expect(screen.queryByText('Reconciling request…')).not.toBeInTheDocument();
+  });
+
+  it('polls and disables conflicting controls for an externally active tick with no active agent', async () => {
+    vi.useFakeTimers();
+    const active = simulationSnapshotSchema.parse({
+      ...initial,
+      status: 'waiting-for-model',
+      activeAgentId: null,
+    });
+    const completed = completeTickResponse(initial).snapshot;
+    let requests = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(requests++ === 0 ? active : completed)),
+    );
+    render(<WorldLab />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByLabelText('Experiment details. Tick 0, waiting for model'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Single tick' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Run to tick 25' }),
+    ).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    fireEvent.click(screen.getByLabelText('More World Lab actions'));
+    expect(screen.getByRole('button', { name: 'World setup' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reset world' })).toBeDisabled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(screen.getByText('Tick 1')).toBeInTheDocument();
+    vi.useRealTimers();
   });
 
   it('collapses and expands the bounded activity dock', async () => {
@@ -2439,7 +2460,7 @@ describe('WorldLab', () => {
         .mockImplementationOnce(() => jsonResponse(first))
         .mockImplementationOnce(() => {
           scrollHeight = 1_100;
-          return jsonResponse({ snapshot: next, turn: next.turns[0] });
+          return jsonResponse(completeTickResponse(next));
         }),
     );
     const user = userEvent.setup();
@@ -2453,7 +2474,7 @@ describe('WorldLab', () => {
     });
     fireEvent.scroll(feed);
     await act(async () => undefined);
-    await user.click(screen.getByRole('button', { name: 'Single turn' }));
+    await user.click(screen.getByRole('button', { name: 'Single tick' }));
     const jump = await screen.findByRole('button', {
       name: '1 new message · Return to latest',
     });
@@ -2628,15 +2649,13 @@ describe('WorldLab', () => {
       await screen.findByRole('button', { name: 'Reset world' }),
     );
     expect(await screen.findByText('Persistent lab edit.')).toBeInTheDocument();
-    expect(screen.getByText('Turn 0')).toBeInTheDocument();
+    expect(screen.getByText('Tick 0')).toBeInTheDocument();
   });
 
   it('confirms restoring defaults and preserves current world progress', async () => {
-    const progressed = withPersonality(
-      afterInfection(),
-      world.agents[0]!.id,
-      'Temporary edit.',
-    );
+    const progressed = completeTickResponse(
+      withPersonality(afterInfection(), world.agents[0]!.id, 'Temporary edit.'),
+    ).snapshot;
     const restored = simulationSnapshotSchema.parse({
       ...progressed,
       world: {
@@ -2676,7 +2695,7 @@ describe('WorldLab', () => {
         name: 'Active personality configuration',
       }),
     ).toHaveTextContent(world.agents[0]!.personality);
-    expect(screen.getByText('Turn 1')).toBeInTheDocument();
+    expect(screen.getByText('Tick 1')).toBeInTheDocument();
     expect(screen.getByTestId('infected-count')).toHaveTextContent(
       '1 rendered infected',
     );
@@ -2684,11 +2703,13 @@ describe('WorldLab', () => {
   });
 
   it('distinguishes an active edit from the immutable latest observation', async () => {
-    const changed = withPersonality(
-      afterInfection(),
-      world.agents[0]!.id,
-      'New active personality.',
-    );
+    const changed = completeTickResponse(
+      withPersonality(
+        afterInfection(),
+        world.agents[0]!.id,
+        'New active personality.',
+      ),
+    ).snapshot;
     vi.stubGlobal(
       'fetch',
       vi.fn(() => jsonResponse(changed)),
@@ -2705,7 +2726,7 @@ describe('WorldLab', () => {
       screen.getByText(world.agents[0]!.personality, { exact: true }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Immutable input supplied for turn 1/),
+      screen.getByText(/Immutable input supplied for tick 1 record 1/),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -2840,6 +2861,7 @@ describe('WorldLab', () => {
     expect(screen.getByLabelText('JSON serialization')).toHaveValue('compact');
     expect(screen.getByLabelText('Communication channel')).toHaveValue('all');
     expect(screen.getByLabelText('Communication result')).toHaveValue('all');
+    expect(screen.getByRole('checkbox', { name: 'lost tick' })).toBeChecked();
     await user.selectOptions(
       screen.getByLabelText('Communication channel'),
       'direct',
@@ -2888,6 +2910,7 @@ describe('WorldLab', () => {
     await user.click(screen.getByRole('checkbox', { name: 'accepted' }));
     await user.click(screen.getByRole('checkbox', { name: 'rejected' }));
     await user.click(screen.getByRole('checkbox', { name: 'provider error' }));
+    await user.click(screen.getByRole('checkbox', { name: 'lost tick' }));
     await user.click(
       screen.getByRole('checkbox', { name: 'operator skipped' }),
     );
@@ -2983,7 +3006,7 @@ describe('WorldLab', () => {
       await screen.findByText(/Development world fully infected/),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Single turn' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Single tick' })).toBeEnabled();
     fireEvent.click(screen.getByLabelText('More World Lab actions'));
     expect(screen.getByRole('button', { name: 'Reset world' })).toBeEnabled();
   });

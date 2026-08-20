@@ -6,7 +6,10 @@ Scenarios may optionally designate one experimental Patient Zero coordinator.
 The role receives bounded global strategic information and can send private
 advisory directives, but remains subject to the same movement and world-action
 rules as every other agent. The universal flat provider contract is
-`text-flat-json-v3`; the objective remains `durable-influence-v2`.
+`text-flat-json-v4`; the objective remains `durable-influence-v2`. For every
+agent, including Patient Zero, no message is the normal choice unless a message
+adds new decision-relevant value; routine action narration and filler are
+explicitly discouraged.
 
 ## Workspace
 
@@ -37,9 +40,27 @@ experiment archive path.
 
 Open the World Lab at <http://localhost:3000>. The Game API binds to <http://127.0.0.1:8787>; Next.js narrowly proxies `/api/game/*` to it. `OPENROUTER_API_KEY` is the only required OpenRouter environment value. Select a compatible global model in World Lab, then optionally override individual agents. Each assignment may use the provider's default reasoning behavior, disable optional reasoning, or select only an effort advertised by that model's catalog metadata.
 
-Each Single turn or completed playback interval makes one third-party OpenRouter request and may incur cost. Start is deliberately disabled when the server has no key. This development API has no authentication or cost controls and is not suitable for an unauthenticated public deployment.
+Each Single tick or completed playback interval requests every active agent and
+may incur an initial third-party OpenRouter charge plus at most one in-deadline
+repair or transient-retry charge per agent. All agents observe the
+same frozen pre-tick world; valid decisions resolve together while an individual
+provider failure is retained as that agent's final lost tick. Start is
+deliberately disabled when the server has no key. This development API has no
+authentication or cost controls and is not suitable for an unauthenticated
+public deployment.
 
-State is held only in the Game API process. The API captures one active safe experiment with up to 5,000 complete turn records while the browser snapshot remains capped at 120. Schema-v8 exports add the behavior registry, seed, assignments, and retained-turn attribution without changing schema-v7 attempt fields. Model and reasoning-profile assignments may be changed between requests; behavior locks after turn one. Schema-v5 through v7 imports remain supported with documented safe defaults. A saved slug absent from the current compatible catalog is preserved and blocks execution until explicitly replaced. Every provider decision is one plain-text response containing a required flat JSON object with one world action, at most one communication, and at most one formal diplomacy intent. The runtime extracts and conservatively repairs JSON before strict local schemas and the world engine apply authoritative validation.
+State is held only in the Game API process. The API captures one active safe
+experiment with bounded complete tick groups while the browser snapshot remains
+bounded without splitting a tick. Schema-v10 exports add tick number, resolution
+position, virtual time, interval, and lost-tick attribution; schema-v9 archive
+imports remain supported. Model and reasoning-profile assignments may be changed
+between ticks; behavior locks after tick one. A saved slug absent from the
+current compatible catalog is preserved and blocks execution until explicitly
+replaced. Every provider decision is one plain-text response containing a
+required flat JSON object with one world action, at most one communication, and
+at most one formal diplomacy intent. The runtime extracts and conservatively
+repairs JSON before strict local schemas and the world engine apply authoritative
+validation.
 
 Export previews report exact serialized UTF-8 bytes and a model-agnostic `ceil(bytes / 4)` approximate AI-input-token estimate. Compact JSON is the default for AI sharing; Pretty JSON remains available for human review, and preview estimates reflect the selected serialization. This is a sharing-budget aid, not tokenizer output or a billing guarantee. Exports exclude fixed prompts, raw provider payloads, credentials, authorization headers, private reasoning, and unbounded diagnostics.
 
@@ -59,17 +80,31 @@ The compatible default centers on Toledo, Ohio (`41.6528, -83.5379`) at H3 resol
 
 Alliance leadership, merging, custom metadata, combat systems, relationship scores, group chat, persistent memory, player mechanics, restartable world persistence, and autonomous scheduling remain deferred.
 
-When every development cell is infected, World Lab automatically pauses playback and disables Start to avoid accidental provider calls. Reset and export remain available, and Single turn remains an explicitly manual diagnostic action.
+When every development cell is infected, World Lab automatically pauses
+playback and disables Start to avoid accidental provider calls. Reset and export
+remain available, and Single tick remains an explicitly manual diagnostic
+action.
 
-World Lab provides browser-owned absolute run targets of **25, 50, 100, 200, 500, and 1,000**. The session-selected target defaults to 200, past/current targets are unavailable, and a bounded run pauses at the authoritative completed-turn target unless cancellation, failure, or full infection stops it first.
+World Lab provides browser-owned absolute tick targets of **5, 10, 25, 50,
+and 100**. The session-selected target defaults to 25. A bounded run pauses at
+the authoritative tick target, on cancellation, or when the world is fully
+infected. There is no background scheduler.
 
-The persistent operator shell keeps execution controls, run target, playback speed, current turn, known cost, and run state visible while switching between Live and Agents workspaces. Live centers the map between an independently scrolling agent rail and semantic Scoreboard, Agent, Hex, and Run inspector tabs; a bounded activity dock separates public chat, events, and safe failure/recovery records. Agent configuration uses the same mounted execution controller and existing server-authoritative mutations, so workspace switching cannot duplicate or interrupt playback. Infrequent and destructive operations remain in the accessible overflow menu. Blackberry/teal/mint/celadon/vanilla semantic tokens define the dark application chrome without replacing domain-owned agent and alliance colors.
+The persistent operator shell keeps execution controls, run target, playback speed, current tick, known cost, and run state visible while switching between Live and Agents workspaces. Live centers the map between an independently scrolling agent rail and semantic Scoreboard, Agent, Hex, and Run inspector tabs; a bounded activity dock separates public chat, events, and safe failure/recovery records. Agent configuration uses the same mounted execution controller and existing server-authoritative mutations, so workspace switching cannot duplicate or interrupt playback. Infrequent and destructive operations remain in the accessible overflow menu. Blackberry/teal/mint/celadon/vanilla semantic tokens define the dark application chrome without replacing domain-owned agent and alliance colors.
 
-The agent roster defaults to browser-local **Follow turn** behavior: the inspector follows the active request, or the next scheduled agent while paused. Selecting an agent manually disables following without hiding the roster's textual Acting/Next marker; the preference remains in that browser and is never exported. Public world chat and the event log are newest-first bounded feeds, and the shared Model and Export dialogs keep their headers/actions fixed while their bodies scroll within the viewport.
+The agent roster defaults to browser-local **Follow latest** behavior: after a
+tick the inspector follows the last record in deterministic resolution order.
+Selecting an agent manually disables following without hiding the roster's
+textual Latest marker; the preference remains in that browser and is never
+exported. Public world chat and the event log are newest-first bounded feeds,
+and the shared Model and Export dialogs keep their headers/actions fixed while
+their bodies scroll within the viewport.
 
 See [Testing](docs/TESTING.md), [Architecture](docs/ARCHITECTURE.md), [Security](docs/SECURITY.md), the accepted future [Gameplay Foundation](docs/GAMEPLAY_FOUNDATION.md), and the [Roadmap](ROADMAP.md).
 
-Completed schema-v9 exports can be imported into an ignored local SQLite archive and queried without repeatedly loading full JSON artifacts. See [Local experiment archive](docs/EXPERIMENT_ARCHIVE.md).
+Completed schema-v10 exports and legacy schema-v9 exports can be imported into
+an ignored local SQLite archive and queried without repeatedly loading full JSON
+artifacts. See [Local experiment archive](docs/EXPERIMENT_ARCHIVE.md).
 
 ## Rename compatibility
 

@@ -14,6 +14,7 @@ import {
   captureEligibilitySchema,
   exportedCommunicationSchema,
   experimentExportWorldStateSchema,
+  experimentExportTurnSchema,
   hexCapturedWorldEventSchema,
   hexSchema,
   invalidActionReasonSchema,
@@ -23,6 +24,7 @@ import {
   providerMetadataSchema,
   restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
+  singleTickResponseSchema,
   updateAgentPersonalityRequestSchema,
   updateAgentPersonalityResponseSchema,
   allianceSchema,
@@ -31,6 +33,7 @@ import {
   diplomacyResultSchema,
   DEVELOPMENT_WORLD_CONFIG,
   experimentModelConfigurationSchema,
+  modelVerificationSchema,
   reasoningProfilesForModel,
   type CompatibleModel,
   assignBehavior,
@@ -245,8 +248,22 @@ const snapshot = {
 
 describe('agent observation and decision schemas', () => {
   it('preserves established engine contract identifiers through branding changes', () => {
-    expect(AGENT_DECISION_CONTRACT_VERSION).toBe('text-flat-json-v3');
+    expect(AGENT_DECISION_CONTRACT_VERSION).toBe('text-flat-json-v4');
     expect(OBJECTIVE_PROMPT_VERSION).toBe('durable-influence-v2');
+    expect(
+      modelVerificationSchema.parse({
+        modelId: 'author/model',
+        contractVersion: AGENT_DECISION_CONTRACT_VERSION,
+        status: 'untested',
+      }).contractVersion,
+    ).toBe(AGENT_DECISION_CONTRACT_VERSION);
+    expect(
+      modelVerificationSchema.safeParse({
+        modelId: 'author/model',
+        contractVersion: 'text-flat-json-v3',
+        status: 'untested',
+      }).success,
+    ).toBe(false);
   });
 
   it('centralizes eight-agent, 127-cell alliance and diplomacy limits', () => {
@@ -683,6 +700,15 @@ describe('turn and snapshot schemas', () => {
       outcome: 'provider-error',
       failure: { code: 'timeout', message: 'Timed out.', retryable: true },
     },
+    {
+      ...baseTurn,
+      outcome: 'lost-tick',
+      tickNumber: 1,
+      tickPosition: 1,
+      virtualTime: '2026-08-13T12:05:00.000Z',
+      tickIntervalMinutes: 5,
+      failure: { code: 'timeout', message: 'Timed out.', retryable: false },
+    },
   ])('validates $outcome turn records', (turn) => {
     expect(agentTurnRecordSchema.safeParse(turn).success).toBe(true);
   });
@@ -712,6 +738,83 @@ describe('turn and snapshot schemas', () => {
           ...snapshot.world,
           events: Array(121).fill(event),
         },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('requires tick attribution as one complete metadata group', () => {
+    const lost = {
+      ...baseTurn,
+      outcome: 'lost-tick',
+      failure: { code: 'timeout', message: 'Timed out.', retryable: false },
+    };
+    expect(
+      agentTurnRecordSchema.safeParse({ ...lost, tickNumber: 1 }).success,
+    ).toBe(false);
+    expect(
+      agentTurnRecordSchema.safeParse({
+        ...lost,
+        tickNumber: 1,
+        tickPosition: 1,
+        virtualTime: '2026-08-13T12:05:00.000Z',
+        tickIntervalMinutes: 5,
+      }).success,
+    ).toBe(true);
+    expect(
+      experimentExportTurnSchema.safeParse({
+        turnNumber: 1,
+        tickNumber: 1,
+        startedAt: baseTurn.startedAt,
+        completedAt: baseTurn.completedAt,
+        agentId,
+        outcome: 'lost-tick',
+        failure: { code: 'timeout', message: 'Timed out.', retryable: false },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('requires one consistently attributed record per roster agent in tick responses', () => {
+    const virtualTime = '2026-08-13T12:05:00.000Z';
+    const records = worldAgents.map((agent, index) => ({
+      ...baseTurn,
+      turnNumber: index + 1,
+      agentId: agent.id,
+      observation: { ...observation, agentId: agent.id, agentName: agent.name },
+      outcome: 'lost-tick',
+      tickNumber: 1,
+      tickPosition: index + 1,
+      virtualTime,
+      tickIntervalMinutes: 5,
+      failure: { code: 'timeout', message: 'Timed out.', retryable: false },
+    }));
+    const tickSnapshot = {
+      ...snapshot,
+      turnNumber: records.length,
+      tickNumber: 1,
+      virtualTime,
+      lastTickIntervalMinutes: 5,
+      resolutionOrder: records.map(({ agentId: id }) => id),
+      turns: records,
+    };
+    expect(
+      singleTickResponseSchema.safeParse({
+        snapshot: tickSnapshot,
+        tickNumber: 1,
+        records,
+      }).success,
+    ).toBe(true);
+    expect(
+      singleTickResponseSchema.safeParse({
+        snapshot: tickSnapshot,
+        tickNumber: 1,
+        records: records.slice(1),
+      }).success,
+    ).toBe(false);
+    expect(
+      singleTickResponseSchema.safeParse({
+        snapshot: tickSnapshot,
+        tickNumber: 1,
+        records: records.map((record) => ({ ...record, tickPosition: 1 })),
       }).success,
     ).toBe(false);
   });

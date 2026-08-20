@@ -27,7 +27,7 @@ import {
   reasoningProfilesForModel,
   restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
-  singleTurnResponseSchema,
+  singleTickResponseSchema,
   updateAgentPersonalityRequestSchema,
   updateAgentPersonalityResponseSchema,
   updateExperimentModelsResponseSchema,
@@ -68,14 +68,11 @@ const apiBase =
   process.env.NEXT_PUBLIC_GAME_API_BASE_URL ?? '/api/game/simulation';
 const followTurnStorageKey = 'hexzero.world-lab.follow-turn';
 const runTargetStorageKey = 'hexzero.world-lab.run-target';
-const unattendedRecoveryStorageKey = 'hexzero.world-lab.unattended-recovery';
 const activityDockStorageKey = 'hexzero.world-lab.activity-dock';
 const legacyFollowTurnStorageKey = 'agentborne.world-lab.follow-turn';
 const legacyRunTargetStorageKey = 'agentborne.world-lab.run-target';
-const legacyUnattendedRecoveryStorageKey =
-  'agentborne.world-lab.unattended-recovery';
 const legacyActivityDockStorageKey = 'agentborne.world-lab.activity-dock';
-export const runTargets = [25, 50, 100, 200, 500, 1000] as const;
+export const runTargets = [5, 10, 25, 50, 100] as const;
 
 function readStoredPreference(
   storage: Storage,
@@ -89,39 +86,6 @@ function readStoredPreference(
   if (legacy === null || !valid(legacy)) return null;
   storage.setItem(key, legacy);
   return legacy;
-}
-
-function validUnattendedPreference(value: string): boolean {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (!parsed || typeof parsed !== 'object') return false;
-    const preference = parsed as Record<string, unknown>;
-    return (
-      typeof preference.enabled === 'boolean' &&
-      (preference.retryLimit === 1 ||
-        preference.retryLimit === 2 ||
-        preference.retryLimit === 3)
-    );
-  } catch {
-    return false;
-  }
-}
-
-function unattendedFailureEligible(
-  failure: NonNullable<SimulationSnapshot['pendingFailedTurn']>['failure'],
-): boolean {
-  if (
-    failure.code === 'configuration' ||
-    failure.code === 'cancelled' ||
-    (failure.code === 'provider-http' &&
-      [401, 403].includes(failure.httpStatus ?? 0))
-  )
-    return false;
-  return (
-    failure.retryable ||
-    Boolean(failure.validationCodes?.length) ||
-    ['malformed-response', 'unsupported-response'].includes(failure.code)
-  );
 }
 
 export function WorldLab() {
@@ -159,19 +123,11 @@ export function WorldLab() {
   const [selectedCell, setSelectedCell] = useState<H3Cell | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId | null>(null);
   const [running, setRunning] = useState(false);
-  const [runTarget, setRunTarget] = useState<(typeof runTargets)[number]>(200);
+  const [runTarget, setRunTarget] = useState<(typeof runTargets)[number]>(25);
   const [runTargetLoaded, setRunTargetLoaded] = useState(false);
   const [boundedRunTarget, setBoundedRunTarget] = useState<number | null>(null);
   const [inFlight, setInFlight] = useState(false);
   const [reconciling, setReconciling] = useState(false);
-  const [unattendedRecoveryEnabled, setUnattendedRecoveryEnabled] =
-    useState(false);
-  const [unattendedRetryLimit, setUnattendedRetryLimit] = useState<1 | 2 | 3>(
-    2,
-  );
-  const [unattendedPreferenceLoaded, setUnattendedPreferenceLoaded] =
-    useState(false);
-  const [unattendedRetryCount, setUnattendedRetryCount] = useState(0);
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
   const [personalityPending, setPersonalityPending] = useState(false);
@@ -200,9 +156,6 @@ export function WorldLab() {
   const completedTurnsRef = useRef(0);
   const mutationSequenceRef = useRef(0);
   const runningRef = useRef(false);
-  const unattendedEnabledRef = useRef(false);
-  const unattendedRetryLimitRef = useRef<1 | 2 | 3>(2);
-  const unattendedRetryCountRef = useRef(0);
   const configurationPendingRef = useRef(false);
   const exportInitializedRef = useRef(false);
   const exportTriggerRef = useRef<HTMLButtonElement>(null);
@@ -240,51 +193,6 @@ export function WorldLab() {
   }, [activityDockLoaded, chatCollapsed]);
 
   useEffect(() => {
-    const saved = readStoredPreference(
-      window.localStorage,
-      unattendedRecoveryStorageKey,
-      legacyUnattendedRecoveryStorageKey,
-      validUnattendedPreference,
-    );
-    const hydrationTask = window.setTimeout(() => {
-      if (saved) {
-        try {
-          const preference = JSON.parse(saved) as {
-            enabled?: unknown;
-            retryLimit?: unknown;
-          };
-          const limit = Number(preference.retryLimit);
-          setUnattendedRecoveryEnabled(preference.enabled === true);
-          unattendedEnabledRef.current = preference.enabled === true;
-          if (limit === 1 || limit === 2 || limit === 3) {
-            setUnattendedRetryLimit(limit);
-            unattendedRetryLimitRef.current = limit;
-          }
-        } catch {
-          // Ignore malformed browser-local preferences.
-        }
-      }
-      setUnattendedPreferenceLoaded(true);
-    }, 0);
-    return () => window.clearTimeout(hydrationTask);
-  }, []);
-
-  useEffect(() => {
-    if (!unattendedPreferenceLoaded) return;
-    window.localStorage.setItem(
-      unattendedRecoveryStorageKey,
-      JSON.stringify({
-        enabled: unattendedRecoveryEnabled,
-        retryLimit: unattendedRetryLimit,
-      }),
-    );
-  }, [
-    unattendedPreferenceLoaded,
-    unattendedRecoveryEnabled,
-    unattendedRetryLimit,
-  ]);
-
-  useEffect(() => {
     if (
       !recoveryNotice ||
       recoveryNotice.startsWith('Recovering ') ||
@@ -307,7 +215,14 @@ export function WorldLab() {
     );
     const hydrationTask = window.setTimeout(() => {
       if (runTargets.includes(stored as (typeof runTargets)[number])) {
-        setRunTarget(stored as (typeof runTargets)[number]);
+        const storedTarget = stored as (typeof runTargets)[number];
+        setRunTarget(
+          storedTarget > completedTurnsRef.current
+            ? storedTarget
+            : (runTargets.find(
+                (target) => target > completedTurnsRef.current,
+              ) ?? runTargets.at(-1)!),
+        );
       }
       setRunTargetLoaded(true);
     }, 0);
@@ -339,25 +254,28 @@ export function WorldLab() {
     window.localStorage.setItem(followTurnStorageKey, String(followTurn));
   }, [followPreferenceLoaded, followTurn]);
 
-  const followedAgentId = snapshot?.activeAgentId ?? snapshot?.nextAgentId;
+  const followedAgentId =
+    snapshot?.turns.at(-1)?.agentId ?? snapshot?.world.agents[0]?.id;
 
   const applySnapshot = useCallback((next: SimulationSnapshot) => {
-    completedTurnsRef.current = next.experiment.totalCompletedTurns;
+    completedTurnsRef.current = next.tickNumber;
+    setRunTarget((current) =>
+      current > next.tickNumber
+        ? current
+        : (runTargets.find((target) => target > next.tickNumber) ??
+          runTargets.at(-1)!),
+    );
     setSnapshot(next);
     if (
       next.status === 'configuration-error' ||
       next.world.hexes.every(({ state }) => state === 'infected') ||
       (boundedRunTargetRef.current !== null &&
-        next.experiment.totalCompletedTurns >= boundedRunTargetRef.current)
+        next.tickNumber >= boundedRunTargetRef.current)
     ) {
       runningRef.current = false;
       setRunning(false);
       setBoundedRunTarget(null);
       boundedRunTargetRef.current = null;
-    }
-    if (next.pendingFailedTurn === null) {
-      unattendedRetryCountRef.current = 0;
-      setUnattendedRetryCount(0);
     }
     setSelectedAgentId((current) => current ?? next.world.agents[0]!.id);
   }, []);
@@ -372,7 +290,7 @@ export function WorldLab() {
           await response.json(),
         );
         applySnapshot(authoritative);
-        if (authoritative.activeAgentId === null) return authoritative;
+        if (authoritative.status !== 'waiting-for-model') return authoritative;
         await new Promise((resolve) => window.setTimeout(resolve, 500));
       }
     } finally {
@@ -574,153 +492,72 @@ export function WorldLab() {
     }
   };
 
-  const executeTurn = useCallback(
-    async (operation: 'turn' | 'retry' | 'unattended-retry' = 'turn') => {
-      if (inFlightRef.current) return;
-      if (
-        boundedRunTargetRef.current !== null &&
-        completedTurnsRef.current >= boundedRunTargetRef.current
-      ) {
+  const executeTurn = useCallback(async () => {
+    if (inFlightRef.current) return;
+    if (
+      boundedRunTargetRef.current !== null &&
+      completedTurnsRef.current >= boundedRunTargetRef.current
+    ) {
+      setRunning(false);
+      setBoundedRunTarget(null);
+      boundedRunTargetRef.current = null;
+      return;
+    }
+    inFlightRef.current = true;
+    setInFlight(true);
+    setUiError(null);
+    try {
+      mutationSequenceRef.current += 1;
+      const mutationId = `mutation_${Date.now()}_${mutationSequenceRef.current}`;
+      const turnPath = `${apiBase}/tick`;
+      const response = await fetch(
+        `${turnPath}?mutationId=${encodeURIComponent(mutationId)}`,
+        { method: 'POST' },
+      );
+      if (response.status === 409) {
+        setUiError('Another tick is already in progress.');
+        runningRef.current = false;
         setRunning(false);
         setBoundedRunTarget(null);
         boundedRunTargetRef.current = null;
         return;
       }
-      inFlightRef.current = true;
-      setInFlight(true);
-      setUiError(null);
-      try {
-        mutationSequenceRef.current += 1;
-        const mutationId = `mutation_${Date.now()}_${mutationSequenceRef.current}`;
-        const turnPath = `${apiBase}/turn${
-          operation === 'retry'
-            ? '/retry'
-            : operation === 'unattended-retry'
-              ? '/unattended-retry'
-              : ''
-        }`;
-        const response = await fetch(
-          `${turnPath}?mutationId=${encodeURIComponent(mutationId)}`,
-          { method: 'POST' },
-        );
-        if (response.status === 409) {
-          setUiError('Another turn is already in progress.');
-          runningRef.current = false;
-          setRunning(false);
-          setBoundedRunTarget(null);
-          boundedRunTargetRef.current = null;
-          return;
-        }
-        if (!response.ok) throw new Error('turn request failed');
-        const body: unknown = await response.json();
-        const cancellation = cancelledTurnResponseSchema.safeParse(body);
-        if (cancellation.success) {
-          applySnapshot(cancellation.data.snapshot);
-          setUiError('The request was cancelled without consuming a turn.');
-          return;
-        }
-        const payload = singleTurnResponseSchema.parse(body);
-        const completedUnattendedRetries = unattendedRetryCountRef.current;
-        applySnapshot(payload.snapshot);
-        if (payload.turn.outcome === 'provider-error') {
-          const failedAgent = payload.snapshot.world.agents.find(
-            ({ id }) => id === payload.turn.agentId,
-          );
-          const attribution = `${failedAgent?.name ?? payload.turn.agentId} · model ${payload.turn.failure.model ?? payload.turn.provider?.model ?? 'unavailable'} · ${payload.turn.failure.code}: ${payload.turn.failure.message}`;
-          if (
-            runningRef.current &&
-            unattendedEnabledRef.current &&
-            unattendedFailureEligible(payload.turn.failure)
-          ) {
-            setRecoveryNotice(
-              `Recovery pending for ${attribution}. Each retry may incur provider cost.`,
-            );
-          } else {
-            runningRef.current = false;
-            setRunning(false);
-            setBoundedRunTarget(null);
-            boundedRunTargetRef.current = null;
-            setUiError(`Turn stopped (${attribution}).`);
-          }
-        } else if (operation === 'unattended-retry') {
-          setRecoveryNotice(
-            `Recovered the failed turn after ${completedUnattendedRetries} unattended ${completedUnattendedRetries === 1 ? 'retry' : 'retries'}. Continuing; provider calls may incur cost.`,
-          );
-        }
-      } catch {
-        setUiError('The response was lost. Reconciling with the Game API…');
-        try {
-          await reconcileAuthoritativeSnapshot();
-          setUiError(null);
-        } catch {
-          runningRef.current = false;
-          setRunning(false);
-          setBoundedRunTarget(null);
-          boundedRunTargetRef.current = null;
-          setUiError(
-            'The authoritative state could not be reconciled. Refresh before retrying.',
-          );
-        }
-      } finally {
-        inFlightRef.current = false;
-        setInFlight(false);
+      if (!response.ok) throw new Error('turn request failed');
+      const body: unknown = await response.json();
+      const cancellation = cancelledTurnResponseSchema.safeParse(body);
+      if (cancellation.success) {
+        applySnapshot(cancellation.data.snapshot);
+        setUiError('The request was cancelled without consuming a tick.');
+        return;
       }
-    },
-    [applySnapshot, reconcileAuthoritativeSnapshot],
-  );
-
-  const skipFailedTurn = async () => {
-    if (inFlightRef.current) return;
-    setInFlight(true);
-    inFlightRef.current = true;
-    setUiError(null);
-    try {
-      const response = await fetch(`${apiBase}/turn/skip`, { method: 'POST' });
-      if (!response.ok) throw new Error('skip request failed');
-      const payload = singleTurnResponseSchema.parse(await response.json());
+      const payload = singleTickResponseSchema.parse(body);
       applySnapshot(payload.snapshot);
+      const lost = payload.records.filter(
+        ({ outcome }) => outcome === 'lost-tick',
+      );
+      if (lost.length)
+        setRecoveryNotice(
+          `${lost.length} agent${lost.length === 1 ? '' : 's'} lost this tick; all other decisions committed.`,
+        );
     } catch {
-      setUiError('The failed turn could not be skipped safely.');
+      setUiError('The response was lost. Reconciling with the Game API…');
+      try {
+        await reconcileAuthoritativeSnapshot();
+        setUiError(null);
+      } catch {
+        runningRef.current = false;
+        setRunning(false);
+        setBoundedRunTarget(null);
+        boundedRunTargetRef.current = null;
+        setUiError(
+          'The authoritative state could not be reconciled. Refresh before retrying.',
+        );
+      }
     } finally {
       inFlightRef.current = false;
       setInFlight(false);
     }
-  };
-
-  const unattendedSkipFailedTurn = useCallback(async () => {
-    if (inFlightRef.current || !runningRef.current) return;
-    inFlightRef.current = true;
-    setInFlight(true);
-    try {
-      mutationSequenceRef.current += 1;
-      const mutationId = `unattended_skip_${Date.now()}_${mutationSequenceRef.current}`;
-      const response = await fetch(
-        `${apiBase}/turn/unattended-skip?mutationId=${encodeURIComponent(mutationId)}`,
-        { method: 'POST' },
-      );
-      if (!response.ok) throw new Error('unattended skip failed');
-      const payload = singleTurnResponseSchema.parse(await response.json());
-      const completedUnattendedRetries = unattendedRetryCountRef.current;
-      const agent = payload.snapshot.world.agents.find(
-        ({ id }) => id === payload.turn.agentId,
-      );
-      applySnapshot(payload.snapshot);
-      setRecoveryNotice(
-        `${agent?.name ?? payload.turn.agentId} lost the turn after ${completedUnattendedRetries} unattended ${completedUnattendedRetries === 1 ? 'retry' : 'retries'}. Continuing.`,
-      );
-    } catch {
-      runningRef.current = false;
-      setRunning(false);
-      setBoundedRunTarget(null);
-      boundedRunTargetRef.current = null;
-      setUiError(
-        'The failed turn could not be skipped safely. Playback stopped.',
-      );
-    } finally {
-      inFlightRef.current = false;
-      setInFlight(false);
-    }
-  }, [applySnapshot]);
+  }, [applySnapshot, reconcileAuthoritativeSnapshot]);
 
   const cancelCurrentRequest = async () => {
     setCancelling(true);
@@ -729,7 +566,7 @@ export function WorldLab() {
     setBoundedRunTarget(null);
     boundedRunTargetRef.current = null;
     try {
-      const response = await fetch(`${apiBase}/turn/cancel`, {
+      const response = await fetch(`${apiBase}/tick/cancel`, {
         method: 'POST',
       });
       const body = await response.json();
@@ -755,51 +592,12 @@ export function WorldLab() {
       completedTurnsRef.current >= boundedRunTargetRef.current
     )
       return;
-    const pending = snapshot?.pendingFailedTurn;
-    if (pending) {
-      if (
-        !unattendedRecoveryEnabled ||
-        !unattendedFailureEligible(pending.failure)
-      )
-        return;
-      if (unattendedRetryCountRef.current < unattendedRetryLimit) {
-        const nextRetry = unattendedRetryCountRef.current + 1;
-        const agent = snapshot.world.agents.find(
-          ({ id }) => id === pending.agentId,
-        );
-        const timer = window.setTimeout(() => {
-          if (!runningRef.current) return;
-          unattendedRetryCountRef.current = nextRetry;
-          setUnattendedRetryCount(nextRetry);
-          setRecoveryNotice(
-            `Recovering ${agent?.name ?? pending.agentId} · retry ${nextRetry} of ${unattendedRetryLimit}. Each retry may incur provider cost.`,
-          );
-          void executeTurn('unattended-retry');
-        }, speed);
-        return () => window.clearTimeout(timer);
-      }
-      const timer = window.setTimeout(
-        () => void unattendedSkipFailedTurn(),
-        speed,
-      );
-      return () => window.clearTimeout(timer);
-    }
     const timer = window.setTimeout(() => void executeTurn(), speed);
     return () => window.clearTimeout(timer);
-  }, [
-    executeTurn,
-    inFlight,
-    resetting,
-    running,
-    snapshot,
-    speed,
-    unattendedRecoveryEnabled,
-    unattendedRetryLimit,
-    unattendedSkipFailedTurn,
-  ]);
+  }, [executeTurn, inFlight, resetting, running, snapshot, speed]);
 
   useEffect(() => {
-    if (!snapshot?.activeAgentId || inFlight) return;
+    if (snapshot?.status !== 'waiting-for-model' || inFlight) return;
     const timer = window.setInterval(() => {
       void fetch(apiBase)
         .then(async (response) => {
@@ -809,7 +607,7 @@ export function WorldLab() {
         .catch(() => undefined);
     }, 500);
     return () => window.clearInterval(timer);
-  }, [applySnapshot, inFlight, snapshot?.activeAgentId]);
+  }, [applySnapshot, inFlight, snapshot?.status]);
 
   const reset = async () => {
     if (inFlightRef.current) return;
@@ -817,7 +615,7 @@ export function WorldLab() {
       snapshot &&
       snapshot.experiment.totalCompletedTurns > 0 &&
       !window.confirm(
-        `Reset World will discard ${snapshot.experiment.totalCompletedTurns} completed experiment turn records and all unexported telemetry. Continue?`,
+        `Reset World will discard ${snapshot.tickNumber} completed ticks (${snapshot.experiment.totalCompletedTurns} agent records) and all unexported telemetry. Continue?`,
       )
     )
       return;
@@ -830,15 +628,14 @@ export function WorldLab() {
     try {
       const response = await fetch(`${apiBase}/reset`, { method: 'POST' });
       if (response.status === 409) {
-        setUiError('Reset is unavailable until the current turn completes.');
+        setUiError('Reset is unavailable until the current tick completes.');
         return;
       }
       if (!response.ok) throw new Error('reset request failed');
       const payload = resetSimulationResponseSchema.parse(
         await response.json(),
       );
-      completedTurnsRef.current =
-        payload.snapshot.experiment.totalCompletedTurns;
+      completedTurnsRef.current = payload.snapshot.tickNumber;
       setSnapshot(payload.snapshot);
       setSelectedCell(null);
       setSelectedAgentId(payload.snapshot.world.agents[0]!.id);
@@ -868,7 +665,7 @@ export function WorldLab() {
       });
       if (response.status === 409) {
         setUiError(
-          'Personality changes are unavailable until the current turn completes.',
+          'Personality changes are unavailable until the current tick completes.',
         );
         return false;
       }
@@ -911,7 +708,7 @@ export function WorldLab() {
       );
       if (response.status === 409) {
         setUiError(
-          'Default personalities cannot be restored until the current turn completes.',
+          'Default personalities cannot be restored until the current tick completes.',
         );
         return;
       }
@@ -976,34 +773,30 @@ export function WorldLab() {
       ? 'reconciling-request'
       : inFlight
         ? 'waiting-for-model'
-        : snapshot.status === 'configuration-error' ||
+        : snapshot.status === 'waiting-for-model' ||
+            snapshot.status === 'configuration-error' ||
             snapshot.status === 'provider-error'
           ? snapshot.status
           : running
             ? 'running'
             : 'paused';
+  const activeTick = snapshot.status === 'waiting-for-model';
   const personalityControlsDisabled =
     running ||
     inFlight ||
     resetting ||
     personalityPending ||
-    snapshot.activeAgentId !== null;
+    snapshot.activeAgentId !== null ||
+    activeTick;
   const exportMutationPending =
     running ||
     inFlight ||
     resetting ||
     personalityPending ||
-    snapshot.activeAgentId !== null;
+    snapshot.activeAgentId !== null ||
+    activeTick;
   const modelsReady = snapshot.resolvedModels.every(
     ({ available }) => available,
-  );
-  const unattendedCanRecoverPending = Boolean(
-    snapshot.pendingFailedTurn &&
-    unattendedRecoveryEnabled &&
-    unattendedFailureEligible(snapshot.pendingFailedTurn.failure),
-  );
-  const unattendedRecoveryActive = Boolean(
-    running && unattendedCanRecoverPending,
   );
   const reasoningUnavailable = snapshot.resolvedModels.some(
     ({ issue }) => issue === 'reasoning-unavailable',
@@ -1050,11 +843,11 @@ export function WorldLab() {
         <div className="status-popover">
           <button
             type="button"
-            aria-label={`Experiment details. Turn ${snapshot.turnNumber}, ${status.replaceAll('-', ' ')}`}
+            aria-label={`Experiment details. Tick ${snapshot.tickNumber}, ${status.replaceAll('-', ' ')}`}
           >
             <span className={`status-dot ${status}`} aria-hidden="true" />
             <strong>
-              Turn {snapshot.experiment.totalCompletedTurns}
+              Tick {snapshot.tickNumber}
               {boundedRunTarget !== null && ` / ${boundedRunTarget}`}
             </strong>
             <span className="navbar-cost">
@@ -1145,12 +938,11 @@ export function WorldLab() {
               title="Start simulation"
               disabled={
                 inFlight ||
+                activeTick ||
                 personalityPending ||
                 fullyInfected ||
                 !snapshot.providerConfigured ||
-                !modelsReady ||
-                (snapshot.pendingFailedTurn !== null &&
-                  !unattendedCanRecoverPending)
+                !modelsReady
               }
               type="button"
               onClick={() => {
@@ -1164,11 +956,12 @@ export function WorldLab() {
           )}
           <button
             className="labeled-command"
-            aria-label="Single turn"
+            aria-label="Single tick"
             aria-busy={inFlight}
-            title="Advance one turn"
+            title="Request one decision from every active agent"
             disabled={
               inFlight ||
+              activeTick ||
               running ||
               personalityPending ||
               !snapshot.providerConfigured ||
@@ -1179,15 +972,17 @@ export function WorldLab() {
             onClick={() => void executeTurn()}
           >
             {inFlight ? <Spinner /> : <CommandIcon name="step" />}
-            <span>Single turn</span>
+            <span>Single tick</span>
           </button>
           <label className="run-target-control">
-            <span className="sr-only">Run target</span>
+            <span className="sr-only">Tick target</span>
             <CommandIcon name="target" />
             <select
-              aria-label="Run target"
+              aria-label="Tick target"
               value={runTarget}
-              disabled={boundedRunTarget !== null || running || inFlight}
+              disabled={
+                boundedRunTarget !== null || running || inFlight || activeTick
+              }
               onChange={(event) =>
                 setRunTarget(
                   Number(event.target.value) as (typeof runTargets)[number],
@@ -1198,7 +993,7 @@ export function WorldLab() {
                 <option
                   key={target}
                   value={target}
-                  disabled={target <= snapshot.experiment.totalCompletedTurns}
+                  disabled={target <= snapshot.tickNumber}
                 >
                   {target}
                 </option>
@@ -1223,14 +1018,13 @@ export function WorldLab() {
               disabled={
                 running ||
                 inFlight ||
+                activeTick ||
                 resetting ||
                 personalityPending ||
                 !snapshot.providerConfigured ||
                 !modelsReady ||
                 fullyInfected ||
-                (snapshot.pendingFailedTurn !== null &&
-                  !unattendedCanRecoverPending) ||
-                snapshot.experiment.totalCompletedTurns >= runTarget
+                snapshot.tickNumber >= runTarget
               }
               type="button"
               onClick={() => {
@@ -1240,7 +1034,7 @@ export function WorldLab() {
                 setRunning(true);
               }}
             >
-              Run to {runTarget}
+              Run to tick {runTarget}
             </button>
           ) : (
             <button
@@ -1253,8 +1047,7 @@ export function WorldLab() {
                 setRunning(false);
                 setBoundedRunTarget(null);
                 boundedRunTargetRef.current = null;
-                if (inFlight || snapshot.activeAgentId !== null)
-                  void cancelCurrentRequest();
+                if (inFlight || activeTick) void cancelCurrentRequest();
               }}
             >
               {cancelling ? (
@@ -1268,20 +1061,18 @@ export function WorldLab() {
           )}
           <span
             className={`cancel-request-slot${
-              inFlight || snapshot.activeAgentId !== null ? '' : ' inactive'
+              inFlight || activeTick ? '' : ' inactive'
             }`}
           >
             <button
               className="secondary-action"
-              aria-hidden={!(inFlight || snapshot.activeAgentId !== null)}
+              aria-hidden={!(inFlight || activeTick)}
               disabled={
                 cancelling ||
                 snapshot.cancellationRequested ||
-                !(inFlight || snapshot.activeAgentId !== null)
+                !(inFlight || activeTick)
               }
-              tabIndex={
-                inFlight || snapshot.activeAgentId !== null ? undefined : -1
-              }
+              tabIndex={inFlight || activeTick ? undefined : -1}
               type="button"
               onClick={() => void cancelCurrentRequest()}
             >
@@ -1290,41 +1081,8 @@ export function WorldLab() {
                 : 'Cancel'}
             </button>
           </span>
-          <span
-            className={`failed-turn-controls${snapshot.pendingFailedTurn && !inFlight ? '' : ' inactive'}`}
-          >
-            <button
-              className="secondary-action"
-              disabled={
-                !snapshot.pendingFailedTurn ||
-                inFlight ||
-                unattendedRecoveryActive
-              }
-              aria-hidden={!snapshot.pendingFailedTurn || inFlight}
-              tabIndex={
-                snapshot.pendingFailedTurn && !inFlight ? undefined : -1
-              }
-              type="button"
-              onClick={() => void executeTurn('retry')}
-            >
-              Retry
-            </button>
-            <button
-              className="secondary-action"
-              disabled={
-                !snapshot.pendingFailedTurn ||
-                inFlight ||
-                unattendedRecoveryActive
-              }
-              aria-hidden={!snapshot.pendingFailedTurn || inFlight}
-              tabIndex={
-                snapshot.pendingFailedTurn && !inFlight ? undefined : -1
-              }
-              type="button"
-              onClick={() => void skipFailedTurn()}
-            >
-              Skip turn
-            </button>
+          <span className="cost-warning">
+            Each tick requests every active agent and may incur provider cost.
           </span>
         </nav>
         <details className="overflow-menu" ref={overflowMenuRef}>
@@ -1336,46 +1094,10 @@ export function WorldLab() {
             <CommandIcon name="more" />
           </summary>
           <div className="command-popover overflow-content">
-            <fieldset className="unattended-recovery-control">
-              <legend>Unattended recovery</legend>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={unattendedRecoveryEnabled}
-                  onChange={(event) => {
-                    const enabled = event.target.checked;
-                    unattendedEnabledRef.current = enabled;
-                    setUnattendedRecoveryEnabled(enabled);
-                  }}
-                />
-                Enable for continuous playback
-              </label>
-              <label>
-                Retry limit
-                <select
-                  aria-label="Unattended retry limit"
-                  value={unattendedRetryLimit}
-                  onChange={(event) => {
-                    const limit = Number(event.target.value) as 1 | 2 | 3;
-                    unattendedRetryLimitRef.current = limit;
-                    setUnattendedRetryLimit(limit);
-                  }}
-                >
-                  <option value={1}>1 retry</option>
-                  <option value={2}>2 retries</option>
-                  <option value={3}>3 retries</option>
-                </select>
-              </label>
-              <p>
-                While continuous playback is active, retry a failed model turn
-                up to this limit, then skip the turn and continue. Each retry
-                may incur provider cost. The World Lab tab must remain open.
-              </p>
-            </fieldset>
             <button
               type="button"
               aria-label="World setup"
-              disabled={inFlight || resetting || running}
+              disabled={inFlight || activeTick || resetting || running}
               onClick={() => {
                 if (overflowMenuRef.current)
                   overflowMenuRef.current.open = false;
@@ -1425,7 +1147,9 @@ export function WorldLab() {
               <button
                 className="destructive-command"
                 aria-busy={resetting}
-                disabled={inFlight || resetting || personalityPending}
+                disabled={
+                  inFlight || activeTick || resetting || personalityPending
+                }
                 type="button"
                 onClick={() => void reset()}
               >
@@ -1446,7 +1170,7 @@ export function WorldLab() {
           <div className="command-alert" role="alert">
             {uiError ??
               (fullyInfected
-                ? 'Development world fully infected. Automatic playback is paused; Single turn remains a manual cost-incurring diagnostic action.'
+                ? 'Development world fully infected. Automatic playback is paused; Single tick remains a manual cost-incurring diagnostic action.'
                 : (personalityNotice ??
                   (reasoningUnavailable
                     ? 'A saved reasoning profile is no longer advertised by its model. Select an available profile before starting.'
@@ -1644,8 +1368,6 @@ export function WorldLab() {
                     snapshot={snapshot}
                     status={status}
                     runTarget={boundedRunTarget ?? runTarget}
-                    unattendedRetryCount={unattendedRetryCount}
-                    unattendedRetryLimit={unattendedRetryLimit}
                   />
                 )}
               </div>
@@ -1913,22 +1635,12 @@ function RunHealthSummary({
   snapshot,
   status,
   runTarget,
-  unattendedRetryCount,
-  unattendedRetryLimit,
 }: {
   snapshot: SimulationSnapshot;
   status: string;
   runTarget: number;
-  unattendedRetryCount: number;
-  unattendedRetryLimit: number;
 }) {
   const metrics = snapshot.experiment.metrics.aggregate;
-  const active = snapshot.world.agents.find(
-    ({ id }) => id === snapshot.activeAgentId,
-  );
-  const next = snapshot.world.agents.find(
-    ({ id }) => id === snapshot.nextAgentId,
-  );
   const elapsedMs = Math.max(
     0,
     Date.parse(
@@ -1944,16 +1656,20 @@ function RunHealthSummary({
         <div>
           <dt>Progress</dt>
           <dd>
-            {snapshot.experiment.totalCompletedTurns} / {runTarget}
+            {snapshot.tickNumber} / {runTarget} ticks
           </dd>
         </div>
         <div>
-          <dt>Active agent</dt>
-          <dd>{active?.name ?? 'None'}</dd>
+          <dt>Virtual time</dt>
+          <dd>{new Date(snapshot.virtualTime).toLocaleString()}</dd>
         </div>
         <div>
-          <dt>Next agent</dt>
-          <dd>{next?.name ?? 'Unavailable'}</dd>
+          <dt>Last interval</dt>
+          <dd>
+            {snapshot.lastTickIntervalMinutes === null
+              ? 'Not started'
+              : `${snapshot.lastTickIntervalMinutes} min`}
+          </dd>
         </div>
         <div>
           <dt>Elapsed</dt>
@@ -1976,6 +1692,10 @@ function RunHealthSummary({
           <dd>{metrics.providerErrors}</dd>
         </div>
         <div>
+          <dt>Lost ticks</dt>
+          <dd>{metrics.lostTicks}</dd>
+        </div>
+        <div>
           <dt>Auto recovered</dt>
           <dd>{metrics.recoveredAutomatically}</dd>
         </div>
@@ -1992,11 +1712,6 @@ function RunHealthSummary({
           <dd>{metrics.operatorSkipped}</dd>
         </div>
       </dl>
-      {snapshot.pendingFailedTurn && unattendedRetryCount > 0 && (
-        <p role="status">
-          Retry {unattendedRetryCount} of {unattendedRetryLimit}
-        </p>
-      )}
     </section>
   );
 }
@@ -2012,6 +1727,7 @@ function RecoveryLog({
     .filter(
       (turn) =>
         turn.outcome === 'provider-error' ||
+        turn.outcome === 'lost-tick' ||
         turn.outcome === 'operator-skipped',
     )
     .slice(-40)
@@ -2033,7 +1749,8 @@ function RecoveryLog({
             return (
               <li key={turn.turnNumber}>
                 <strong>
-                  Turn {turn.turnNumber} · {agent?.name ?? turn.agentId}
+                  Tick {turn.tickNumber ?? 'legacy'} · record {turn.turnNumber}{' '}
+                  · {agent?.name ?? turn.agentId}
                 </strong>
                 <span>
                   {turn.failure.code} ·{' '}
@@ -2044,7 +1761,9 @@ function RecoveryLog({
                 <small>
                   {turn.outcome === 'operator-skipped'
                     ? `${turn.skipKind} skip`
-                    : 'awaiting operator or recovery outcome'}
+                    : turn.outcome === 'lost-tick'
+                      ? `final lost tick ${turn.tickNumber}`
+                      : 'legacy provider failure'}
                 </small>
               </li>
             );
@@ -2116,6 +1835,8 @@ function WorldSetupPanel({
       spawnSeed: scenario.spawnSeed,
       minimumSpawnSeparation: scenario.minimumSpawnSeparation,
       communicationRangeKm: scenario.communicationRangeKm,
+      minimumTickIntervalMinutes: scenario.minimumTickIntervalMinutes,
+      maximumTickIntervalMinutes: scenario.maximumTickIntervalMinutes,
       patientZeroAgentId: scenario.patientZeroAgentId,
       roster: scenario.roster,
       modelConfiguration: scenario.modelConfiguration,
@@ -2496,6 +2217,36 @@ function WorldSetupPanel({
                 setDraft({
                   ...draft,
                   communicationRangeKm: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label>
+            Minimum virtual minutes per tick
+            <input
+              type="number"
+              min="1"
+              max="60"
+              value={draft.minimumTickIntervalMinutes}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  minimumTickIntervalMinutes: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label>
+            Maximum virtual minutes per tick
+            <input
+              type="number"
+              min="1"
+              max="60"
+              value={draft.maximumTickIntervalMinutes}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  maximumTickIntervalMinutes: Number(event.target.value),
                 })
               }
             />
@@ -3430,8 +3181,9 @@ function AgentRoster({
   onFollowTurnChange: (follow: boolean) => void;
   onSelect: (agentId: AgentId) => void;
 }) {
-  const followedAgentId = snapshot.activeAgentId ?? snapshot.nextAgentId;
-  const followedLabel = snapshot.activeAgentId ? 'Acting' : 'Next';
+  const followedAgentId =
+    snapshot.turns.at(-1)?.agentId ?? snapshot.world.agents[0]!.id;
+  const followedLabel = 'Latest';
   const rowRefs = useRef(new Map<AgentId, HTMLButtonElement>());
 
   useEffect(() => {
@@ -3451,7 +3203,7 @@ function AgentRoster({
             checked={followTurn}
             onChange={(event) => onFollowTurnChange(event.target.checked)}
           />
-          <span>Follow turn</span>
+          <span>Follow latest</span>
         </label>
       </div>
       {snapshot.world.agents.map((agent) => {
@@ -3549,6 +3301,7 @@ function PrivateComms({
     .filter(
       (turn) =>
         turn.outcome !== 'provider-error' &&
+        turn.outcome !== 'lost-tick' &&
         turn.outcome !== 'operator-skipped' &&
         turn.communicationResult.requested &&
         !turn.communicationResult.accepted &&
@@ -3602,6 +3355,7 @@ function PrivateComms({
             const turn = snapshot.turns.find(
               (candidate) =>
                 candidate.outcome !== 'provider-error' &&
+                candidate.outcome !== 'lost-tick' &&
                 candidate.outcome !== 'operator-skipped' &&
                 candidate.communicationResult.requested &&
                 candidate.communicationResult.accepted &&
@@ -3671,6 +3425,7 @@ function PrivateComms({
             {rejections.map((turn) => {
               if (
                 turn.outcome === 'provider-error' ||
+                turn.outcome === 'lost-tick' ||
                 turn.outcome === 'operator-skipped' ||
                 !turn.communicationResult.requested ||
                 turn.communicationResult.accepted
@@ -3814,6 +3569,7 @@ function PublicWorldChat({
                 const turnNumber = turns.find(
                   (turn) =>
                     turn.outcome !== 'provider-error' &&
+                    turn.outcome !== 'lost-tick' &&
                     turn.outcome !== 'operator-skipped' &&
                     turn.communicationResult.requested &&
                     turn.communicationResult.accepted &&
@@ -3943,7 +3699,10 @@ function AlliancePanel({ snapshot }: { snapshot: SimulationSnapshot }) {
                   ({ id }) => id === proposal.recipientAgentId,
                 )?.name
               }
-              ; expires after turn {proposal.expirationTurn}
+              ; expires after{' '}
+              {proposal.expirationTick === undefined
+                ? `legacy turn ${proposal.expirationTurn}`
+                : `tick ${proposal.expirationTick}`}
             </li>
           ))}
         </ol>
@@ -4140,7 +3899,10 @@ function AgentInspector({
                   ({ id }) => id === proposal.recipientAgentId,
                 )?.name
               }
-              ; expires after turn {proposal.expirationTurn}
+              ; expires after{' '}
+              {proposal.expirationTick === undefined
+                ? `legacy turn ${proposal.expirationTurn}`
+                : `tick ${proposal.expirationTick}`}
             </li>
           ))}
         </ol>
@@ -4221,6 +3983,7 @@ function AgentInspector({
             const turnNumber = turns.find(
               (turn) =>
                 turn.outcome !== 'provider-error' &&
+                turn.outcome !== 'lost-tick' &&
                 turn.outcome !== 'operator-skipped' &&
                 turn.communicationResult.requested &&
                 turn.communicationResult.accepted &&
@@ -4361,6 +4124,7 @@ function AgentInspector({
             {latestTurn.outcome}
           </p>
           {latestTurn.outcome !== 'provider-error' &&
+          latestTurn.outcome !== 'lost-tick' &&
           latestTurn.outcome !== 'operator-skipped' ? (
             <>
               <p>
@@ -4463,8 +4227,9 @@ function AgentInspector({
           <details>
             <summary>Latest structured observation</summary>
             <p className="observation-note">
-              Immutable input supplied for turn {latestTurn.turnNumber}. It is
-              not rewritten when the active personality changes.
+              Immutable input supplied for tick{' '}
+              {latestTurn.tickNumber ?? 'legacy'} record {latestTurn.turnNumber}
+              . It is not rewritten when the active personality changes.
             </p>
             {latestTurn.observation.personality !== agent.personality && (
               <p className="observation-difference">
@@ -4625,8 +4390,20 @@ function ExperimentExportPanel({
   const [fromTurn, setFromTurn] = useState(1);
   const [toTurn, setToTurn] = useState(120);
   const [outcomes, setOutcomes] = useState<
-    Array<'accepted' | 'rejected' | 'provider-error' | 'operator-skipped'>
-  >(['accepted', 'rejected', 'provider-error', 'operator-skipped']);
+    Array<
+      | 'accepted'
+      | 'rejected'
+      | 'lost-tick'
+      | 'provider-error'
+      | 'operator-skipped'
+    >
+  >([
+    'accepted',
+    'rejected',
+    'lost-tick',
+    'provider-error',
+    'operator-skipped',
+  ]);
   const [actions, setActions] = useState<
     Array<'move' | 'infect' | 'capture' | 'wait'>
   >(['move', 'infect', 'capture', 'wait']);
@@ -4956,7 +4733,13 @@ function ExperimentExportPanel({
       )}
       <FilterChecks
         label="Outcomes"
-        options={['accepted', 'rejected', 'provider-error', 'operator-skipped']}
+        options={[
+          'accepted',
+          'rejected',
+          'lost-tick',
+          'provider-error',
+          'operator-skipped',
+        ]}
         selected={outcomes}
         onToggle={(value) => setOutcomes(toggle(outcomes, value))}
       />
@@ -5273,6 +5056,8 @@ function formatTurn(
   turn: AgentTurnRecord,
   agents: SimulationSnapshot['world']['agents'],
 ) {
+  if (turn.outcome === 'lost-tick')
+    return `Lost tick ${turn.tickNumber}: ${turn.failure.code}`;
   if (turn.outcome === 'provider-error')
     return `Provider failure · ${turn.failure.message}`;
   if (turn.outcome === 'operator-skipped')

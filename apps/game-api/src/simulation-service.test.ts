@@ -7,6 +7,7 @@ import {
   type ProviderDecision,
 } from '@hexzero/agent-runtime';
 import {
+  AGENT_DECISION_CONTRACT_VERSION,
   PERSONALITY_MAX_LENGTH,
   agentIdSchema,
   agentTurnRecordSchema,
@@ -82,6 +83,405 @@ function exportRequest(level: 'minimal' | 'standard' | 'full-safe' | 'custom') {
 }
 
 describe('SimulationService', () => {
+  it('freezes all observations, dispatches concurrently, and commits one complete tick', async () => {
+    const observations: AgentObservation[] = [];
+    const deadlines = new Set<number | undefined>();
+    let active = 0;
+    let maximumActive = 0;
+    const simulation = service({
+      mode: 'scripted-test',
+      model: 'deterministic-script',
+      configured: true,
+      async decide(observation, _model, options): Promise<ProviderDecision> {
+        observations.push(structuredClone(observation));
+        deadlines.add(options?.deadlineAtMs);
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await Promise.resolve();
+        active -= 1;
+        return {
+          decision: {
+            worldAction: { type: 'wait' },
+            communication: {
+              channel: 'public',
+              message: `hello-${observation.agentName}`,
+            },
+            summary: 'Wait and report.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'deterministic-script',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    });
+
+    const records = await simulation.executeNextTick();
+    expect(records).toHaveLength(8);
+    expect(maximumActive).toBeGreaterThan(1);
+    expect(deadlines.size).toBe(1);
+    expect(new Set(records.map(({ tickNumber }) => tickNumber))).toEqual(
+      new Set([1]),
+    );
+    expect(
+      observations.every(
+        ({ recentPublicMessages }) => recentPublicMessages.length === 0,
+      ),
+    ).toBe(true);
+    expect(simulation.getSnapshot()).toMatchObject({
+      tickNumber: 1,
+      turnNumber: 8,
+    });
+  });
+
+  it('keeps resolution records and world events independent of provider completion order', async () => {
+    const makeProvider = (reverse: boolean): AgentProvider => ({
+      mode: 'scripted-test',
+      model: 'deterministic-script',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        const index = DEVELOPMENT_AGENT_BLUEPRINTS.findIndex(
+          ({ id }) => id === observation.agentId,
+        );
+        for (let count = 0; count < (reverse ? 7 - index : index); count += 1)
+          await Promise.resolve();
+        return {
+          decision: {
+            worldAction: { type: 'wait' },
+            communication: {
+              channel: 'public',
+              message: observation.agentName,
+            },
+            summary: 'Wait.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'deterministic-script',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    });
+    const forward = service(makeProvider(false));
+    const reverse = service(makeProvider(true));
+    const forwardRecords = await forward.executeNextTick();
+    const reverseRecords = await reverse.executeNextTick();
+    expect(
+      reverseRecords.map(({ agentId, outcome }) => ({ agentId, outcome })),
+    ).toEqual(
+      forwardRecords.map(({ agentId, outcome }) => ({ agentId, outcome })),
+    );
+    expect(reverse.getSnapshot().world).toEqual(forward.getSnapshot().world);
+  });
+
+  it('resolves same-tick diplomacy contention in deterministic phase order', async () => {
+    const recipientId = DEVELOPMENT_AGENT_BLUEPRINTS[0]!.id;
+    const simulation = service({
+      mode: 'scripted-test',
+      model: 'deterministic-script',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        return {
+          decision: {
+            worldAction: { type: 'wait' },
+            ...(observation.agentId === recipientId
+              ? {}
+              : {
+                  diplomacy: { type: 'propose-alliance' as const, recipientId },
+                }),
+            summary: 'Propose.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'deterministic-script',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    });
+    const records = await simulation.executeNextTick();
+    type CompletedRecord = Exclude<
+      AgentTurnRecord,
+      { outcome: 'provider-error' | 'lost-tick' | 'operator-skipped' }
+    >;
+    const completed = records.filter(
+      (record): record is CompletedRecord =>
+        record.outcome !== 'lost-tick' &&
+        record.outcome !== 'provider-error' &&
+        record.outcome !== 'operator-skipped',
+    );
+    const requested = completed.filter(
+      (record) => record.diplomacyResult.requested,
+    );
+    expect(
+      requested.some(
+        (record) =>
+          record.diplomacyResult.requested && record.diplomacyResult.accepted,
+      ),
+    ).toBe(true);
+    expect(
+      requested.some(
+        (record) =>
+          record.diplomacyResult.requested && !record.diplomacyResult.accepted,
+      ),
+    ).toBe(true);
+    expect(
+      simulation.getSnapshot().world.pendingAllianceProposals,
+    ).toHaveLength(1);
+  });
+
+  it('records one provider failure as a lost tick while committing sibling decisions', async () => {
+    let failingAgent: string | undefined;
+    const simulation = service({
+      mode: 'scripted-test',
+      model: 'deterministic-script',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        failingAgent ??= observation.agentId;
+        if (observation.agentId === failingAgent)
+          throw new AgentProviderError({
+            code: 'timeout',
+            message: 'deadline',
+            retryable: false,
+            latencyMs: 37,
+          });
+        return {
+          decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'deterministic-script',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    });
+    const records = await simulation.executeNextTick();
+    expect(
+      records.filter(({ outcome }) => outcome === 'lost-tick'),
+    ).toHaveLength(1);
+    expect(
+      records.filter(({ outcome }) => outcome === 'accepted'),
+    ).toHaveLength(7);
+    expect(simulation.getSnapshot().tickNumber).toBe(1);
+    const exported = simulation.generateExperimentExport({
+      ...exportRequest('minimal'),
+      outcomes: [
+        'accepted',
+        'rejected',
+        'lost-tick',
+        'provider-error',
+        'operator-skipped',
+      ],
+    });
+    expect(exported.tickSummaries).toEqual([
+      expect.objectContaining({
+        providerCallCount: 8,
+        aggregateDecisionLatencyMs: 37,
+        maximumDecisionLatencyMs: 37,
+        lostTicks: 1,
+      }),
+    ]);
+  });
+
+  it('cancels a simultaneous tick atomically without advancing virtual time', async () => {
+    let started!: () => void;
+    const requestStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const simulation = service({
+      mode: 'scripted-test',
+      model: 'deterministic-script',
+      configured: true,
+      async decide(_observation, _model, options): Promise<ProviderDecision> {
+        started();
+        await new Promise<void>((resolve) =>
+          options?.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+        throw new AgentProviderError({
+          code: 'cancelled',
+          message: 'cancelled',
+          retryable: false,
+        });
+      },
+    });
+    const before = simulation.getSnapshot();
+    const pending = simulation.executeNextTick();
+    await requestStarted;
+    simulation.cancelCurrentRequest();
+    await expect(pending).rejects.toBeInstanceOf(SimulationTurnCancelledError);
+    expect(simulation.getSnapshot()).toMatchObject({
+      tickNumber: before.tickNumber,
+      turnNumber: before.turnNumber,
+      virtualTime: before.virtualTime,
+      turns: before.turns,
+      world: before.world,
+    });
+  });
+
+  it('dispatches per-agent model and reasoning overrides for a tick', async () => {
+    const dispatched: Array<{
+      agentId: string;
+      model: string;
+      reasoning: string | undefined;
+    }> = [];
+    const simulation = service({
+      mode: 'scripted-test',
+      configured: true,
+      async decide(observation, model, options): Promise<ProviderDecision> {
+        dispatched.push({
+          agentId: observation.agentId,
+          model,
+          reasoning: options?.reasoningProfile,
+        });
+        return {
+          decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
+          metadata: {
+            provider: 'scripted-test',
+            model,
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    });
+    simulation.setCompatibleModels(compatibleModels);
+    const overriddenAgent = simulation.getSnapshot().world.agents[0]!.id;
+    simulation.updateModelConfiguration({
+      globalModelId: compatibleModels[0]!.id,
+      globalReasoningProfile: 'low',
+      overrides: [
+        {
+          agentId: overriddenAgent,
+          modelId: compatibleModels[1]!.id,
+          reasoningProfile: 'high',
+        },
+      ],
+    });
+    await simulation.executeNextTick();
+    expect(
+      dispatched.find(({ agentId }) => agentId === overriddenAgent),
+    ).toMatchObject({
+      model: compatibleModels[1]!.id,
+      reasoning: 'high',
+    });
+    expect(
+      dispatched
+        .filter(({ agentId }) => agentId !== overriddenAgent)
+        .every(
+          ({ model, reasoning }) =>
+            model === compatibleModels[0]!.id && reasoning === 'low',
+        ),
+    ).toBe(true);
+  });
+
+  it('prevents mixing legacy sequential records and simultaneous ticks in either direction', async () => {
+    const legacy = service(
+      new ScriptedAgentProvider([
+        { worldAction: { type: 'wait' }, summary: 'Legacy wait.' },
+      ]),
+    );
+    await legacy.executeNextTurn();
+    await expect(legacy.executeNextTick()).rejects.toBeInstanceOf(
+      SimulationConflictError,
+    );
+    expect(
+      legacy.generateExperimentExport(exportRequest('minimal')).schemaVersion,
+    ).toBe(9);
+
+    const tick = service(
+      new ScriptedAgentProvider(
+        Array.from({ length: 8 }, () => ({
+          worldAction: { type: 'wait' as const },
+          summary: 'Tick wait.',
+        })),
+      ),
+    );
+    await tick.executeNextTick();
+    await expect(tick.executeNextTurn()).rejects.toBeInstanceOf(
+      SimulationConflictError,
+    );
+    await expect(tick.retryFailedTurn()).rejects.toBeInstanceOf(
+      SimulationConflictError,
+    );
+    expect(() => tick.skipFailedTurn()).toThrow(SimulationConflictError);
+    expect(
+      tick.generateExperimentExport(exportRequest('minimal')).schemaVersion,
+    ).toBe(10);
+    expect(
+      tick.generateExperimentExport(exportRequest('minimal')).experiment
+        .decisionContractVersion,
+    ).toBe(AGENT_DECISION_CONTRACT_VERSION);
+  });
+
+  it('reproduces tick order and interval after reset and retains only complete tick groups', async () => {
+    const provider: AgentProvider = {
+      mode: 'scripted-test',
+      model: 'deterministic-script',
+      configured: true,
+      async decide(): Promise<ProviderDecision> {
+        return {
+          decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'deterministic-script',
+            latencyMs: 0,
+            costCredits: 0,
+          },
+        };
+      },
+    };
+    const simulation = new SimulationService({
+      provider,
+      now,
+      createEventId,
+      experimentRetentionLimit: 10,
+    });
+    await simulation.executeNextTick();
+    const first = simulation.getSnapshot();
+    await simulation.executeNextTick();
+    const retained = simulation.generateExperimentExport({
+      ...exportRequest('minimal'),
+      outcomes: [
+        'accepted',
+        'rejected',
+        'lost-tick',
+        'provider-error',
+        'operator-skipped',
+      ],
+    });
+    expect(retained.turns).toHaveLength(8);
+    expect(new Set(retained.turns.map(({ tickNumber }) => tickNumber))).toEqual(
+      new Set([2]),
+    );
+    expect(experimentExportDocumentSchema.safeParse(retained).success).toBe(
+      true,
+    );
+    expect(
+      experimentExportDocumentSchema.safeParse({
+        ...retained,
+        tickSummaries: retained.tickSummaries?.map((summary) => ({
+          ...summary,
+          intervalMinutes: summary.intervalMinutes + 1,
+        })),
+      }).success,
+    ).toBe(false);
+
+    simulation.reset();
+    await simulation.executeNextTick();
+    expect(simulation.getSnapshot()).toMatchObject({
+      resolutionOrder: first.resolutionOrder,
+      lastTickIntervalMinutes: first.lastTickIntervalMinutes,
+      virtualTime: first.virtualTime,
+    });
+  });
+
   it('preserves the default and custom physical communication range', () => {
     const simulation = service(
       new ScriptedAgentProvider([
@@ -144,8 +544,10 @@ describe('SimulationService', () => {
     ).not.toMatch(/provider|credential|pendingDecision|gps|future/i);
     if (
       directive.outcome === 'provider-error' ||
+      directive.outcome === 'lost-tick' ||
       directive.outcome === 'operator-skipped' ||
       reply.outcome === 'provider-error' ||
+      reply.outcome === 'lost-tick' ||
       reply.outcome === 'operator-skipped'
     )
       throw new Error('Expected completed Patient Zero communication turns.');
@@ -219,6 +621,7 @@ describe('SimulationService', () => {
     expect(turn.outcome).toBe('accepted');
     if (
       turn.outcome === 'provider-error' ||
+      turn.outcome === 'lost-tick' ||
       turn.outcome === 'operator-skipped'
     )
       throw new Error('Expected a completed engine decision.');
@@ -1605,6 +2008,7 @@ describe('SimulationService', () => {
     });
     if (
       turn.outcome === 'provider-error' ||
+      turn.outcome === 'lost-tick' ||
       turn.outcome === 'operator-skipped' ||
       !turn.communicationResult.requested ||
       turn.communicationResult.accepted
@@ -1653,7 +2057,9 @@ describe('SimulationService', () => {
     ];
     expect(
       turns.map((turn) =>
-        turn.outcome === 'provider-error' || turn.outcome === 'operator-skipped'
+        turn.outcome === 'provider-error' ||
+        turn.outcome === 'lost-tick' ||
+        turn.outcome === 'operator-skipped'
           ? undefined
           : turn.communicationResult,
       ),

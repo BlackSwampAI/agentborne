@@ -265,4 +265,15 @@ export const migrations: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    description: 'schema-v10 simultaneous tick attribution',
+    sql: `
+      ALTER TABLE turns ADD COLUMN tick_number INTEGER;
+      ALTER TABLE turns ADD COLUMN tick_position INTEGER;
+      ALTER TABLE turns ADD COLUMN virtual_time TEXT;
+      ALTER TABLE turns ADD COLUMN tick_interval_minutes INTEGER;
+      CREATE INDEX turns_experiment_tick_idx ON turns(experiment_id, tick_number, tick_position);
+    `,
+  },
 ] as const;
