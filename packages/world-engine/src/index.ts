@@ -9,7 +9,6 @@ import {
 } from 'h3-js';
 import {
   ALLIANCE_COLOR_PALETTE,
-  ALLIANCE_PROPOSAL_DURATION_TURNS,
   DEVELOPMENT_WORLD_CONFIG,
   DEFAULT_COMMUNICATION_RANGE_KM,
   NEUTRAL_AGENT_COLOR,
@@ -510,7 +509,7 @@ export function applyDiplomacy(
       recipientAgentId: recipient.id,
       proposerAllianceId: proposerAlliance?.id ?? null,
       originatingTurn: turnNumber,
-      expirationTurn: turnNumber + ALLIANCE_PROPOSAL_DURATION_TURNS,
+      expirationTurn: turnNumber + state.agents.size * 2,
     };
     proposals.set(proposal.id, proposal);
     const event: AllianceEvent = {

@@ -265,7 +265,7 @@ describe('agent observation and decision schemas', () => {
         recipientAgentId: scoreboard[1]!.agentId,
         proposerAllianceId: null,
         originatingTurn: 1,
-        expirationTurn: 9,
+        expirationTurn: 17,
       }).success,
     ).toBe(true);
     expect(

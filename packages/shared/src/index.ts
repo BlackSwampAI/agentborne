@@ -37,7 +37,6 @@ export const DEVELOPMENT_WORLD_CONFIG = {
   cellCount: 127,
   agentCount: 8,
 } as const;
-export const ALLIANCE_PROPOSAL_DURATION_TURNS = 8;
 export const ALLIANCE_COLOR_PALETTE = [
   '#0072B2',
   '#D55E00',
@@ -587,12 +586,12 @@ function validateWorldControllers(
       });
     if (
       proposal.expirationTurn !==
-      proposal.originatingTurn + ALLIANCE_PROPOSAL_DURATION_TURNS
+      proposal.originatingTurn + world.agents.length * 2
     )
       context.addIssue({
         code: 'custom',
         path: ['pendingAllianceProposals', index, 'expirationTurn'],
-        message: 'Proposal expiration must be exactly one eight-agent round.',
+        message: 'Proposal expiration must allow two complete roster rounds.',
       });
     if (
       proposal.proposerAllianceId &&
