@@ -1,6 +1,13 @@
 # Security and trust boundaries
 
-Public messages are untrusted claims visible to all agents and classified for future player visibility. Direct and alliance messages are player-hidden. Only participants receive them in agent observations; the omniscient Private comms feed is restricted to World Lab operator contracts. Messages never contain raw reasoning, pending decisions, credentials, player GPS, or fabricated threat evidence.
+Public messages are untrusted claims visible to all agents and classified for future player visibility. Direct, alliance, and Zero messages are player-hidden. Only participants receive them in agent observations; the omniscient Private comms feed is restricted to World Lab operator contracts. Only the designated Patient Zero may send a Zero broadcast. Its sender role is authoritative but its strategy remains advisory. Messages never contain raw reasoning, pending decisions, credentials, player GPS, or fabricated threat evidence.
+
+Patient Zero's global view is bounded to active agent identity/current cells,
+allowlisted behavior attribution, territory/alliance totals, proposals, and
+recent authoritative events. It never serializes the complete world, future
+turn information, provider payloads, credentials, or live player GPS. Direct
+range bypass is engine-authoritative and applies only when Patient Zero is one
+endpoint; invalid channel/recipient combinations do not mutate state.
 
 ## Secrets and deployment
 

@@ -52,6 +52,15 @@ The Game API is authoritative for session personality configuration. World reset
 
 ## Turn flow
 
+An applied scenario may designate one Patient Zero coordinator. The service
+adds a bounded global strategic view only to that agent's immutable
+observation; other observations retain their local/alliance bounds. The engine
+alone authorizes player-hidden Zero broadcasts and Patient-Zero-endpoint direct
+range bypass. Patient Zero receives no extra movement, action, infection,
+capture, ownership, or alliance authority. Current execution remains
+sequential, with committed-event visibility; future simultaneous ticks must
+use one frozen observation snapshot.
+
 Recoverable provider, parsing, schema, and exceptional post-provider validation
 failures are held as a server-owned pending logical turn. Ordinary
 engine-authoritative action rejection remains a completed `rejected` outcome.

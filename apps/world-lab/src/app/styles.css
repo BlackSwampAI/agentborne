@@ -440,6 +440,22 @@ h2 {
     0 2px 8px #000b;
   transform: scale(1.12);
 }
+.agent-marker.patient-zero {
+  outline: 3px double #fff5d8;
+  outline-offset: 2px;
+}
+.patient-zero-badge {
+  display: inline-flex;
+  margin-left: 0.4rem;
+  padding: 0.08rem 0.35rem;
+  border: 1px solid #fff5d8;
+  border-radius: 999px;
+  color: #fff5d8;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
 .map-caption {
   position: absolute;
   inset: auto 0 0;

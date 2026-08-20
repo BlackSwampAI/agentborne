@@ -97,6 +97,81 @@ describe('SimulationService', () => {
     expect(applied.scenario.communicationRangeKm).toBe(7.5);
   });
 
+  it('gives only Patient Zero bounded global awareness and delivers a Zero directive plus global reply', async () => {
+    const seen: AgentObservation[] = [];
+    const simulation = service({
+      mode: 'scripted-test',
+      model: 'deterministic-script',
+      configured: true,
+      async decide(observation): Promise<ProviderDecision> {
+        seen.push(structuredClone(observation));
+        return {
+          decision: {
+            worldAction: { type: 'wait' },
+            communication: observation.patientZero.isPatientZero
+              ? { channel: 'zero', message: 'Take separate infection fronts.' }
+              : {
+                  channel: 'direct',
+                  recipientId: observation.patientZero.agentId!,
+                  message: 'Taking the eastern front.',
+                },
+            summary: 'Coordinate while waiting.',
+          },
+          metadata: {
+            provider: 'scripted-test',
+            model: 'deterministic-script',
+            latencyMs: 0,
+          },
+        };
+      },
+    });
+    const setup = defaultWorldSetupRequest();
+    const patientZeroId = setup.roster[0]!.id;
+    simulation.applyWorldSetup({
+      ...setup,
+      patientZeroAgentId: patientZeroId,
+      modelConfiguration: {
+        ...setup.modelConfiguration,
+        globalModelId: 'deterministic-script',
+      },
+    });
+    const directive = await simulation.executeNextTurn();
+    const reply = await simulation.executeNextTurn();
+    expect(directive.observation.patientZeroGlobalView?.agents).toHaveLength(8);
+    expect(reply.observation.patientZeroGlobalView).toBeNull();
+    expect(
+      JSON.stringify(directive.observation.patientZeroGlobalView),
+    ).not.toMatch(/provider|credential|pendingDecision|gps|future/i);
+    if (
+      directive.outcome === 'provider-error' ||
+      directive.outcome === 'operator-skipped' ||
+      reply.outcome === 'provider-error' ||
+      reply.outcome === 'operator-skipped'
+    )
+      throw new Error('Expected completed Patient Zero communication turns.');
+    expect(directive.communicationResult).toMatchObject({
+      accepted: true,
+      event: { channel: 'zero', recipientIds: expect.any(Array) },
+    });
+    expect(reply.communicationResult).toMatchObject({
+      accepted: true,
+      event: { channel: 'direct', recipientId: patientZeroId },
+    });
+    expect(reply.observation.recentZeroMessages).toHaveLength(1);
+    expect(seen).toHaveLength(2);
+    expect(simulation.getSnapshot().experiment.metrics.aggregate).toMatchObject(
+      {
+        zeroBroadcastsRequested: 1,
+        zeroBroadcastsDelivered: 1,
+        zeroRecipientDeliveries: 7,
+        uniqueZeroDirectiveRecipients: 7,
+        directRepliesToPatientZero: 1,
+        uniquePatientZeroRepliers: 1,
+        firstZeroDirectiveTurn: 1,
+      },
+    );
+  });
+
   it('reproduces move ordering for identical inputs and varies it across agents', async () => {
     const provider = () =>
       new ScriptedAgentProvider(

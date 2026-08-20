@@ -21,4 +21,11 @@ World Lab stops automatic playback and disables Start when all 61 cells are infe
 
 ## Consequences
 
+The Patient Zero experiment adds bounded counts for requested, delivered, and
+rejected Zero broadcasts, recipient deliveries and unique recipients, direct
+replies and unique repliers, and first-directive turn. Scenario, resolved
+model, personality, strategy, directive events, and subsequent action events
+remain separately attributable without claiming semantic obedience or causal
+compliance.
+
 Operators can inspect cost and safely share compact or rich experiment records without altering inference usage. Long experiments disclose loss beyond 5,000 retained records, and there is no recovery after reset or process restart. There is no database, historical experiment list, cloud sharing, automatic AI submission, hard budget, or account-balance integration.

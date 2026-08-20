@@ -6,6 +6,7 @@ import {
 } from '@agentborne/agent-runtime';
 import {
   agentIdSchema,
+  appliedScenarioSchema,
   assignBehavior,
   behaviorConfigurationSchema,
   agentObservationSchema,
@@ -24,6 +25,8 @@ import {
   RECENT_PUBLIC_MESSAGE_LIMIT,
   RECENT_CONTROL_CHANGE_LIMIT,
   RECENT_ALLIANCE_EVENT_LIMIT,
+  RECENT_ZERO_MESSAGE_LIMIT,
+  RECENT_ZERO_STRATEGIC_EVENT_LIMIT,
   PERSONALITY_MAX_LENGTH,
   OPENROUTER_PROVIDER_TIMEOUT_MS,
   OPENROUTER_429_FALLBACK_BACKOFF_MS,
@@ -595,6 +598,7 @@ export class SimulationService {
         legacyConfiguration,
       );
       this.#modelConfiguration = legacyConfiguration;
+      this.#scenario = { ...this.#scenario, patientZeroAgentId: null };
       return {
         snapshot: this.getSnapshot(),
         legacy: true,
@@ -614,7 +618,19 @@ export class SimulationService {
         'invalid_model_configuration',
         'The imported model assignment is invalid.',
       );
+    const importedPatientZero =
+      version === 9 &&
+      typeof experiment?.scenario === 'object' &&
+      experiment.scenario !== null
+        ? (appliedScenarioSchema.safeParse(experiment.scenario).data
+            ?.patientZeroAgentId ?? null)
+        : null;
     const knownAgents = new Set(this.#state.agents.keys());
+    if (importedPatientZero && !knownAgents.has(importedPatientZero))
+      throw new SimulationValidationError(
+        'unknown_agent',
+        'The imported Patient Zero designation references an unknown agent.',
+      );
     if (
       configuration.data.overrides.some(
         ({ agentId }) => !knownAgents.has(agentId),
@@ -658,6 +674,10 @@ export class SimulationService {
       importedConfiguration,
     );
     this.#modelConfiguration = importedConfiguration;
+    this.#scenario = {
+      ...this.#scenario,
+      patientZeroAgentId: importedPatientZero,
+    };
     return {
       snapshot: this.getSnapshot(),
       legacy: false,
@@ -1072,6 +1092,7 @@ export class SimulationService {
         createAllianceId: this.#createAllianceId,
         createProposalId: this.#createProposalId,
         communicationRangeKm: this.#scenario.communicationRangeKm,
+        patientZeroAgentId: this.#scenario.patientZeroAgentId,
       };
       const appliedAction = applyWorldAction(
         preActionState,
@@ -1422,6 +1443,7 @@ export class SimulationService {
       }));
     const captureEligibility = getCaptureEligibility(this.#state, agent.id);
     const actingAlliance = getAgentAlliance(this.#state, agent.id);
+    const patientZeroAgentId = this.#scenario.patientZeroAgentId;
     const territory = this.#territoryScoreboard();
     const nearbyAgents = [...this.#state.agents.values()]
       .filter((candidate) => candidate.id !== agent.id)
@@ -1444,16 +1466,26 @@ export class SimulationService {
             ?.controlledCellCount ?? 0,
       }))
       .filter(
-        ({ distanceKm, allianceRelationship }) =>
+        ({ id, distanceKm, allianceRelationship }) =>
           allianceRelationship === 'allied' ||
-          distanceKm <= this.#scenario.communicationRangeKm,
+          distanceKm <= this.#scenario.communicationRangeKm ||
+          id === patientZeroAgentId ||
+          agent.id === patientZeroAgentId,
       )
       .map((entry) => ({
         ...entry,
         directMessageLegal:
-          entry.distanceKm <= this.#scenario.communicationRangeKm,
+          entry.distanceKm <= this.#scenario.communicationRangeKm ||
+          entry.id === patientZeroAgentId ||
+          agent.id === patientZeroAgentId,
       }))
-      .sort((a, b) => a.distanceKm - b.distanceKm || a.id.localeCompare(b.id))
+      .sort(
+        (a, b) =>
+          Number(b.id === patientZeroAgentId) -
+            Number(a.id === patientZeroAgentId) ||
+          a.distanceKm - b.distanceKm ||
+          a.id.localeCompare(b.id),
+      )
       .slice(0, 8);
     const recentEvents = this.#state.events
       .filter(
@@ -1545,6 +1577,25 @@ export class SimulationService {
           occurredAt: event.occurredAt,
         };
       });
+    const recentZeroMessages = this.#state.events
+      .filter(
+        (event): event is Extract<WorldEvent, { type: 'zero-message-sent' }> =>
+          event.type === 'zero-message-sent' &&
+          (event.agentId === agent.id || event.recipientIds.includes(agent.id)),
+      )
+      .slice(-RECENT_ZERO_MESSAGE_LIMIT)
+      .map((event) => {
+        const sender = this.#state.agents.get(event.agentId);
+        if (!sender) throw new Error('A Zero-message sender does not exist.');
+        return {
+          eventId: event.id,
+          senderId: sender.id,
+          senderName: sender.name,
+          recipientCount: event.recipientIds.length,
+          message: event.message,
+          occurredAt: event.occurredAt,
+        };
+      });
     const recentControlChanges = this.#state.events
       .filter(
         (event): event is Extract<WorldEvent, { type: 'hex-captured' }> =>
@@ -1631,6 +1682,7 @@ export class SimulationService {
         alliance: actingAlliance
           ? { available: true, allianceId: actingAlliance.id }
           : { available: false, allianceId: null },
+        zero: { available: agent.id === patientZeroAgentId },
       },
       adjacentCells,
       nearbyAgents,
@@ -1638,6 +1690,54 @@ export class SimulationService {
       recentPublicMessages,
       recentDirectMessages,
       recentAllianceMessages,
+      recentZeroMessages,
+      patientZero: {
+        agentId: patientZeroAgentId,
+        agentName:
+          (patientZeroAgentId
+            ? this.#state.agents.get(patientZeroAgentId)?.name
+            : null) ?? null,
+        isPatientZero: agent.id === patientZeroAgentId,
+        directRangeBypass: patientZeroAgentId !== null,
+      },
+      patientZeroGlobalView:
+        agent.id === patientZeroAgentId
+          ? {
+              agents: [...this.#state.agents.values()].map((candidate) => ({
+                id: candidate.id,
+                name: candidate.name,
+                currentCell: candidate.currentCell,
+                allianceId:
+                  getAgentAlliance(this.#state, candidate.id)?.id ?? null,
+                controlledCellCount:
+                  territory.find(({ agentId: id }) => id === candidate.id)
+                    ?.controlledCellCount ?? 0,
+                personality: candidate.personality,
+                strategyId: this.#behaviorFor(candidate.id).strategyId,
+              })),
+              individualTerritory: territory,
+              allianceTerritory: this.#allianceTerritorySummaries(),
+              alliances: [...(this.#state.alliances?.values() ?? [])],
+              activeAllianceProposals: [
+                ...(this.#state.pendingAllianceProposals?.values() ?? []),
+              ],
+              recentStrategicEvents: this.#state.events
+                .filter(isAllianceEvent)
+                .slice(-RECENT_ZERO_STRATEGIC_EVENT_LIMIT)
+                .map((event) => ({
+                  event,
+                  summary: summarizeAllianceEvent(event, this.#state),
+                })),
+              recentTerritoryChanges: this.#state.events
+                .filter(
+                  (
+                    event,
+                  ): event is Extract<WorldEvent, { type: 'hex-captured' }> =>
+                    event.type === 'hex-captured',
+                )
+                .slice(-RECENT_CONTROL_CHANGE_LIMIT),
+            }
+          : null,
       territoryScoreboard: this.#territoryScoreboard(),
       actingAllianceId: getAgentAlliance(this.#state, agent.id)?.id ?? null,
       actingAlliance:

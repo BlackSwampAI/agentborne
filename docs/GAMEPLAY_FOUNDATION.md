@@ -1,5 +1,14 @@
 # Gameplay Foundation
 
+## Current experimental Patient Zero slice
+
+One scenario roster agent may coordinate global infection strategy through a
+bounded authoritative overview, private advisory directives, and ordinary
+direct replies. The role changes information and communication only: it has no
+extra movement or world-action power, cannot force compliance, cannot see live
+player GPS, and does not implement capture succession. It operates under the
+current sequential turn model until the later simultaneous-tick milestone.
+
 > **Status: accepted product and roadmap direction, not an implementation claim.**
 > This document records foundational decisions for future World Lab and Player
 > Mode milestones. It does not mean these systems exist today, and it does not

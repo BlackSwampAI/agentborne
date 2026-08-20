@@ -66,6 +66,7 @@ export interface EngineContext {
   createProposalId: () => string;
   now: () => string;
   communicationRangeKm: number;
+  patientZeroAgentId: AgentId | null;
 }
 
 export interface AppliedAction {
@@ -89,6 +90,7 @@ const defaultContext: EngineContext = {
   createProposalId: () => crypto.randomUUID(),
   now: () => new Date().toISOString(),
   communicationRangeKm: DEFAULT_COMMUNICATION_RANGE_KM,
+  patientZeroAgentId: null,
 };
 
 function rejected(
@@ -341,6 +343,29 @@ export function applyCommunication(
     };
   }
 
+  if (communication.channel === 'zero') {
+    if (resolvedContext.patientZeroAgentId !== agentId)
+      return communicationRejected(
+        state,
+        { ...base, channel: 'zero' },
+        'not-patient-zero',
+        'Only the designated Patient Zero may use the Zero channel.',
+      );
+    const event = {
+      ...base,
+      type: 'zero-message-sent' as const,
+      channel: 'zero' as const,
+      recipientIds: [...eligibilityState.agents.keys()].filter(
+        (id) => id !== agentId,
+      ),
+      playerVisible: false as const,
+    };
+    return {
+      state: { ...state, events: [...state.events, event] },
+      result: { requested: true, accepted: true, event },
+    };
+  }
+
   const actingAgent = eligibilityState.agents.get(agentId)!;
   const recipient = eligibilityState.agents.get(communication.recipientId);
   const distance = recipient
@@ -367,7 +392,14 @@ export function applyCommunication(
       'self-message',
       'An agent cannot message itself.',
     );
-  if (distance === null || distance > resolvedContext.communicationRangeKm)
+  const patientZeroEndpoint =
+    resolvedContext.patientZeroAgentId !== null &&
+    (agentId === resolvedContext.patientZeroAgentId ||
+      recipient.id === resolvedContext.patientZeroAgentId);
+  if (
+    distance === null ||
+    (!patientZeroEndpoint && distance > resolvedContext.communicationRangeKm)
+  )
     return communicationRejected(
       state,
       attempt,
@@ -1089,6 +1121,7 @@ export function defaultWorldSetupRequest(): WorldSetupRequest {
     spawnSeed: DEFAULT_SPAWN_SEED,
     minimumSpawnSeparation: 1,
     communicationRangeKm: DEFAULT_COMMUNICATION_RANGE_KM,
+    patientZeroAgentId: null,
     roster,
     modelConfiguration: {
       globalModelId: null,

@@ -2,6 +2,12 @@
 
 Agentborne is the working title for an agent-first geographic experiment. A configurable roster of model-backed agents moves, infects, captures contested territory, communicates, and conducts formal alliance diplomacy while the World Lab exposes every safe decision record.
 
+Scenarios may optionally designate one experimental Patient Zero coordinator.
+The role receives bounded global strategic information and can send private
+advisory directives, but remains subject to the same movement and world-action
+rules as every other agent. The universal flat provider contract is
+`text-flat-json-v3`; the objective remains `durable-influence-v2`.
+
 ## Workspace
 
 | Path                     | Responsibility                                                   |

@@ -228,6 +228,78 @@ describe('OpenRouterAgentProvider', () => {
     expect(request.messages[0]!.content).toContain('diplomacyType');
   });
 
+  it('guides Patient Zero to broadcast selectively with a specific target, action, and authoritative reason', () => {
+    const patientZeroObservation = agentObservationSchema.parse({
+      ...observation,
+      patientZero: {
+        agentId: observation.agentId,
+        agentName: observation.agentName,
+        isPatientZero: true,
+        directRangeBypass: true,
+      },
+    });
+    const guidance = buildOpenRouterRequest(patientZeroObservation, TEST_MODEL)
+      .messages[0]!.content;
+
+    expect(guidance).toContain(
+      'broadcast only when it reveals one specific, high-value coordination opportunity',
+    );
+    expect(guidance).toContain('otherwise choose communicationType "none"');
+    expect(guidance).toContain('TARGET: <named agent(s)>');
+    expect(guidance).toContain('ACTION: <specific recommendation>');
+    expect(guidance).toContain(
+      'REASON: <brief authoritative map or alliance fact>',
+    );
+    expect(guidance).toContain(
+      'prioritize the highest-value coordination problem',
+    );
+    expect(guidance).toContain(
+      'Never use Zero merely to narrate your own action',
+    );
+    expect(guidance).toContain('Never send motivational filler');
+    expect(guidance).toContain('keep expanding');
+    expect(guidance).toContain('great work');
+    expect(guidance).toContain('spread outward');
+    expect(guidance).toContain('build coalitions');
+    expect(guidance).toContain('Use only facts in this observation');
+    expect(guidance).toContain(
+      'Never invent player activity, danger, threats, captures, losses',
+    );
+    expect(guidance).toContain('Field agents retain autonomy');
+  });
+
+  it('guides addressed field agents toward useful private replies without blind or illegal compliance', () => {
+    const fieldObservation = agentObservationSchema.parse({
+      ...observation,
+      patientZero: {
+        agentId: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
+        agentName: 'Rook',
+        isPatientZero: false,
+        directRangeBypass: true,
+      },
+    });
+    const guidance = buildOpenRouterRequest(fieldObservation, TEST_MODEL)
+      .messages[0]!.content;
+
+    expect(guidance).toContain(
+      'Evaluate each directive against current legal actions',
+    );
+    expect(guidance).toContain('never follow it blindly');
+    expect(guidance).toContain(
+      'never follow it blindly or claim compliance when its recommendation is unavailable',
+    );
+    expect(guidance).toContain(
+      'If a directive addresses you, prefer a private direct reply to Patient Zero',
+    );
+    expect(guidance).toContain('accepting, declining, counter-proposing');
+    expect(guidance).toContain('Do not reply merely to say thanks');
+    expect(guidance).toContain('do not repeat the directive publicly');
+    expect(guidance).toContain(
+      'If you are not addressed, you may ignore the directive',
+    );
+    expect(guidance).toContain('regardless of distance');
+  });
+
   it('adds only bounded validation codes to a fresh corrective request', () => {
     const request = buildOpenRouterRequest(
       observation,

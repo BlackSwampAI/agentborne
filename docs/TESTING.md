@@ -1,6 +1,13 @@
 # Testing
 
-Focused deterministic coverage includes physical-distance messaging across H3 resolutions, the eight-agent observation cap, alliance long-range visibility and delivery, channel privacy, seeded move-affordance ordering, effective neutral/alliance colors, and operator-only private-feed filters. Provider tests remain offline and use the flat `text-flat-json-v2` contract.
+Focused deterministic coverage includes physical-distance messaging across H3 resolutions, the eight-agent observation cap, alliance long-range visibility and delivery, channel privacy, seeded move-affordance ordering, effective neutral/alliance colors, and operator-only private-feed filters. Provider tests remain offline and use the flat `text-flat-json-v3` contract.
+
+Patient Zero coverage verifies disabled/legacy scenario defaults, valid roster
+designation, bounded exclusive global awareness, Zero authority and private
+fan-out, Patient-Zero-endpoint direct replies, ordinary range enforcement,
+immutable retry observations, normal world-action legality, export telemetry,
+and restrained World Lab role/filter rendering. Provider tests use
+`text-flat-json-v3`; no live provider or geocoder is involved.
 
 Operator-workspace component coverage verifies that Live/Agents switching preserves the mounted execution state, agent selection routes to the semantic inspector, Scoreboard remains directly reachable, and failure/recovery activity stays bounded. Playwright exercises the persistent command bar, workspace navigation, contextual inspector tabs, tabbed activity dock, overflow-routed setup/export actions, and desktop/narrow viewport containment. These tests continue to use only the deterministic provider.
 

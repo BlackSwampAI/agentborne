@@ -1,5 +1,13 @@
 # Roadmap
 
+## Experimental Patient Zero coordinator
+
+The current focused slice designates one normal physical agent, provides a
+bounded global strategic summary, and adds private advisory Zero broadcasts
+plus direct replies. It intentionally excludes extra movement/actions,
+numerical bonuses, forced compliance, live player GPS, capture succession,
+simulated players, and simultaneous tick scheduling.
+
 Player development begins only after the agent milestones below demonstrate compelling behavior. Each milestone is intended to remain a focused pull request; do not implement ahead of the current milestone.
 
 The [Gameplay Foundation](docs/GAMEPLAY_FOUNDATION.md) records accepted future
