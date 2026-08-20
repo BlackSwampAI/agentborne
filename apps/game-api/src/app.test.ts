@@ -1,11 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   AgentProviderError,
+  BrowserTestAgentProvider,
   OpenRouterAgentProvider,
   ScriptedAgentProvider,
   type AgentProvider,
   type ProviderDecision,
-} from '@agentborne/agent-runtime';
+} from '@hexzero/agent-runtime';
 import {
   cancelledTurnResponseSchema,
   h3CellSchema,
@@ -20,8 +21,46 @@ import {
   updateAgentPersonalityResponseSchema,
   updateExperimentModelsResponseSchema,
   verifyModelResponseSchema,
-} from '@agentborne/shared';
-import { createApp } from './app';
+} from '@hexzero/shared';
+import {
+  createApp,
+  providerFromEnvironment,
+  resolveProviderModeFromEnvironment,
+} from './app';
+
+describe('provider environment compatibility', () => {
+  it('uses the canonical provider variable without a warning', () => {
+    const warn = vi.fn();
+    expect(
+      providerFromEnvironment({ HEXZERO_PROVIDER: 'scripted' }, warn),
+    ).toBeInstanceOf(BrowserTestAgentProvider);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('prefers the canonical provider variable over the legacy alias', () => {
+    const warn = vi.fn();
+    expect(
+      resolveProviderModeFromEnvironment(
+        {
+          HEXZERO_PROVIDER: 'openrouter',
+          AGENTBORNE_PROVIDER: 'scripted',
+        },
+        warn,
+      ),
+    ).toBe('openrouter');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('supports the legacy provider alias with a value-free warning', () => {
+    const warn = vi.fn();
+    expect(
+      providerFromEnvironment({ AGENTBORNE_PROVIDER: 'scripted' }, warn),
+    ).toBeInstanceOf(BrowserTestAgentProvider);
+    expect(warn).toHaveBeenCalledWith(
+      'AGENTBORNE_PROVIDER is deprecated; use HEXZERO_PROVIDER. Continuing with the legacy setting.',
+    );
+  });
+});
 
 describe('game API simulation boundary', () => {
   it('coalesces repeated delivery of the same turn mutation ID', async () => {
@@ -48,7 +87,7 @@ describe('game API simulation boundary', () => {
     const request = () =>
       app.request('/api/simulation/turn', {
         method: 'POST',
-        headers: { 'X-Agentborne-Mutation-Id': 'mutation_same_001' },
+        headers: { 'X-Hexzero-Mutation-Id': 'mutation_same_001' },
       });
     const [first, duplicate] = await Promise.all([request(), request()]);
     expect(first.status).toBe(200);

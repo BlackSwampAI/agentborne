@@ -1,5 +1,5 @@
 {
-  "name": "agentborne",
+  "name": "hexzero",
   "version": "0.0.0",
   "private": true,
   "packageManager": "pnpm@11.21.0",
@@ -9,16 +9,16 @@
   },
   "scripts": {
     "build": "pnpm -r --if-present build",
-    "dev": "pnpm --parallel --filter @agentborne/game-api --filter @agentborne/world-lab dev",
-    "dev:test-provider": "AGENTBORNE_PROVIDER=scripted pnpm dev",
-    "dev:api": "pnpm --filter @agentborne/game-api dev",
-    "experiment:db": "pnpm --filter @agentborne/experiment-archive cli",
+    "dev": "pnpm --parallel --filter @hexzero/game-api --filter @hexzero/world-lab dev",
+    "dev:test-provider": "HEXZERO_PROVIDER=scripted pnpm dev",
+    "dev:api": "pnpm --filter @hexzero/game-api dev",
+    "experiment:db": "pnpm --filter @hexzero/experiment-archive cli",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "pnpm -r --if-present lint",
     "test": "pnpm -r --if-present test",
     "test:e2e": "playwright test",
-    "smoke:openrouter": "pnpm --filter @agentborne/agent-runtime smoke:openrouter",
+    "smoke:openrouter": "pnpm --filter @hexzero/agent-runtime smoke:openrouter",
     "typecheck": "pnpm -r --if-present typecheck",
     "validate": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },

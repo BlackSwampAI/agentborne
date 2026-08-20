@@ -4,7 +4,7 @@ These instructions apply throughout the repository.
 
 ## Product boundaries
 
-- Treat “Agentborne” as a working title. Avoid heavy branding, logo, lore, or name-specific design investment.
+- Use “Hex Zero” consistently while avoiding unnecessary logo, lore, or name-specific design investment.
 - Keep the World Lab as a production developer/admin surface, not a disposable demo.
 - The only initial hex states are `open` and `infected`.
 - The only agent world actions are adjacent move, infect current cell, capture an abandoned infected current cell from a non-allied controller, and wait. One optional public or range-limited direct communication and one optional formal diplomacy intent may accompany that action.

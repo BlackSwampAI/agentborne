@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentId, SimulationSnapshot } from '@agentborne/shared';
+import type { AgentId, SimulationSnapshot } from '@hexzero/shared';
 import { neutralAgentColor, resolveAgentColor } from './ui-color';
 
 const agentId = '11111111-1111-4111-8111-111111111111' as AgentId;

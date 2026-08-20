@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   MODEL_SUMMARY_MAX_LENGTH,
+  AGENT_DECISION_CONTRACT_VERSION,
+  OBJECTIVE_PROMPT_VERSION,
   MESSAGE_MAX_LENGTH,
   PERSONALITY_MAX_LENGTH,
   apiErrorSchema,
@@ -242,6 +244,11 @@ const snapshot = {
 };
 
 describe('agent observation and decision schemas', () => {
+  it('preserves established engine contract identifiers through branding changes', () => {
+    expect(AGENT_DECISION_CONTRACT_VERSION).toBe('text-flat-json-v3');
+    expect(OBJECTIVE_PROMPT_VERSION).toBe('durable-influence-v2');
+  });
+
   it('centralizes eight-agent, 127-cell alliance and diplomacy limits', () => {
     expect(DEVELOPMENT_WORLD_CONFIG).toMatchObject({
       radius: 6,

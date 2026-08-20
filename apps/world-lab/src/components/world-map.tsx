@@ -21,7 +21,7 @@ import type {
   HexState,
   Alliance,
   SimulationSnapshot,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 import { resolveAgentColor } from './ui-color';
 import { DARK_TILE_ATTRIBUTION, DARK_TILE_URLS } from './map-config';
 

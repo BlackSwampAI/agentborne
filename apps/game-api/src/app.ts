@@ -6,7 +6,7 @@ import {
   OpenRouterModelCatalog,
   OpenRouterAgentProvider,
   type AgentProvider,
-} from '@agentborne/agent-runtime';
+} from '@hexzero/agent-runtime';
 import {
   apiErrorSchema,
   AGENT_DECISION_CONTRACT_VERSION,
@@ -43,11 +43,11 @@ import {
   locationSearchResponseSchema,
   defaultWorldSetupResponseSchema,
   type ModelVerification,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 import {
   createDevelopmentWorld,
   generateDeterministicRoster,
-} from '@agentborne/world-engine';
+} from '@hexzero/world-engine';
 import {
   SimulationConflictError,
   SimulationService,
@@ -66,12 +66,30 @@ export interface AppOptions {
   geocoder?: Geocoder;
 }
 
-export function providerFromEnvironment(): AgentProvider {
-  if (process.env.AGENTBORNE_PROVIDER === 'scripted') {
+export function resolveProviderModeFromEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+  warn: (message: string) => void = console.warn,
+): string | undefined {
+  if (environment.HEXZERO_PROVIDER !== undefined)
+    return environment.HEXZERO_PROVIDER;
+  if (environment.AGENTBORNE_PROVIDER !== undefined) {
+    warn(
+      'AGENTBORNE_PROVIDER is deprecated; use HEXZERO_PROVIDER. Continuing with the legacy setting.',
+    );
+    return environment.AGENTBORNE_PROVIDER;
+  }
+  return undefined;
+}
+
+export function providerFromEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+  warn: (message: string) => void = console.warn,
+): AgentProvider {
+  if (resolveProviderModeFromEnvironment(environment, warn) === 'scripted') {
     return new BrowserTestAgentProvider();
   }
   return new OpenRouterAgentProvider({
-    apiKey: process.env.OPENROUTER_API_KEY,
+    apiKey: environment.OPENROUTER_API_KEY,
   });
 }
 
@@ -95,7 +113,7 @@ export function createApp(options: AppOptions = {}) {
     execute: () => Promise<T>,
   ): Promise<T> => {
     const supplied =
-      context.req.header('x-agentborne-mutation-id') ??
+      context.req.header('x-hexzero-mutation-id') ??
       context.req.query('mutationId');
     const mutationId =
       supplied && /^[A-Za-z0-9_-]{8,80}$/.test(supplied) ? supplied : undefined;
@@ -119,7 +137,7 @@ export function createApp(options: AppOptions = {}) {
           ? origin
           : null,
       allowMethods: ['GET', 'POST'],
-      allowHeaders: ['Content-Type', 'X-Agentborne-Mutation-Id'],
+      allowHeaders: ['Content-Type', 'X-Hexzero-Mutation-Id'],
     }),
   );
 

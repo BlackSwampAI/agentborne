@@ -2,7 +2,7 @@ import {
   NEUTRAL_AGENT_COLOR,
   type AgentId,
   type SimulationSnapshot,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 
 export const neutralAgentColor = NEUTRAL_AGENT_COLOR;
 

@@ -6,7 +6,7 @@ import {
   OPENROUTER_REQUIRED_PARAMETERS,
   type CompatibleModel,
   type ModelCatalogResponse,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 
 export const OPENROUTER_MODELS_ENDPOINT = 'https://openrouter.ai/api/v1/models';
 export const DEFAULT_MODEL_CATALOG_TTL_MS = 5 * 60 * 1_000;

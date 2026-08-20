@@ -1,9 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { serve } from '@hono/node-server';
-import { applyProviderEnvironmentFile } from '@agentborne/agent-runtime';
+import { applyProviderEnvironmentFile } from '@hexzero/agent-runtime';
 import { createApp } from './app';
 
-if (process.env.AGENTBORNE_PROVIDER !== 'scripted') {
+if (
+  (process.env.HEXZERO_PROVIDER ?? process.env.AGENTBORNE_PROVIDER) !==
+  'scripted'
+) {
   try {
     process.loadEnvFile('../../.env');
     applyProviderEnvironmentFile(

@@ -3,7 +3,7 @@ import {
   AgentProviderError,
   type AgentProvider,
   type ProviderDecision,
-} from '@agentborne/agent-runtime';
+} from '@hexzero/agent-runtime';
 import {
   agentIdSchema,
   appliedScenarioSchema,
@@ -57,7 +57,7 @@ import {
   type AppliedScenario,
   type WorldSetupPreviewResponse,
   type WorldSetupRequest,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 import {
   applyCommunication,
   applyDiplomacy,
@@ -75,7 +75,7 @@ import {
   expireAllianceProposals,
   toWorldState,
   type WorldState,
-} from '@agentborne/world-engine';
+} from '@hexzero/world-engine';
 import {
   createExperimentExport,
   createExperimentPreview,

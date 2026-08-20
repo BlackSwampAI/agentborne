@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignBehavior, WORLD_RADIUS_PRESETS } from '@agentborne/shared';
+import { assignBehavior, WORLD_RADIUS_PRESETS } from '@hexzero/shared';
 import {
   DEVELOPMENT_AGENT_BLUEPRINTS,
   allocateDeterministicSpawns,

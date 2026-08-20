@@ -1,11 +1,13 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { migrations } from './migrations.js';
 
-export const DEFAULT_DATABASE_PATH = '.agentborne/experiments.sqlite';
-export const DATABASE_PATH_ENV = 'AGENTBORNE_EXPERIMENT_DB';
+export const DEFAULT_DATABASE_PATH = '.hexzero/experiments.sqlite';
+export const LEGACY_DATABASE_PATH = '.agentborne/experiments.sqlite';
+export const DATABASE_PATH_ENV = 'HEXZERO_EXPERIMENT_DB';
+export const LEGACY_DATABASE_PATH_ENV = 'AGENTBORNE_EXPERIMENT_DB';
 
 export function archiveInvocationRoot(): string {
   return process.env.INIT_CWD?.trim() || process.cwd();
@@ -14,6 +16,34 @@ export function archiveInvocationRoot(): string {
 export interface OpenArchiveOptions {
   path?: string;
   clock?: () => Date;
+  environment?: NodeJS.ProcessEnv;
+  warn?: (message: string) => void;
+}
+
+export interface ResolvedArchivePath {
+  path: string;
+  source:
+    'cli' | 'environment' | 'legacy-environment' | 'default' | 'legacy-default';
+}
+
+export function resolveArchivePath(
+  options: Pick<OpenArchiveOptions, 'path' | 'environment'> = {},
+): ResolvedArchivePath {
+  if (options.path !== undefined) return { path: options.path, source: 'cli' };
+  const environment = options.environment ?? process.env;
+  if (environment[DATABASE_PATH_ENV] !== undefined)
+    return { path: environment[DATABASE_PATH_ENV]!, source: 'environment' };
+  if (environment[LEGACY_DATABASE_PATH_ENV] !== undefined)
+    return {
+      path: environment[LEGACY_DATABASE_PATH_ENV]!,
+      source: 'legacy-environment',
+    };
+  const root = archiveInvocationRoot();
+  if (existsSync(resolve(root, DEFAULT_DATABASE_PATH)))
+    return { path: DEFAULT_DATABASE_PATH, source: 'default' };
+  if (existsSync(resolve(root, LEGACY_DATABASE_PATH)))
+    return { path: LEGACY_DATABASE_PATH, source: 'legacy-default' };
+  return { path: DEFAULT_DATABASE_PATH, source: 'default' };
 }
 
 export class ArchivePersistenceError extends Error {
@@ -32,12 +62,19 @@ export class ArchiveDatabase {
   readonly clock: () => Date;
 
   constructor(options: OpenArchiveOptions = {}) {
-    const configured =
-      options.path ?? process.env[DATABASE_PATH_ENV] ?? DEFAULT_DATABASE_PATH;
+    const configured = resolveArchivePath(options);
+    if (configured.source === 'legacy-environment')
+      (options.warn ?? console.warn)(
+        `${LEGACY_DATABASE_PATH_ENV} is deprecated; use ${DATABASE_PATH_ENV}. Continuing with the legacy setting.`,
+      );
+    if (configured.source === 'legacy-default')
+      (options.warn ?? console.warn)(
+        `Using the existing legacy archive at ${LEGACY_DATABASE_PATH}. Optionally move it to ${DEFAULT_DATABASE_PATH} while Hex Zero is stopped.`,
+      );
     this.path =
-      configured === ':memory:'
-        ? configured
-        : resolve(archiveInvocationRoot(), configured);
+      configured.path === ':memory:'
+        ? configured.path
+        : resolve(archiveInvocationRoot(), configured.path);
     this.clock = options.clock ?? (() => new Date());
     try {
       if (this.path !== ':memory:')

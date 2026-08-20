@@ -28,13 +28,13 @@ importers:
 
   apps/game-api:
     dependencies:
-      '@agentborne/agent-runtime':
+      '@hexzero/agent-runtime':
         specifier: workspace:*
         version: link:../../packages/agent-runtime
-      '@agentborne/shared':
+      '@hexzero/shared':
         specifier: workspace:*
         version: link:../../packages/shared
-      '@agentborne/world-engine':
+      '@hexzero/world-engine':
         specifier: workspace:*
         version: link:../../packages/world-engine
       '@hono/node-server':
@@ -62,10 +62,10 @@ importers:
 
   apps/world-lab:
     dependencies:
-      '@agentborne/shared':
+      '@hexzero/shared':
         specifier: workspace:*
         version: link:../../packages/shared
-      '@agentborne/world-engine':
+      '@hexzero/world-engine':
         specifier: workspace:*
         version: link:../../packages/world-engine
       h3-js:
@@ -111,7 +111,7 @@ importers:
 
   packages/agent-runtime:
     dependencies:
-      '@agentborne/shared':
+      '@hexzero/shared':
         specifier: workspace:*
         version: link:../shared
       h3-js:
@@ -130,14 +130,14 @@ importers:
 
   packages/experiment-archive:
     dependencies:
-      '@agentborne/shared':
+      '@hexzero/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:
-      '@agentborne/agent-runtime':
+      '@hexzero/agent-runtime':
         specifier: workspace:*
         version: link:../agent-runtime
-      '@agentborne/world-engine':
+      '@hexzero/world-engine':
         specifier: workspace:*
         version: link:../world-engine
       tsx:
@@ -159,7 +159,7 @@ importers:
 
   packages/world-engine:
     dependencies:
-      '@agentborne/shared':
+      '@hexzero/shared':
         specifier: workspace:*
         version: link:../shared
       h3-js:

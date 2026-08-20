@@ -4,7 +4,7 @@ import {
   OPENROUTER_MAX_OUTPUT_TOKENS,
   OPENROUTER_PROVIDER_TIMEOUT_MS,
   agentObservationSchema,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 import {
   AgentProviderError,
   OpenRouterAgentProvider,
@@ -1095,7 +1095,7 @@ describe('OpenRouter provider environment', () => {
     applyProviderEnvironmentFile(
       [
         'OPENROUTER_API_KEY=file-key',
-        'AGENTBORNE_MODEL=ignored/legacy-value',
+        'HEXZERO_MODEL=ignored/legacy-value',
         'NEXT_PUBLIC_GAME_API_BASE_URL=https://browser.example',
       ].join('\n'),
       environment,

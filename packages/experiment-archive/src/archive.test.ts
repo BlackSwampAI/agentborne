@@ -1,30 +1,32 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type {
-  AgentProvider,
-  ProviderDecision,
-} from '@agentborne/agent-runtime';
+import type { AgentProvider, ProviderDecision } from '@hexzero/agent-runtime';
 import {
   experimentExportDocumentSchema,
   type AgentObservation,
   type ExperimentExportDocument,
-} from '@agentborne/shared';
-import { defaultWorldSetupRequest } from '@agentborne/world-engine';
-import { describe, expect, it } from 'vitest';
+} from '@hexzero/shared';
+import { defaultWorldSetupRequest } from '@hexzero/world-engine';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SimulationService } from '../../../apps/game-api/src/simulation-service.js';
 import {
   ArchiveDatabase,
+  DATABASE_PATH_ENV,
   ExperimentImportError,
   ExperimentQueryService,
+  LEGACY_DATABASE_PATH_ENV,
   ResearchNoteService,
   importExperimentExport,
+  resolveArchivePath,
 } from './index.js';
 
 const EXPERIMENT_ID = '10000000-0000-4000-8000-000000000001';
 const NOW = '2026-08-20T12:00:00.000Z';
+
+afterEach(() => vi.unstubAllEnvs());
 
 function nextUuid() {
   let counter = 10;
@@ -105,10 +107,73 @@ async function currentExport(): Promise<ExperimentExportDocument> {
 }
 
 function temporaryPath(name: string): string {
-  return join(mkdtempSync(join(tmpdir(), 'agentborne-archive-')), name);
+  return join(mkdtempSync(join(tmpdir(), 'hexzero-archive-')), name);
 }
 
 describe('experiment archive', () => {
+  it('resolves canonical and legacy archive locations without moving either database', () => {
+    const root = temporaryPath('workspace');
+    mkdirSync(join(root, '.agentborne'), { recursive: true });
+    const legacy = join(root, '.agentborne', 'experiments.sqlite');
+    writeFileSync(legacy, 'legacy-database');
+    vi.stubEnv('INIT_CWD', root);
+
+    expect(resolveArchivePath()).toEqual({
+      path: '.agentborne/experiments.sqlite',
+      source: 'legacy-default',
+    });
+    expect(readFileSync(legacy, 'utf8')).toBe('legacy-database');
+    expect(
+      resolveArchivePath({
+        environment: { [LEGACY_DATABASE_PATH_ENV]: 'legacy-env.sqlite' },
+      }),
+    ).toEqual({
+      path: 'legacy-env.sqlite',
+      source: 'legacy-environment',
+    });
+    expect(
+      resolveArchivePath({
+        environment: {
+          [DATABASE_PATH_ENV]: 'canonical.sqlite',
+          [LEGACY_DATABASE_PATH_ENV]: 'legacy-env.sqlite',
+        },
+      }),
+    ).toEqual({ path: 'canonical.sqlite', source: 'environment' });
+
+    mkdirSync(join(root, '.hexzero'), { recursive: true });
+    writeFileSync(join(root, '.hexzero', 'experiments.sqlite'), 'canonical');
+    expect(resolveArchivePath()).toEqual({
+      path: '.hexzero/experiments.sqlite',
+      source: 'default',
+    });
+    expect(readFileSync(legacy, 'utf8')).toBe('legacy-database');
+  });
+
+  it('defaults a new archive to .hexzero without creating or moving a legacy database', () => {
+    const root = temporaryPath('fresh-workspace');
+    mkdirSync(root, { recursive: true });
+    vi.stubEnv('INIT_CWD', root);
+    const archive = new ArchiveDatabase({ environment: {} });
+    expect(archive.path).toBe(join(root, '.hexzero', 'experiments.sqlite'));
+    expect(() =>
+      readFileSync(join(root, '.agentborne', 'experiments.sqlite')),
+    ).toThrow();
+    archive.close();
+  });
+
+  it('warns without exposing values when the legacy archive variable is selected', () => {
+    const warn = vi.fn();
+    const archive = new ArchiveDatabase({
+      environment: { [LEGACY_DATABASE_PATH_ENV]: ':memory:' },
+      warn,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      'AGENTBORNE_EXPERIMENT_DB is deprecated; use HEXZERO_EXPERIMENT_DB. Continuing with the legacy setting.',
+    );
+    expect(warn.mock.calls.flat().join(' ')).not.toContain(':memory:');
+    archive.close();
+  });
+
   it('migrates a fresh database and reopens it without replaying migrations', () => {
     const path = temporaryPath('archive.sqlite');
     const first = new ArchiveDatabase({ path, clock: () => new Date(NOW) });
@@ -159,6 +224,16 @@ describe('experiment archive', () => {
         JSON.parse(readFileSync(path, 'utf8')),
       ),
     ).toEqual(document);
+    archive.close();
+  });
+
+  it('imports an existing schema-v9 export with the legacy download filename', async () => {
+    const path = temporaryPath(
+      'agentborne-experiment-existing-full-entire.json',
+    );
+    writeFileSync(path, JSON.stringify(await currentExport()));
+    const archive = new ArchiveDatabase({ path: ':memory:' });
+    expect(importExperimentExport(archive, path).rejected).toBe(0);
     archive.close();
   });
 

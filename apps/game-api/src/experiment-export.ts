@@ -29,7 +29,7 @@ import {
   type WorldSnapshot,
   type BehaviorConfiguration,
   type AppliedScenario,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 
 export interface ExperimentSource {
   id: ExperimentId;

@@ -7,7 +7,7 @@ import {
   experimentExportDocumentSchema,
   exportedCommunicationSchema,
   type ExperimentExportDocument,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 
 import {
   ArchiveDatabase,

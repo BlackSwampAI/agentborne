@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   OPENROUTER_MODEL_CONTEXT_MINIMUM,
   OPENROUTER_REQUIRED_PARAMETERS,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 import {
   OpenRouterModelCatalog,
   sanitizeCompatibleModel,

@@ -1,6 +1,6 @@
 import { gridDisk, gridDistance, latLngToCell } from 'h3-js';
 import { describe, expect, it } from 'vitest';
-import { agentIdSchema, h3CellSchema, type Agent } from '@agentborne/shared';
+import { agentIdSchema, h3CellSchema, type Agent } from '@hexzero/shared';
 import {
   applyCommunication,
   applyDiplomacy,

@@ -65,7 +65,7 @@ Export requests, agent IDs, levels, ranges, outcome/world-action filters, commun
 
 Actual cost is accepted only from OpenRouter's safe `usage.cost`. Missing cost is unknown, never zero; scripted-test providers explicitly report zero. The active Game API still has no authentication, budget enforcement, restartable persistence, provider-management endpoint, upload, or sharing link. The loopback-only boundary remains mandatory.
 
-The offline experiment archive adds local persistence only for complete schema-validated safe exports and explicitly curated Markdown notes. Imports scan for prohibited credential/private-reasoning fields and recognizable credential values before a transaction begins; failures roll back. The default `.agentborne/` database is ignored. The CLI exposes bounded typed queries, not arbitrary SQL, and adds no MCP, embedding, vector-store, or network-listener surface.
+The offline experiment archive adds local persistence only for complete schema-validated safe exports and explicitly curated Markdown notes. Imports scan for prohibited credential/private-reasoning fields and recognizable credential values before a transaction begins; failures roll back. Both the canonical `.hexzero/` and compatible legacy `.agentborne/` database locations are ignored. The CLI exposes bounded typed queries, not arbitrary SQL, and adds no MCP, embedding, vector-store, or network-listener surface.
 
 ## Reporting
 
