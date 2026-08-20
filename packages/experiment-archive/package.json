@@ -1,5 +1,5 @@
 {
-  "name": "@agentborne/experiment-archive",
+  "name": "@hexzero/experiment-archive",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,11 +14,11 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@agentborne/shared": "workspace:*"
+    "@hexzero/shared": "workspace:*"
   },
   "devDependencies": {
-    "@agentborne/agent-runtime": "workspace:*",
-    "@agentborne/world-engine": "workspace:*",
+    "@hexzero/agent-runtime": "workspace:*",
+    "@hexzero/world-engine": "workspace:*",
     "tsx": "4.23.12",
     "vitest": "4.1.10"
   }

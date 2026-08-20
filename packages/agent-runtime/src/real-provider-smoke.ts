@@ -4,7 +4,7 @@ import {
   agentIdSchema,
   agentObservationSchema,
   h3CellSchema,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 import {
   AgentProviderError,
   OpenRouterAgentProvider,

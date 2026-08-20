@@ -2,7 +2,7 @@ import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
   allowedDevOrigins: ['127.0.0.1'],
-  transpilePackages: ['@agentborne/shared', '@agentborne/world-engine'],
+  transpilePackages: ['@hexzero/shared', '@hexzero/world-engine'],
   experimental: { useTypeScriptCli: false },
   async rewrites() {
     return [

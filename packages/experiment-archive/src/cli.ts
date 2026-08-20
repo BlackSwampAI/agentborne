@@ -195,7 +195,8 @@ const HELP = `Usage:
   pnpm experiment:db notes search <query> [--type type] [--status status] [--tag tag] [--experiment id] [--limit n]
   pnpm experiment:db notes list [filters]
 
-Database path defaults to .agentborne/experiments.sqlite and can also be set with AGENTBORNE_EXPERIMENT_DB.
+Database path defaults to .hexzero/experiments.sqlite and can also be set with HEXZERO_EXPERIMENT_DB.
+Existing .agentborne/experiments.sqlite and AGENTBORNE_EXPERIMENT_DB remain supported with a migration notice.
 Detail commands default to 50 rows and enforce a maximum of 500. Arbitrary SQL is not supported.`;
 
 async function main(): Promise<void> {

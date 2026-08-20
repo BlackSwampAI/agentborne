@@ -1,5 +1,5 @@
 {
-  "name": "@agentborne/game-api",
+  "name": "@hexzero/game-api",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,9 +12,9 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@agentborne/agent-runtime": "workspace:*",
-    "@agentborne/shared": "workspace:*",
-    "@agentborne/world-engine": "workspace:*",
+    "@hexzero/agent-runtime": "workspace:*",
+    "@hexzero/shared": "workspace:*",
+    "@hexzero/world-engine": "workspace:*",
     "@hono/node-server": "2.1.0",
     "h3-js": "4.5.0",
     "hono": "4.13.2"

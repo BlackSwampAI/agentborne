@@ -6,7 +6,7 @@ Accepted
 
 ## Decision
 
-Agentborne discovers models through OpenRouter's server-side models API and accepts a model only when local validation confirms text input, text output, chat completions, advertised `max_tokens`, and at least 16,384 context tokens. Requests are non-streaming plain-text chat completions. The prompt requires exactly one deliberately flat JSON object whose sentinel-bearing fields normalize into the existing local decision unions.
+Hex Zero discovers models through OpenRouter's server-side models API and accepts a model only when local validation confirms text input, text output, chat completions, advertised `max_tokens`, and at least 16,384 context tokens. Requests are non-streaming plain-text chat completions. The prompt requires exactly one deliberately flat JSON object whose sentinel-bearing fields normalize into the existing local decision unions.
 
 The context floor, 4,096-token completion ceiling, 75-second provider timeout, and decision-contract version are centralized in `packages/shared`. The complete observation is bounded: eight-agent summaries, at most 12 public and six relevant direct messages, bounded event windows, a 600-character personality, and 280-character messages. A 16,384-token context therefore leaves substantial headroom for that fixed prompt and observation while reserving the full completion ceiling for the JSON response.
 

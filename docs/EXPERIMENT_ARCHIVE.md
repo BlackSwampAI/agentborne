@@ -4,9 +4,14 @@ The experiment archive is a durable, local research surface for completed or par
 
 ## Storage and configuration
 
-`@agentborne/experiment-archive` uses SQLite built into the pinned Node 24 runtime. Versioned migrations create strict tables with foreign keys and indexes. File-backed databases enable WAL and a five-second busy timeout; imports use prepared statements inside one transaction. Tests use in-memory or temporary databases.
+`@hexzero/experiment-archive` uses SQLite built into the pinned Node 24 runtime. Versioned migrations create strict tables with foreign keys and indexes. File-backed databases enable WAL and a five-second busy timeout; imports use prepared statements inside one transaction. Tests use in-memory or temporary databases.
 
-The default database is `.agentborne/experiments.sqlite`, an ignored development path. Override it with `--db <path>` or `AGENTBORNE_EXPERIMENT_DB`; the flag takes precedence.
+The new default database is `.hexzero/experiments.sqlite`, an ignored development path. Resolution order is explicit `--db`, `HEXZERO_EXPERIMENT_DB`, legacy `AGENTBORNE_EXPERIMENT_DB`, an existing `.hexzero/experiments.sqlite`, an existing `.agentborne/experiments.sqlite`, then a new `.hexzero/experiments.sqlite`. Legacy selections emit a concise notice and open normally; no database is moved, overwritten, or recreated for branding.
+
+For an optional manual migration, stop all Hex Zero processes, create the
+`.hexzero` directory, copy `experiments.sqlite` and any matching `-wal` and
+`-shm` sidecars from `.agentborne`, verify the copied archive opens, and only
+then remove the legacy files if desired.
 
 The schema normalizes experiments, source exports, roster/assignments, topology, turns, model attempts, communications and recipients, diplomacy attempts, alliance events, world events, configuration changes, and research notes. Stable source IDs are retained; deterministic experiment/turn/attempt IDs make imports idempotent. Source aggregate metrics remain audit evidence, while summaries derive canonical metrics from stored records.
 

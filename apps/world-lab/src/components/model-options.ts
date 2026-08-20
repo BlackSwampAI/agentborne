@@ -1,4 +1,4 @@
-import type { CompatibleModel } from '@agentborne/shared';
+import type { CompatibleModel } from '@hexzero/shared';
 
 export interface ModelOption {
   value: string;

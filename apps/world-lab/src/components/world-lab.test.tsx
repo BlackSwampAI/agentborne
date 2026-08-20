@@ -17,14 +17,14 @@ import {
   simulationSnapshotSchema,
   NEUTRAL_AGENT_COLOR,
   type SimulationSnapshot,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 import {
   createDefaultAppliedScenario,
   createDevelopmentWorld,
   defaultWorldSetupRequest,
   generateDeterministicRoster,
   previewWorldSetup,
-} from '@agentborne/world-engine';
+} from '@hexzero/world-engine';
 import { WorldLab } from './world-lab';
 import { PERSONALITY_PRESETS } from './personality-presets';
 
@@ -957,6 +957,55 @@ async function openAgentsWorkspace(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('WorldLab', () => {
+  it('migrates valid legacy browser preferences once and rejects malformed legacy data', async () => {
+    window.localStorage.setItem('agentborne.world-lab.follow-turn', 'false');
+    window.localStorage.setItem(
+      'agentborne.world-lab.activity-dock',
+      'collapsed',
+    );
+    window.localStorage.setItem(
+      'agentborne.world-lab.unattended-recovery',
+      JSON.stringify({ enabled: true, retryLimit: 3 }),
+    );
+    window.sessionStorage.setItem('agentborne.world-lab.run-target', '500');
+    const first = render(<WorldLab />);
+    await screen.findByRole('button', { name: 'Start' });
+    await waitFor(() => {
+      expect(window.localStorage.getItem('hexzero.world-lab.follow-turn')).toBe(
+        'false',
+      );
+      expect(
+        window.localStorage.getItem('hexzero.world-lab.activity-dock'),
+      ).toBe('collapsed');
+      expect(
+        window.localStorage.getItem('hexzero.world-lab.unattended-recovery'),
+      ).toBe(JSON.stringify({ enabled: true, retryLimit: 3 }));
+      expect(
+        window.sessionStorage.getItem('hexzero.world-lab.run-target'),
+      ).toBe('500');
+    });
+    first.unmount();
+
+    window.localStorage.setItem('agentborne.world-lab.follow-turn', 'true');
+    const second = render(<WorldLab />);
+    await screen.findByRole('button', { name: 'Start' });
+    expect(window.localStorage.getItem('hexzero.world-lab.follow-turn')).toBe(
+      'false',
+    );
+
+    window.localStorage.removeItem('hexzero.world-lab.unattended-recovery');
+    window.localStorage.setItem(
+      'agentborne.world-lab.unattended-recovery',
+      '{"enabled":"yes","retryLimit":99}',
+    );
+    second.unmount();
+    render(<WorldLab />);
+    await screen.findByRole('button', { name: 'Start' });
+    expect(
+      window.localStorage.getItem('hexzero.world-lab.unattended-recovery'),
+    ).not.toBe('{"enabled":"yes","retryLimit":99}');
+  });
+
   it('renders all controls, status, H3 readiness, and eight visible markers', async () => {
     const user = userEvent.setup();
     render(<WorldLab />);
@@ -1561,9 +1610,9 @@ describe('WorldLab', () => {
     expect(
       within(roster).getByRole('checkbox', { name: 'Follow turn' }),
     ).not.toBeChecked();
-    expect(
-      window.localStorage.getItem('agentborne.world-lab.follow-turn'),
-    ).toBe('false');
+    expect(window.localStorage.getItem('hexzero.world-lab.follow-turn')).toBe(
+      'false',
+    );
     await openOverflow(user);
     await user.click(screen.getByRole('button', { name: 'Export' }));
     expect(
@@ -2860,9 +2909,12 @@ describe('WorldLab', () => {
     const createObjectURL = vi.fn(() => 'blob:experiment');
     const revokeObjectURL = vi.fn();
     vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+    let downloadedFilename: string | undefined;
     const click = vi
       .spyOn(HTMLAnchorElement.prototype, 'click')
-      .mockImplementation(() => undefined);
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        downloadedFilename = this.download;
+      });
     render(<WorldLab />);
     await openOverflow(user);
     await user.click(screen.getByRole('button', { name: 'Export' }));
@@ -2884,6 +2936,9 @@ describe('WorldLab', () => {
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:experiment');
     expect(click).toHaveBeenCalledTimes(1);
+    expect(downloadedFilename).toMatch(
+      /^hexzero-experiment-.+-one-agent-entire-retained\.json$/,
+    );
     await user.selectOptions(
       screen.getByLabelText('JSON serialization'),
       'pretty',

@@ -55,7 +55,7 @@ import {
   type SimulationSnapshot,
   type WorldSetupRequest,
   type WorldSetupPreviewResponse,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 import {
   matchingPersonalityPreset,
   PERSONALITY_PRESETS,
@@ -66,11 +66,46 @@ import { resolveAgentColor } from './ui-color';
 
 const apiBase =
   process.env.NEXT_PUBLIC_GAME_API_BASE_URL ?? '/api/game/simulation';
-const followTurnStorageKey = 'agentborne.world-lab.follow-turn';
-const runTargetStorageKey = 'agentborne.world-lab.run-target';
-const unattendedRecoveryStorageKey = 'agentborne.world-lab.unattended-recovery';
-const activityDockStorageKey = 'agentborne.world-lab.activity-dock';
+const followTurnStorageKey = 'hexzero.world-lab.follow-turn';
+const runTargetStorageKey = 'hexzero.world-lab.run-target';
+const unattendedRecoveryStorageKey = 'hexzero.world-lab.unattended-recovery';
+const activityDockStorageKey = 'hexzero.world-lab.activity-dock';
+const legacyFollowTurnStorageKey = 'agentborne.world-lab.follow-turn';
+const legacyRunTargetStorageKey = 'agentborne.world-lab.run-target';
+const legacyUnattendedRecoveryStorageKey =
+  'agentborne.world-lab.unattended-recovery';
+const legacyActivityDockStorageKey = 'agentborne.world-lab.activity-dock';
 export const runTargets = [25, 50, 100, 200, 500, 1000] as const;
+
+function readStoredPreference(
+  storage: Storage,
+  key: string,
+  legacyKey: string,
+  valid: (value: string) => boolean,
+): string | null {
+  const current = storage.getItem(key);
+  if (current !== null) return valid(current) ? current : null;
+  const legacy = storage.getItem(legacyKey);
+  if (legacy === null || !valid(legacy)) return null;
+  storage.setItem(key, legacy);
+  return legacy;
+}
+
+function validUnattendedPreference(value: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object') return false;
+    const preference = parsed as Record<string, unknown>;
+    return (
+      typeof preference.enabled === 'boolean' &&
+      (preference.retryLimit === 1 ||
+        preference.retryLimit === 2 ||
+        preference.retryLimit === 3)
+    );
+  } catch {
+    return false;
+  }
+}
 
 function unattendedFailureEligible(
   failure: NonNullable<SimulationSnapshot['pendingFailedTurn']>['failure'],
@@ -157,6 +192,7 @@ export function WorldLab() {
   const [verifyingModelId, setVerifyingModelId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [chatCollapsed, setChatCollapsed] = useState(false);
+  const [activityDockLoaded, setActivityDockLoaded] = useState(false);
   const [followTurn, setFollowTurn] = useState(true);
   const [followPreferenceLoaded, setFollowPreferenceLoaded] = useState(false);
   const inFlightRef = useRef(false);
@@ -182,23 +218,34 @@ export function WorldLab() {
   }, [running]);
 
   useEffect(() => {
-    const collapsed = window.localStorage.getItem(activityDockStorageKey);
-    const hydrationTask = window.setTimeout(
-      () => setChatCollapsed(collapsed === 'collapsed'),
-      0,
+    const collapsed = readStoredPreference(
+      window.localStorage,
+      activityDockStorageKey,
+      legacyActivityDockStorageKey,
+      (value) => value === 'collapsed' || value === 'expanded',
     );
+    const hydrationTask = window.setTimeout(() => {
+      setChatCollapsed(collapsed === 'collapsed');
+      setActivityDockLoaded(true);
+    }, 0);
     return () => window.clearTimeout(hydrationTask);
   }, []);
 
   useEffect(() => {
+    if (!activityDockLoaded) return;
     window.localStorage.setItem(
       activityDockStorageKey,
       chatCollapsed ? 'collapsed' : 'expanded',
     );
-  }, [chatCollapsed]);
+  }, [activityDockLoaded, chatCollapsed]);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem(unattendedRecoveryStorageKey);
+    const saved = readStoredPreference(
+      window.localStorage,
+      unattendedRecoveryStorageKey,
+      legacyUnattendedRecoveryStorageKey,
+      validUnattendedPreference,
+    );
     const hydrationTask = window.setTimeout(() => {
       if (saved) {
         try {
@@ -249,7 +296,15 @@ export function WorldLab() {
   }, [recoveryNotice]);
 
   useEffect(() => {
-    const stored = Number(window.sessionStorage.getItem(runTargetStorageKey));
+    const stored = Number(
+      readStoredPreference(
+        window.sessionStorage,
+        runTargetStorageKey,
+        legacyRunTargetStorageKey,
+        (value) =>
+          runTargets.includes(Number(value) as (typeof runTargets)[number]),
+      ),
+    );
     const hydrationTask = window.setTimeout(() => {
       if (runTargets.includes(stored as (typeof runTargets)[number])) {
         setRunTarget(stored as (typeof runTargets)[number]);
@@ -266,7 +321,12 @@ export function WorldLab() {
 
   useEffect(() => {
     const storedFollowTurn =
-      window.localStorage.getItem(followTurnStorageKey) !== 'false';
+      readStoredPreference(
+        window.localStorage,
+        followTurnStorageKey,
+        legacyFollowTurnStorageKey,
+        (value) => value === 'true' || value === 'false',
+      ) !== 'false';
     const hydrationTask = window.setTimeout(() => {
       setFollowTurn(storedFollowTurn);
       setFollowPreferenceLoaded(true);
@@ -2188,7 +2248,7 @@ function WorldSetupPanel({
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-agentborne-mutation-id': `setup-${Date.now()}`,
+          'x-hexzero-mutation-id': `setup-${Date.now()}`,
         },
         body: key,
       });
@@ -4711,7 +4771,7 @@ function ExperimentExportPanel({
             ? `latest-${document.filters.turns.count}`
             : 'entire-retained';
       link.href = url;
-      link.download = `agentborne-experiment-${document.experiment.id}-${scope}-${range}.json`;
+      link.download = `hexzero-experiment-${document.experiment.id}-${scope}-${range}.json`;
       link.click();
       URL.revokeObjectURL(url);
       setNotice('Export JSON download started.');

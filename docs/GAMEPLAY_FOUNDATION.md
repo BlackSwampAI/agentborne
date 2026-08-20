@@ -35,7 +35,7 @@ current sequential turn model until the later simultaneous-tick milestone.
 
 ## Product goal
 
-Agentborne should remain mechanically simple. Replayability should emerge from
+Hex Zero should remain mechanically simple. Replayability should emerge from
 real geography, hidden agent locations, visible infection trails, persistent
 24/7 agent activity, model personalities and strategies, alliances and
 communication, and human intervention.

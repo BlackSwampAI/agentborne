@@ -43,7 +43,7 @@ import {
   type ScenarioRosterEntry,
   type WorldSetupPreviewResponse,
   type WorldSetupRequest,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 
 export interface WorldState {
   readonly hexes: ReadonlyMap<H3Cell, HexControl>;

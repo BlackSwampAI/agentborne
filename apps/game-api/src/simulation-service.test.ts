@@ -5,7 +5,7 @@ import {
   ScriptedAgentProvider,
   type AgentProvider,
   type ProviderDecision,
-} from '@agentborne/agent-runtime';
+} from '@hexzero/agent-runtime';
 import {
   PERSONALITY_MAX_LENGTH,
   agentIdSchema,
@@ -16,12 +16,12 @@ import {
   type AgentTurnRecord,
   type CompatibleModel,
   type WorldEvent,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 import {
   DEVELOPMENT_AGENT_BLUEPRINTS,
   defaultWorldSetupRequest,
   physicalDistanceKm,
-} from '@agentborne/world-engine';
+} from '@hexzero/world-engine';
 import {
   SimulationConflictError,
   SimulationService,

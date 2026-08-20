@@ -1,4 +1,4 @@
-import { personalitySchema } from '@agentborne/shared';
+import { personalitySchema } from '@hexzero/shared';
 
 export const PERSONALITY_PRESET_IDS = [
   'aggressive-infector',

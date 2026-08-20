@@ -3,8 +3,8 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import './styles.css';
 
 export const metadata: Metadata = {
-  title: 'World Lab',
-  description: 'Developer interface for observing the Agentborne world.',
+  title: 'Hex Zero — World Lab',
+  description: 'Developer interface for observing the Hex Zero world.',
 };
 
 export default function RootLayout({

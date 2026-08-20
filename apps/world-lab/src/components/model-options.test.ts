@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { CompatibleModel } from '@agentborne/shared';
+import type { CompatibleModel } from '@hexzero/shared';
 import { buildModelOptions, formatModelOption } from './model-options';
 
 const model = (id: string, name: string, price = '0'): CompatibleModel => ({

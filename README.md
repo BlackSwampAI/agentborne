@@ -1,6 +1,6 @@
-# Agentborne
+# Hex Zero
 
-Agentborne is the working title for an agent-first geographic experiment. A configurable roster of model-backed agents moves, infects, captures contested territory, communicates, and conducts formal alliance diplomacy while the World Lab exposes every safe decision record.
+Hex Zero is an agent-first geographic experiment. A configurable roster of model-backed agents moves, infects, captures contested territory, communicates, and conducts formal alliance diplomacy while the World Lab exposes every safe decision record.
 
 Scenarios may optionally designate one experimental Patient Zero coordinator.
 The role receives bounded global strategic information and can send private
@@ -30,6 +30,10 @@ corepack enable
 pnpm install --frozen-lockfile
 pnpm dev
 ```
+
+For deterministic local automation, `pnpm dev:test-provider` sets
+`HEXZERO_PROVIDER=scripted`. `HEXZERO_EXPERIMENT_DB` overrides the local
+experiment archive path.
 
 Open the World Lab at <http://localhost:3000>. The Game API binds to <http://127.0.0.1:8787>; Next.js narrowly proxies `/api/game/*` to it. `OPENROUTER_API_KEY` is the only required OpenRouter environment value. Select a compatible global model in World Lab, then optionally override individual agents. Each assignment may use the provider's default reasoning behavior, disable optional reasoning, or select only an effort advertised by that model's catalog metadata.
 
@@ -66,3 +70,24 @@ The agent roster defaults to browser-local **Follow turn** behavior: the inspect
 See [Testing](docs/TESTING.md), [Architecture](docs/ARCHITECTURE.md), [Security](docs/SECURITY.md), the accepted future [Gameplay Foundation](docs/GAMEPLAY_FOUNDATION.md), and the [Roadmap](ROADMAP.md).
 
 Completed schema-v9 exports can be imported into an ignored local SQLite archive and queried without repeatedly loading full JSON artifacts. See [Local experiment archive](docs/EXPERIMENT_ARCHIVE.md).
+
+## Rename compatibility
+
+Hex Zero was formerly named Agentborne. Workspace packages now use the
+`@hexzero/*` namespace, and the repository URL will be
+`https://github.com/BlackSwampAI/hexzero` after the external repository rename.
+Existing environments may continue using `AGENTBORNE_PROVIDER` and
+`AGENTBORNE_EXPERIMENT_DB`; the corresponding `HEXZERO_` variable takes
+precedence, and selecting a legacy alias emits a value-free deprecation notice.
+
+New archives default to `.hexzero/experiments.sqlite`. When that file does not
+exist, an existing `.agentborne/experiments.sqlite` is opened in place with a
+migration notice; Hex Zero never moves or overwrites it automatically. To
+migrate manually, stop every Hex Zero process, create `.hexzero`, copy the
+legacy database (including any `-wal` and `-shm` sidecars if present), verify
+the copy opens, and only then remove the legacy files if desired.
+
+New downloads use `hexzero-experiment-`. Existing
+`agentborne-experiment-*.json` files and their schema-v9 contents remain
+importable unchanged. Browser-owned settings stored under legacy `agentborne`
+keys are schema-validated and copied once to the new `hexzero` keys.

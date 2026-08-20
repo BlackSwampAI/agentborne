@@ -14,7 +14,7 @@ import {
   type ProviderDecisionEnvelope,
   type ProviderMetadata,
   type ReasoningProfile,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 
 export { applyProviderEnvironmentFile } from './provider-environment';
 export * from './model-catalog';

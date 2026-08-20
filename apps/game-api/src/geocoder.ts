@@ -1,7 +1,7 @@
 import {
   locationSearchResponseSchema,
   type LocationSearchResponse,
-} from '@agentborne/shared';
+} from '@hexzero/shared';
 
 export interface Geocoder {
   search(query: string): Promise<LocationSearchResponse>;
@@ -43,7 +43,7 @@ export class NominatimGeocoder implements Geocoder {
       const response = await fetch(url, {
         headers: {
           'User-Agent':
-            'Agentborne-WorldLab (+https://github.com/BlackSwampAI/agentborne)',
+            'Hex Zero-WorldLab (+https://github.com/BlackSwampAI/hexzero)',
           Accept: 'application/json',
         },
         signal: controller.signal,

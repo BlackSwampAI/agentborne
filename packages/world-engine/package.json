@@ -1,5 +1,5 @@
 {
-  "name": "@agentborne/world-engine",
+  "name": "@hexzero/world-engine",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@agentborne/shared": "workspace:*",
+    "@hexzero/shared": "workspace:*",
     "h3-js": "4.5.0"
   },
   "devDependencies": {

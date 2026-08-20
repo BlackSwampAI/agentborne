@@ -14,3 +14,4 @@ test-results/
 *.log
 logs/
 .agentborne/
+.hexzero/

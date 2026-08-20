@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
-import { experimentExportDocumentSchema } from '@agentborne/shared';
+import { experimentExportDocumentSchema } from '@hexzero/shared';
 
 const ROOK_ID = '2507bb46-7ae4-45ca-8dda-644c4f85ca14';
 const EMBER_ID = '128f3f38-6b7d-4db7-9e95-751b4ce2681e';
