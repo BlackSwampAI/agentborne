@@ -12,6 +12,7 @@
     "dev": "pnpm --parallel --filter @agentborne/game-api --filter @agentborne/world-lab dev",
     "dev:test-provider": "AGENTBORNE_PROVIDER=scripted pnpm dev",
     "dev:api": "pnpm --filter @agentborne/game-api dev",
+    "experiment:db": "pnpm --filter @agentborne/experiment-archive cli",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "pnpm -r --if-present lint",

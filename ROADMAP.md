@@ -75,6 +75,8 @@ Twelfth focused slice: add scenario-owned physical communication range, private 
 
 ## PR 5 — Goals and memory
 
+Pre-PR-5 observability slice: add a local append-only SQLite experiment archive, transactional schema-v9 export import, bounded human/Codex queries, normalized comparisons, and FTS-searchable curated notes. The in-memory engine remains authoritative. Crash recovery, restartable simulation state, MCP, embeddings, vector search, and a database browser remain deferred.
+
 Persistent short- and long-term objectives, compact memories, plan revision, summaries, and longer simulation runs.
 
 ## PR 6 — Persistent autonomous world

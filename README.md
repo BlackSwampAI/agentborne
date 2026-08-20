@@ -10,13 +10,14 @@ rules as every other agent. The universal flat provider contract is
 
 ## Workspace
 
-| Path                     | Responsibility                                                   |
-| ------------------------ | ---------------------------------------------------------------- |
-| `apps/world-lab`         | Next.js developer/admin map, controls, inspector, and event log  |
-| `apps/game-api`          | Hono HTTP boundary and in-memory simulation service              |
-| `packages/world-engine`  | Pure world validation and consequence application                |
-| `packages/agent-runtime` | OpenRouter provider boundary and explicit scripted testing seams |
-| `packages/shared`        | Runtime-validated schemas and inferred domain types              |
+| Path                          | Responsibility                                                   |
+| ----------------------------- | ---------------------------------------------------------------- |
+| `apps/world-lab`              | Next.js developer/admin map, controls, inspector, and event log  |
+| `apps/game-api`               | Hono HTTP boundary and in-memory simulation service              |
+| `packages/world-engine`       | Pure world validation and consequence application                |
+| `packages/agent-runtime`      | OpenRouter provider boundary and explicit scripted testing seams |
+| `packages/shared`             | Runtime-validated schemas and inferred domain types              |
+| `packages/experiment-archive` | Durable SQLite imports and bounded research queries              |
 
 ## Local development
 
@@ -52,7 +53,7 @@ The command reads only `OPENROUTER_API_KEY` from the repository-root `.env`; its
 
 The compatible default centers on Toledo, Ohio (`41.6528, -83.5379`) at H3 resolution 9 and renders the same deterministic radius-six disk of exactly 127 cells with eight fixed perimeter starts. World Setup previews and applies resolution 8–11 scenarios with 1–32 agents, radius at most 40, at most 5,000 actual generated cells, and a 12 km default physical communication range. Schema-v9 exports preserve the authoritative scenario and `durable-influence-v2` attribution. MapLibre uses CARTO Dark Matter's tokenless raster tiles with `© OpenStreetMap contributors © CARTO` attribution.
 
-Alliance leadership, merging, custom metadata, combat systems, relationship scores, group chat, persistent memory, player mechanics, persistence, and autonomous scheduling remain deferred.
+Alliance leadership, merging, custom metadata, combat systems, relationship scores, group chat, persistent memory, player mechanics, restartable world persistence, and autonomous scheduling remain deferred.
 
 When every development cell is infected, World Lab automatically pauses playback and disables Start to avoid accidental provider calls. Reset and export remain available, and Single turn remains an explicitly manual diagnostic action.
 
@@ -63,3 +64,5 @@ The persistent operator shell keeps execution controls, run target, playback spe
 The agent roster defaults to browser-local **Follow turn** behavior: the inspector follows the active request, or the next scheduled agent while paused. Selecting an agent manually disables following without hiding the roster's textual Acting/Next marker; the preference remains in that browser and is never exported. Public world chat and the event log are newest-first bounded feeds, and the shared Model and Export dialogs keep their headers/actions fixed while their bodies scroll within the viewport.
 
 See [Testing](docs/TESTING.md), [Architecture](docs/ARCHITECTURE.md), [Security](docs/SECURITY.md), the accepted future [Gameplay Foundation](docs/GAMEPLAY_FOUNDATION.md), and the [Roadmap](ROADMAP.md).
+
+Completed schema-v9 exports can be imported into an ignored local SQLite archive and queried without repeatedly loading full JSON artifacts. See [Local experiment archive](docs/EXPERIMENT_ARCHIVE.md).

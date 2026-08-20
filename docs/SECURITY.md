@@ -63,7 +63,9 @@ The Game API captures only schema-validated safe observations, requested world a
 
 Export requests, agent IDs, levels, ranges, outcome/world-action filters, communication channel/status filters, and Custom dependencies are runtime-validated. Filtering and metrics remain server-owned. Schema version 8 adds allowlisted behavior metadata without changing schema-v7 model and attempt-accounting meanings; schema-v5 through v7 imports remain supported. Selected-agent exports use sender/recipient-aware communication filtering and direct multi-agent relevance for proposals and membership changes; unrelated direct messages and rejected diplomacy are excluded. Reset clears communications, alliances, proposals, alliance events, and their metrics while preserving active personality values and unlocking preserved assignments for the new experiment.
 
-Actual cost is accepted only from OpenRouter's safe `usage.cost`. Missing cost is unknown, never zero; scripted-test providers explicitly report zero. There is still no authentication, budget enforcement, persistence, provider-management endpoint, upload, or sharing link. The loopback-only boundary remains mandatory.
+Actual cost is accepted only from OpenRouter's safe `usage.cost`. Missing cost is unknown, never zero; scripted-test providers explicitly report zero. The active Game API still has no authentication, budget enforcement, restartable persistence, provider-management endpoint, upload, or sharing link. The loopback-only boundary remains mandatory.
+
+The offline experiment archive adds local persistence only for complete schema-validated safe exports and explicitly curated Markdown notes. Imports scan for prohibited credential/private-reasoning fields and recognizable credential values before a transaction begins; failures roll back. The default `.agentborne/` database is ignored. The CLI exposes bounded typed queries, not arbitrary SQL, and adds no MCP, embedding, vector-store, or network-listener surface.
 
 ## Reporting
 
