@@ -15,6 +15,8 @@ export const MESSAGE_MAX_LENGTH = 280;
 /** Legacy H3-ring range retained only for schema-v5-v9 import compatibility. */
 export const MESSAGE_RANGE = 3;
 export const DEFAULT_COMMUNICATION_RANGE_KM = 12;
+export const DEFAULT_MINIMUM_TICK_INTERVAL_MINUTES = 5;
+export const DEFAULT_MAXIMUM_TICK_INTERVAL_MINUTES = 10;
 export const NEUTRAL_AGENT_COLOR = '#b2d3a8';
 export const RECENT_PUBLIC_MESSAGE_LIMIT = 12;
 export const RECENT_DIRECT_MESSAGE_LIMIT = 6;
@@ -28,7 +30,12 @@ export const OPENROUTER_MODEL_CONTEXT_MINIMUM = 16_384;
 export const OPENROUTER_MAX_OUTPUT_TOKENS = 4_096;
 export const OPENROUTER_PROVIDER_TIMEOUT_MS = 75_000;
 export const OPENROUTER_429_FALLBACK_BACKOFF_MS = 1_500;
-export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v3';
+export const LEGACY_AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v3';
+export const AGENT_DECISION_CONTRACT_VERSION = 'text-flat-json-v4';
+export const agentDecisionContractVersionSchema = z.enum([
+  LEGACY_AGENT_DECISION_CONTRACT_VERSION,
+  AGENT_DECISION_CONTRACT_VERSION,
+]);
 export const OBJECTIVE_PROMPT_VERSION = 'durable-influence-v2';
 export const OPENROUTER_REQUIRED_PARAMETERS = ['max_tokens'] as const;
 export const DEVELOPMENT_WORLD_CONFIG = {
@@ -180,6 +187,8 @@ export const allianceProposalSchema = z
     proposerAllianceId: allianceIdSchema.nullable(),
     originatingTurn: z.number().int().positive(),
     expirationTurn: z.number().int().positive(),
+    originatingTick: z.number().int().positive().optional(),
+    expirationTick: z.number().int().positive().optional(),
   })
   .strict()
   .refine(
@@ -187,7 +196,25 @@ export const allianceProposalSchema = z
     {
       message: 'Alliance proposal participants must be distinct.',
     },
-  );
+  )
+  .superRefine((proposal, context) => {
+    const hasOriginatingTick = proposal.originatingTick !== undefined;
+    const hasExpirationTick = proposal.expirationTick !== undefined;
+    if (hasOriginatingTick !== hasExpirationTick)
+      context.addIssue({
+        code: 'custom',
+        message: 'Tick proposal attribution must be present together.',
+      });
+    else if (
+      hasOriginatingTick &&
+      proposal.expirationTick !== proposal.originatingTick! + 2
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['expirationTick'],
+        message: 'Tick proposals must remain valid for exactly two ticks.',
+      });
+  });
 export type AllianceProposal = z.infer<typeof allianceProposalSchema>;
 
 export const waitActionSchema = z.object({ type: z.literal('wait') });
@@ -606,14 +633,20 @@ function validateWorldControllers(
         path: ['pendingAllianceProposals', index, 'recipientAgentId'],
         message: 'A recipient may have at most one incoming proposal.',
       });
-    if (
-      proposal.expirationTurn !==
-      proposal.originatingTurn + world.agents.length * 2
-    )
+    const hasOriginatingTick = proposal.originatingTick !== undefined;
+    const hasExpirationTick = proposal.expirationTick !== undefined;
+    const validLifetime =
+      hasOriginatingTick === hasExpirationTick &&
+      (hasOriginatingTick
+        ? proposal.expirationTick === proposal.originatingTick! + 2
+        : proposal.expirationTurn ===
+          proposal.originatingTurn + world.agents.length * 2);
+    if (!validLifetime)
       context.addIssue({
         code: 'custom',
         path: ['pendingAllianceProposals', index, 'expirationTurn'],
-        message: 'Proposal expiration must allow two complete roster rounds.',
+        message:
+          'Proposal expiration must allow two ticks or two legacy roster rounds.',
       });
     if (
       proposal.proposerAllianceId &&
@@ -1426,6 +1459,10 @@ export type ModelAttempt = z.infer<typeof modelAttemptSchema>;
 
 const turnRecordBaseSchema = z.object({
   turnNumber: z.number().int().positive(),
+  tickNumber: z.number().int().positive().optional(),
+  tickPosition: z.number().int().positive().optional(),
+  virtualTime: z.iso.datetime().optional(),
+  tickIntervalMinutes: z.number().int().positive().optional(),
   agentId: agentIdSchema,
   startedAt: z.iso.datetime(),
   completedAt: z.iso.datetime(),
@@ -1470,6 +1507,11 @@ export const agentTurnRecordSchema = z
       provider: providerMetadataSchema.optional(),
     }),
     turnRecordBaseSchema.extend({
+      outcome: z.literal('lost-tick'),
+      failure: providerFailureSchema,
+      provider: providerMetadataSchema.optional(),
+    }),
+    turnRecordBaseSchema.extend({
       outcome: z.literal('operator-skipped'),
       skipKind: z.enum(['manual', 'unattended']).default('manual'),
       failure: providerFailureSchema,
@@ -1477,6 +1519,20 @@ export const agentTurnRecordSchema = z
     }),
   ])
   .superRefine((turn, context) => {
+    const tickFields = [
+      turn.tickNumber,
+      turn.tickPosition,
+      turn.virtualTime,
+      turn.tickIntervalMinutes,
+    ];
+    if (
+      tickFields.some((value) => value !== undefined) &&
+      tickFields.some((value) => value === undefined)
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Tick metadata must be present together.',
+      });
     if (
       turn.outcome === 'operator-skipped' &&
       turn.failure.model !== undefined &&
@@ -1574,6 +1630,18 @@ export const worldSetupRequestSchema = z
       .min(WORLD_SCENARIO_LIMITS.minimumCommunicationRangeKm)
       .max(WORLD_SCENARIO_LIMITS.maximumCommunicationRangeKm)
       .default(DEFAULT_COMMUNICATION_RANGE_KM),
+    minimumTickIntervalMinutes: z
+      .number()
+      .int()
+      .min(WORLD_SCENARIO_LIMITS.minimumTickIntervalMinutes)
+      .max(WORLD_SCENARIO_LIMITS.maximumTickIntervalMinutes)
+      .default(DEFAULT_MINIMUM_TICK_INTERVAL_MINUTES),
+    maximumTickIntervalMinutes: z
+      .number()
+      .int()
+      .min(WORLD_SCENARIO_LIMITS.minimumTickIntervalMinutes)
+      .max(WORLD_SCENARIO_LIMITS.maximumTickIntervalMinutes)
+      .default(DEFAULT_MAXIMUM_TICK_INTERVAL_MINUTES),
     patientZeroAgentId: agentIdSchema.nullable().default(null),
     roster: scenarioRosterSchema,
     modelConfiguration: experimentModelConfigurationSchema,
@@ -1587,6 +1655,12 @@ export const worldSetupRequestSchema = z
   })
   .strict()
   .superRefine((request, context) => {
+    if (request.minimumTickIntervalMinutes > request.maximumTickIntervalMinutes)
+      context.addIssue({
+        code: 'custom',
+        path: ['maximumTickIntervalMinutes'],
+        message: 'Maximum tick interval must be at least the minimum.',
+      });
     const ids = new Set(request.roster.map(({ id }) => id));
     if (
       request.behaviorConfiguration.assignments.length !== ids.size ||
@@ -1626,6 +1700,9 @@ export const defaultWorldSetupResponseSchema = z.object({
 
 export const appliedScenarioSchema = worldSetupRequestSchema
   .safeExtend({
+    decisionContractVersion: agentDecisionContractVersionSchema.default(
+      AGENT_DECISION_CONTRACT_VERSION,
+    ),
     exactCellCount: z
       .number()
       .int()
@@ -1713,6 +1790,15 @@ export const simulationSnapshotSchema = z
     world: worldSnapshotSchema,
     scenario: appliedScenarioSchema,
     turnNumber: z.number().int().nonnegative(),
+    tickNumber: z.number().int().nonnegative().default(0),
+    virtualTime: z.iso.datetime().default('2026-08-13T12:00:00.000Z'),
+    lastTickIntervalMinutes: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .default(null),
+    resolutionOrder: z.array(agentIdSchema).default([]),
     nextAgentId: agentIdSchema,
     activeAgentId: agentIdSchema.nullable(),
     cancellationRequested: z.boolean().default(false),
@@ -1751,6 +1837,29 @@ export const simulationSnapshotSchema = z
   })
   .superRefine((snapshot, context) => {
     const rosterIds = new Set(snapshot.world.agents.map(({ id }) => id));
+    if (snapshot.tickNumber === 0) {
+      if (
+        snapshot.resolutionOrder.length !== 0 ||
+        snapshot.lastTickIntervalMinutes !== null
+      )
+        context.addIssue({
+          code: 'custom',
+          path: ['tickNumber'],
+          message:
+            'An unstarted simulation cannot have tick resolution metadata.',
+        });
+    } else if (
+      snapshot.resolutionOrder.length !== rosterIds.size ||
+      new Set(snapshot.resolutionOrder).size !== rosterIds.size ||
+      snapshot.resolutionOrder.some((id) => !rosterIds.has(id)) ||
+      snapshot.lastTickIntervalMinutes === null
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['resolutionOrder'],
+        message:
+          'A committed tick requires one ordered entry per active agent and an interval.',
+      });
     if (
       snapshot.experiment.currentTerritory.length !== rosterIds.size ||
       snapshot.experiment.currentTerritory.some(
@@ -1900,6 +2009,43 @@ export const singleTurnResponseSchema = z.object({
 });
 export type SingleTurnResponse = z.infer<typeof singleTurnResponseSchema>;
 
+export const singleTickResponseSchema = z
+  .object({
+    snapshot: simulationSnapshotSchema,
+    tickNumber: z.number().int().positive(),
+    records: z.array(agentTurnRecordSchema).min(1),
+  })
+  .superRefine((response, context) => {
+    const roster = response.snapshot.world.agents.map(({ id }) => id);
+    const positions = response.records.map(({ tickPosition }) => tickPosition);
+    const agents = response.records.map(({ agentId }) => agentId);
+    const first = response.records[0];
+    const consistent =
+      response.snapshot.tickNumber === response.tickNumber &&
+      response.records.length === roster.length &&
+      new Set(agents).size === roster.length &&
+      agents.every((id) => roster.includes(id)) &&
+      positions.every((position, index) => position === index + 1) &&
+      response.records.every(
+        (record) =>
+          record.tickNumber === response.tickNumber &&
+          record.virtualTime === first?.virtualTime &&
+          record.tickIntervalMinutes === first?.tickIntervalMinutes,
+      ) &&
+      agents.every(
+        (id, index) => response.snapshot.resolutionOrder[index] === id,
+      ) &&
+      response.snapshot.virtualTime === first?.virtualTime &&
+      response.snapshot.lastTickIntervalMinutes === first?.tickIntervalMinutes;
+    if (!consistent)
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Tick response records must exactly match the committed snapshot and roster.',
+      });
+  });
+export type SingleTickResponse = z.infer<typeof singleTickResponseSchema>;
+
 export const cancelledTurnResponseSchema = z.object({
   snapshot: simulationSnapshotSchema,
   cancelled: z.literal(true),
@@ -2029,20 +2175,63 @@ export type ExperimentConfigurationEvent = z.infer<
   typeof experimentConfigurationEventSchema
 >;
 
-export const experimentManifestSchema = z.object({
-  id: experimentIdSchema,
-  startedAt: z.iso.datetime(),
-  generatedAt: z.iso.datetime().optional(),
-  providerMode: providerModeSchema,
-  modelConfiguration: experimentModelConfigurationSchema.optional(),
-  behaviorConfiguration: behaviorConfigurationSchema.optional(),
-  scenario: appliedScenarioSchema.optional(),
-  initialAgents: z
-    .array(agentProfileSchema)
-    .min(WORLD_SCENARIO_LIMITS.minimumAgents)
-    .max(WORLD_SCENARIO_LIMITS.maximumAgents)
-    .optional(),
-});
+export const experimentManifestSchema = z.preprocess(
+  (input) => {
+    if (typeof input !== 'object' || input === null || Array.isArray(input))
+      return input;
+    const manifest = input as Record<string, unknown>;
+    const resolvedVersion =
+      manifest.decisionContractVersion === AGENT_DECISION_CONTRACT_VERSION
+        ? AGENT_DECISION_CONTRACT_VERSION
+        : LEGACY_AGENT_DECISION_CONTRACT_VERSION;
+    const scenario = manifest.scenario;
+    return {
+      ...manifest,
+      decisionContractVersion:
+        manifest.decisionContractVersion ?? resolvedVersion,
+      ...(typeof scenario === 'object' &&
+      scenario !== null &&
+      !Array.isArray(scenario) &&
+      !('decisionContractVersion' in scenario)
+        ? {
+            scenario: {
+              ...scenario,
+              decisionContractVersion: resolvedVersion,
+            },
+          }
+        : {}),
+    };
+  },
+  z
+    .object({
+      id: experimentIdSchema,
+      startedAt: z.iso.datetime(),
+      generatedAt: z.iso.datetime().optional(),
+      providerMode: providerModeSchema,
+      decisionContractVersion: agentDecisionContractVersionSchema,
+      modelConfiguration: experimentModelConfigurationSchema.optional(),
+      behaviorConfiguration: behaviorConfigurationSchema.optional(),
+      scenario: appliedScenarioSchema.optional(),
+      initialAgents: z
+        .array(agentProfileSchema)
+        .min(WORLD_SCENARIO_LIMITS.minimumAgents)
+        .max(WORLD_SCENARIO_LIMITS.maximumAgents)
+        .optional(),
+    })
+    .superRefine((manifest, context) => {
+      if (
+        manifest.scenario !== undefined &&
+        manifest.scenario.decisionContractVersion !==
+          manifest.decisionContractVersion
+      )
+        context.addIssue({
+          code: 'custom',
+          path: ['scenario', 'decisionContractVersion'],
+          message:
+            'Scenario decision-contract attribution must match the experiment manifest.',
+        });
+    }),
+);
 export type ExperimentManifest = z.infer<typeof experimentManifestSchema>;
 
 export const experimentRetentionSchema = z.object({
@@ -2072,6 +2261,7 @@ export const metricCountsSchema = z
     accepted: z.number().int().nonnegative(),
     rejected: z.number().int().nonnegative(),
     providerErrors: z.number().int().nonnegative(),
+    lostTicks: z.number().int().nonnegative().default(0),
     operatorSkipped: z.number().int().nonnegative().default(0),
     modelCalls: z.number().int().nonnegative().default(0),
     failedModelAttempts: z.number().int().nonnegative().default(0),
@@ -2215,6 +2405,7 @@ export const metricCountsSchema = z
       metrics.accepted +
         metrics.rejected +
         metrics.providerErrors +
+        metrics.lostTicks +
         metrics.operatorSkipped
     )
       context.addIssue({
@@ -2263,6 +2454,7 @@ export const exportOutcomeSchema = z.enum([
   'rejected',
   'provider-error',
   'operator-skipped',
+  'lost-tick',
 ]);
 export const exportActionSchema = z.enum(['move', 'infect', 'capture', 'wait']);
 export const exportCommunicationChannelSchema = z.enum([
@@ -2367,7 +2559,7 @@ export const experimentExportRequestSchema = z
   .object({
     agents: exportSelectionSchema,
     turns: exportTurnSelectionSchema,
-    outcomes: z.array(exportOutcomeSchema).min(1).max(4),
+    outcomes: z.array(exportOutcomeSchema).min(1).max(5),
     actions: z.array(exportActionSchema).min(1).max(4),
     communications: z
       .object({
@@ -2404,6 +2596,7 @@ export type ExperimentExportRequest = z.infer<
 export const experimentExportPreviewSchema = z.object({
   experimentId: experimentIdSchema,
   matchingTurnCount: z.number().int().nonnegative(),
+  matchingTickCount: z.number().int().nonnegative().optional(),
   matchingCommunicationCount: z.number().int().nonnegative(),
   matchingControlChangeCount: z.number().int().nonnegative(),
   matchingDiplomacyEventCount: z.number().int().nonnegative(),
@@ -2426,29 +2619,65 @@ export type ExperimentExportPreview = z.infer<
   typeof experimentExportPreviewSchema
 >;
 
-export const experimentExportTurnSchema = z.object({
-  turnNumber: z.number().int().positive(),
-  startedAt: z.iso.datetime(),
-  completedAt: z.iso.datetime(),
-  agentId: agentIdSchema,
-  behavior: behaviorAssignmentSchema.optional(),
-  outcome: exportOutcomeSchema,
-  worldAction: worldActionSchema.optional(),
-  communication: communicationIntentSchema.optional(),
-  diplomacy: diplomacyIntentSchema.optional(),
-  summary: z.string().trim().min(1).max(MODEL_SUMMARY_MAX_LENGTH).optional(),
-  worldActionSummary: z.string().trim().min(1).max(300).optional(),
-  communicationSummary: z.string().trim().min(1).max(300).optional(),
-  diplomacySummary: z.string().trim().min(1).max(300).optional(),
-  personality: personalitySchema.optional(),
-  observation: agentObservationObjectSchema.partial().optional(),
-  worldActionResult: worldActionResultSchema.optional(),
-  communicationResult: communicationResultSchema.optional(),
-  diplomacyResult: diplomacyResultSchema.optional(),
-  failure: providerFailureSchema.optional(),
-  provider: providerMetadataSchema.optional(),
-  modelAttempts: z.array(modelAttemptSchema).max(1_000).default([]),
+export const experimentTickSummarySchema = z.object({
+  tickNumber: z.number().int().positive(),
+  virtualTime: z.iso.datetime(),
+  intervalMinutes: z.number().int().positive(),
+  agentRecordCount: z.number().int().positive(),
+  lostTicks: z.number().int().nonnegative(),
+  deadlineMisses: z.number().int().nonnegative(),
+  providerCallCount: z.number().int().nonnegative(),
+  aggregateDecisionLatencyMs: z.number().int().nonnegative(),
+  maximumDecisionLatencyMs: z.number().int().nonnegative(),
+  knownCostCredits: z.number().finite().nonnegative(),
+  attemptsWithUnknownCost: z.number().int().nonnegative(),
 });
+export type ExperimentTickSummary = z.infer<typeof experimentTickSummarySchema>;
+
+export const experimentExportTurnSchema = z
+  .object({
+    turnNumber: z.number().int().positive(),
+    tickNumber: z.number().int().positive().optional(),
+    tickPosition: z.number().int().positive().optional(),
+    virtualTime: z.iso.datetime().optional(),
+    tickIntervalMinutes: z.number().int().positive().optional(),
+    startedAt: z.iso.datetime(),
+    completedAt: z.iso.datetime(),
+    agentId: agentIdSchema,
+    behavior: behaviorAssignmentSchema.optional(),
+    outcome: exportOutcomeSchema,
+    worldAction: worldActionSchema.optional(),
+    communication: communicationIntentSchema.optional(),
+    diplomacy: diplomacyIntentSchema.optional(),
+    summary: z.string().trim().min(1).max(MODEL_SUMMARY_MAX_LENGTH).optional(),
+    worldActionSummary: z.string().trim().min(1).max(300).optional(),
+    communicationSummary: z.string().trim().min(1).max(300).optional(),
+    diplomacySummary: z.string().trim().min(1).max(300).optional(),
+    personality: personalitySchema.optional(),
+    observation: agentObservationObjectSchema.partial().optional(),
+    worldActionResult: worldActionResultSchema.optional(),
+    communicationResult: communicationResultSchema.optional(),
+    diplomacyResult: diplomacyResultSchema.optional(),
+    failure: providerFailureSchema.optional(),
+    provider: providerMetadataSchema.optional(),
+    modelAttempts: z.array(modelAttemptSchema).max(1_000).default([]),
+  })
+  .superRefine((turn, context) => {
+    const fields = [
+      turn.tickNumber,
+      turn.tickPosition,
+      turn.virtualTime,
+      turn.tickIntervalMinutes,
+    ];
+    if (
+      fields.some((value) => value !== undefined) &&
+      fields.some((value) => value === undefined)
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Export tick metadata must be present together.',
+      });
+  });
 
 export const experimentExportWorldStateSchema = worldSnapshotObjectSchema
   .omit({ events: true })
@@ -2536,7 +2765,7 @@ export type ExperimentExportWorldState = z.infer<
 
 export const experimentExportDocumentSchema = z
   .object({
-    schemaVersion: z.literal(9),
+    schemaVersion: z.union([z.literal(9), z.literal(10)]),
     generatedAt: z.iso.datetime(),
     experiment: experimentManifestSchema,
     retention: experimentRetentionSchema,
@@ -2547,6 +2776,7 @@ export const experimentExportDocumentSchema = z
         .min(1)
         .max(WORLD_SCENARIO_LIMITS.maximumAgents),
       matchingTurnCount: z.number().int().nonnegative(),
+      matchingTickCount: z.number().int().nonnegative().optional(),
       matchingCommunicationCount: z.number().int().nonnegative(),
       matchingControlChangeCount: z.number().int().nonnegative(),
       matchingDiplomacyEventCount: z.number().int().nonnegative(),
@@ -2571,9 +2801,93 @@ export const experimentExportDocumentSchema = z
     communications: z.array(exportedCommunicationSchema).optional(),
     controlChanges: z.array(exportedControlChangeSchema).optional(),
     allianceEvents: z.array(allianceEventSchema).optional(),
+    tickSummaries: z.array(experimentTickSummarySchema).optional(),
     turns: z.array(experimentExportTurnSchema),
   })
   .superRefine((document, context) => {
+    const hasTickMetadata = (turn: (typeof document.turns)[number]) =>
+      turn.tickNumber !== undefined &&
+      turn.tickPosition !== undefined &&
+      turn.virtualTime !== undefined &&
+      turn.tickIntervalMinutes !== undefined;
+    if (document.schemaVersion === 9 && document.turns.some(hasTickMetadata))
+      context.addIssue({
+        code: 'custom',
+        message: 'Schema-v9 turns cannot claim simultaneous tick metadata.',
+      });
+    if (document.schemaVersion === 10) {
+      if (document.tickSummaries === undefined)
+        context.addIssue({
+          code: 'custom',
+          message: 'Schema-v10 exports require canonical tick summaries.',
+        });
+      if (document.selection.matchingTickCount === undefined)
+        context.addIssue({
+          code: 'custom',
+          message: 'Schema-v10 exports require a matching tick count.',
+        });
+      if (document.turns.some((turn) => !hasTickMetadata(turn)))
+        context.addIssue({
+          code: 'custom',
+          message: 'Every schema-v10 turn requires complete tick metadata.',
+        });
+      const groups = new Map<number, typeof document.turns>();
+      for (const turn of document.turns) {
+        if (turn.tickNumber === undefined) continue;
+        groups.set(turn.tickNumber, [
+          ...(groups.get(turn.tickNumber) ?? []),
+          turn,
+        ]);
+      }
+      for (const [tick, records] of groups) {
+        const first = records[0];
+        const summary = document.tickSummaries?.find(
+          ({ tickNumber }) => tickNumber === tick,
+        );
+        if (
+          new Set(records.map(({ agentId }) => agentId)).size !==
+            records.length ||
+          new Set(records.map(({ tickPosition }) => tickPosition)).size !==
+            records.length ||
+          records.some(
+            (record) =>
+              record.virtualTime !== first?.virtualTime ||
+              record.tickIntervalMinutes !== first?.tickIntervalMinutes,
+          )
+        )
+          context.addIssue({
+            code: 'custom',
+            message: `Schema-v10 tick ${tick} is internally inconsistent.`,
+          });
+        if (
+          !summary ||
+          summary.agentRecordCount !== records.length ||
+          summary.virtualTime !== first?.virtualTime ||
+          summary.intervalMinutes !== first?.tickIntervalMinutes
+        )
+          context.addIssue({
+            code: 'custom',
+            message: `Schema-v10 tick ${tick} summary does not match its records.`,
+          });
+      }
+      if (
+        document.tickSummaries !== undefined &&
+        (new Set(document.tickSummaries.map(({ tickNumber }) => tickNumber))
+          .size !== document.tickSummaries.length ||
+          document.tickSummaries.length !== groups.size ||
+          document.selection.matchingTickCount !== groups.size)
+      )
+        context.addIssue({
+          code: 'custom',
+          message:
+            'Schema-v10 tick counts and summaries must match exported records.',
+        });
+    }
+    if (document.schemaVersion === 9 && document.tickSummaries !== undefined)
+      context.addIssue({
+        code: 'custom',
+        message: 'Schema-v9 exports cannot contain tick summaries.',
+      });
     const level = document.filters.level;
     const custom = level === 'custom' ? document.filters.custom : undefined;
     const requiresMetrics = level !== 'custom' || custom?.computedMetrics;

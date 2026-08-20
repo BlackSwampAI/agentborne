@@ -2,8 +2,8 @@ import { expect, test } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { experimentExportDocumentSchema } from '@hexzero/shared';
 
-const ROOK_ID = '2507bb46-7ae4-45ca-8dda-644c4f85ca14';
 const EMBER_ID = '128f3f38-6b7d-4db7-9e95-751b4ce2681e';
+const CIPHER_ID = '89ce9ddb-611f-4a46-8f7b-36e656494aa2';
 const MINGLE_PERSONALITY =
   'You are a social coalition-builder. Seek agents, initiate and continue conversations, propose alliances, answer offers, negotiate borders, and coordinate captures against dominant rivals. Prefer cooperation and public diplomacy over silent expansion, but protect your own territory and leave an alliance that repeatedly ignores or exploits you. Make concrete proposals rather than merely announcing actions.';
 
@@ -137,9 +137,8 @@ test('runs the complete deterministic World Lab browser flow', async ({
     'Mingle0',
   );
 
-  const followTurn = page.getByRole('checkbox', { name: 'Follow turn' });
+  const followTurn = page.getByRole('checkbox', { name: 'Follow latest' });
   await expect(followTurn).toBeChecked();
-  await expect(page.getByLabel('Agent roster').getByText('Next')).toBeVisible();
 
   await page.getByRole('button', { name: 'Collapse activity' }).click();
   await expect(page.locator('.bottom-dock')).toHaveCSS('height', '54px');
@@ -177,15 +176,13 @@ test('runs the complete deterministic World Lab browser flow', async ({
   ).toBeVisible();
 
   await followTurn.check();
-  await expect(page.getByLabel('Agent roster').getByText('Next')).toBeVisible();
-  await page.getByRole('button', { name: 'Single turn' }).click();
-  await expect(page.getByRole('heading', { name: /Rook/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Single tick' }).click();
   await page.getByRole('button', { name: 'Select agent Ember' }).click();
   await expect(followTurn).not.toBeChecked();
   await page.getByRole('tab', { name: 'Event log' }).click();
-  await expect(
-    page.getByText(/Infection .* direct message accepted/),
-  ).toBeVisible();
+  const tickActivity = page.getByText(/Infection .* direct message accepted/);
+  await expect(tickActivity).toHaveCount(8);
+  await expect(tickActivity.first()).toBeVisible();
   await expect(page.getByLabel('Direct-message history')).toContainText(
     'Sent Rook',
   );
@@ -199,17 +196,17 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '127');
   await expect(worldMap).toHaveAttribute(
     'data-rendered-infected-cell-count',
-    '1',
+    '8',
   );
   await expect(page.getByTestId('infected-count')).toHaveText(
-    '1 rendered infected',
+    '8 rendered infected',
   );
 
   await page.getByRole('button', { name: 'Select agent Rook' }).click();
   await expect(page.getByLabel('Direct-message history')).toContainText(
     'Received Ember',
   );
-  await page.getByRole('button', { name: 'Single turn' }).click();
+  await page.getByRole('button', { name: 'Single tick' }).click();
   const recipientObservation = page.getByText('Latest structured observation');
   await recipientObservation.click();
   await expect(
@@ -221,8 +218,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await page.getByRole('tab', { name: 'Scoreboard' }).click();
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Ember1');
   await page.getByRole('tab', { name: 'Agent' }).click();
-  for (let index = 0; index < 8; index += 1)
-    await page.getByRole('button', { name: 'Single turn' }).click();
+  await page.getByRole('button', { name: 'Single tick' }).click();
   await page.getByRole('tab', { name: 'Scoreboard' }).click();
   await expect(page.getByLabel('Alliance and territory panel')).toContainText(
     'Mingle',
@@ -239,8 +235,7 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(
     page.getByRole('button', { name: 'Select agent Solace' }),
   ).toHaveAttribute('data-effective-color', '#0072B2');
-  for (let index = 0; index < 8; index += 1)
-    await page.getByRole('button', { name: 'Single turn' }).click();
+  await page.getByRole('button', { name: 'Single tick' }).click();
   await page.getByRole('tab', { name: /Private comms/ }).click();
   const privateComms = page.getByRole('tabpanel', {
     name: 'Private communications',
@@ -250,41 +245,50 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(privateComms).toContainText('Coordinate privately');
   await privateComms.getByRole('button', { name: 'Direct' }).click();
   await expect(privateComms).toContainText('Meet near the center');
-  await privateComms.getByRole('button', { name: 'Rook' }).click();
+  const rookParticipants = privateComms.getByRole('button', { name: 'Rook' });
+  await expect(rookParticipants).toHaveCount(3);
+  await rookParticipants.first().click();
   await expect(page.getByRole('heading', { name: /Rook/ })).toBeVisible();
   await page.getByRole('tab', { name: 'Event log' }).click();
   await expect(
     page.getByRole('list', { name: 'World event log' }),
   ).not.toContainText('Coordinate privately');
   await page.getByRole('tab', { name: 'Agent' }).click();
-  await expect(page.getByLabel('Agent inspector')).toContainText('move →');
+  await expect(page.getByLabel('Agent inspector')).toContainText(
+    'World action: wait · accepted',
+  );
 
   let captured = false;
   for (let index = 0; index < 60 && !captured; index += 1) {
-    await page.getByRole('button', { name: 'Single turn' }).click();
-    captured = await page.getByText(/Rook captured .* from Ember/).isVisible();
+    await page.getByRole('button', { name: 'Single tick' }).click();
+    captured = await page
+      .getByText(/captured .* from/)
+      .first()
+      .isVisible();
   }
   expect(captured).toBe(true);
   await expect(worldMap).toHaveAttribute('data-controller-colors', /#b2d3a8/);
   await page.getByRole('tab', { name: 'Scoreboard' }).click();
-  await expect(page.getByLabel('Territory scoreboard')).toContainText('Ember0');
+  await expect(page.getByLabel('Territory scoreboard')).toContainText('Ember2');
   await expect(page.getByLabel('Territory scoreboard')).toContainText('Rook1');
+  await expect(page.getByLabel('Territory scoreboard')).toContainText(
+    'Cipher0',
+  );
   const agentRoster = page.getByLabel('Agent roster');
   await agentRoster.getByRole('button', { name: /^Ember / }).click();
   await expect(page.getByLabel('Recent territory changes')).toContainText(
-    'Lost',
-  );
-  await agentRoster.getByRole('button', { name: /^Rook / }).click();
-  await expect(page.getByLabel('Recent territory changes')).toContainText(
     'Gained',
   );
-  await agentRoster.getByRole('button', { name: /^Ember / }).click();
+  await agentRoster.getByRole('button', { name: /^Cipher / }).click();
+  await expect(page.getByLabel('Recent territory changes')).toContainText(
+    'Lost',
+  );
   await openActions();
   await page.getByRole('button', { name: 'Export' }).click();
   await page.getByRole('button', { name: 'Clear' }).click();
-  await page.getByRole('checkbox', { name: 'Ember', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Cipher', exact: true }).click();
   await expect(
-    page.getByRole('checkbox', { name: 'Ember', exact: true }),
+    page.getByRole('checkbox', { name: 'Cipher', exact: true }),
   ).toBeChecked();
   const exportDialog = page.getByRole('dialog', { name: 'Experiment export' });
   const exportGeometry = await exportDialog.evaluate((dialog) => ({
@@ -325,14 +329,14 @@ test('runs the complete deterministic World Lab browser flow', async ({
   const exported = experimentExportDocumentSchema.parse(
     JSON.parse(await readFile(downloadedPath!, 'utf8')),
   );
-  expect(exported.schemaVersion).toBe(9);
+  expect(exported.schemaVersion).toBe(10);
   expect(exported.filters.level).toBe('minimal');
-  expect(exported.selection.selectedAgentIds).toEqual([EMBER_ID]);
+  expect(exported.selection.selectedAgentIds).toEqual([CIPHER_ID]);
   expect(exported.turns).toEqual([]);
   expect(exported.controlChanges).toMatchObject([
     {
-      controllerAgentId: ROOK_ID,
-      previousControllerAgentId: EMBER_ID,
+      controllerAgentId: EMBER_ID,
+      previousControllerAgentId: CIPHER_ID,
     },
   ]);
   expect(exported.selection.matchingControlChangeCount).toBe(1);
@@ -353,13 +357,13 @@ test('runs the complete deterministic World Lab browser flow', async ({
     page.getByRole('dialog', { name: 'Experiment export' }),
   ).toBeHidden();
   await expect(
-    page.getByRole('button', { name: 'Select agent Ember' }),
+    page.getByRole('button', { name: 'Select agent Cipher' }),
   ).toHaveClass(/selected/);
 
   page.once('dialog', (dialog) => dialog.accept());
   await openActions();
   await page.getByRole('button', { name: 'Reset world' }).click();
-  await expect(page.getByText('Turn 0')).toBeVisible();
+  await expect(page.getByText('Tick 0')).toBeVisible();
   await expect(
     page.getByText(customPersonality, { exact: true }),
   ).toBeVisible();
@@ -384,16 +388,18 @@ test('runs the complete deterministic World Lab browser flow', async ({
     page.getByText('No direct messages for this agent yet.'),
   ).toBeVisible();
 
-  await page.getByRole('button', { name: 'Single turn' }).click();
-  await expect(page.getByText('Turn 1', { exact: true })).toBeVisible();
-  await expect(
-    page.getByText(/Infection .* direct message accepted/),
-  ).toBeVisible();
-  await page.getByRole('button', { name: 'Single turn' }).click();
-  await expect(page.getByText('Turn 2', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Single tick' }).click();
+  await expect(page.getByText('Tick 1', { exact: true })).toBeVisible();
+  const resetTickActivity = page.getByText(
+    /Infection .* direct message accepted/,
+  );
+  await expect(resetTickActivity).toHaveCount(8);
+  await expect(resetTickActivity.first()).toBeVisible();
+  await page.getByRole('button', { name: 'Single tick' }).click();
+  await expect(page.getByText('Tick 2', { exact: true })).toBeVisible();
   await expect(worldMap).toHaveAttribute(
     'data-rendered-infected-cell-count',
-    '1',
+    '8',
   );
   page.once('dialog', (dialog) => dialog.accept());
   await openActions();
@@ -407,11 +413,11 @@ test('runs the complete deterministic World Lab browser flow', async ({
   await expect(
     page.getByText(MINGLE_PERSONALITY, { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText('Turn 2', { exact: true })).toBeVisible();
+  await expect(page.getByText('Tick 2', { exact: true })).toBeVisible();
   await expect(worldMap).toHaveAttribute('data-rendered-h3-cell-count', '127');
   await expect(worldMap).toHaveAttribute(
     'data-rendered-infected-cell-count',
-    '1',
+    '8',
   );
   await expect(markers).toHaveCount(8);
   await page.setViewportSize({ width: 768, height: 900 });

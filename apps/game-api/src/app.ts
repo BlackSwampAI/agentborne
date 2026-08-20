@@ -25,6 +25,7 @@ import {
   restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
   singleTurnResponseSchema,
+  singleTickResponseSchema,
   updateAgentPersonalityRequestSchema,
   updateAgentPersonalityResponseSchema,
   updateExperimentModelsRequestSchema,
@@ -109,7 +110,12 @@ export function createApp(options: AppOptions = {}) {
   const mutationPromise = <T>(
     context: Context,
     operation:
-      'turn' | 'retry' | 'unattended-retry' | 'unattended-skip' | 'setup',
+      | 'turn'
+      | 'tick'
+      | 'retry'
+      | 'unattended-retry'
+      | 'unattended-skip'
+      | 'setup',
     execute: () => Promise<T>,
   ): Promise<T> => {
     const supplied =
@@ -499,6 +505,43 @@ export function createApp(options: AppOptions = {}) {
     }
   });
 
+  app.post('/api/simulation/tick', async (context) => {
+    try {
+      const response = await mutationPromise(context, 'tick', async () => {
+        const records = await service.executeNextTick();
+        return singleTickResponseSchema.parse({
+          snapshot: service.getSnapshot(),
+          tickNumber: records[0]!.tickNumber,
+          records,
+        });
+      });
+      return context.json(response);
+    } catch (error) {
+      if (error instanceof SimulationTurnCancelledError)
+        return context.json(
+          cancelledTurnResponseSchema.parse({
+            snapshot: service.getSnapshot(),
+            cancelled: true,
+          }),
+        );
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'tick_conflict', message: error.message },
+          }),
+          409,
+        );
+      if (error instanceof SimulationValidationError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: error.code, message: error.message },
+          }),
+          409,
+        );
+      throw error;
+    }
+  });
+
   app.post('/api/simulation/turn/cancel', (context) => {
     try {
       return context.json(
@@ -511,6 +554,24 @@ export function createApp(options: AppOptions = {}) {
         return context.json(
           apiErrorSchema.parse({
             error: { code: 'cancel_conflict', message: error.message },
+          }),
+          409,
+        );
+      throw error;
+    }
+  });
+  app.post('/api/simulation/tick/cancel', (context) => {
+    try {
+      return context.json(
+        cancelSimulationResponseSchema.parse({
+          snapshot: service.cancelCurrentRequest(),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SimulationConflictError)
+        return context.json(
+          apiErrorSchema.parse({
+            error: { code: 'tick_cancel_conflict', message: error.message },
           }),
           409,
         );

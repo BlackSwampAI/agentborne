@@ -1,19 +1,34 @@
 # Testing
 
-Focused deterministic coverage includes physical-distance messaging across H3 resolutions, the eight-agent observation cap, alliance long-range visibility and delivery, channel privacy, seeded move-affordance ordering, effective neutral/alliance colors, and operator-only private-feed filters. Provider tests remain offline and use the flat `text-flat-json-v3` contract.
+Simultaneous-tick coverage is deterministic and offline. Scripted-provider tests
+assert frozen observations, bounded concurrent starts and one deadline,
+completion-order-independent resolution, seeded order and virtual-interval
+reproduction, deterministic phased conflicts, isolated lost ticks, atomic
+cancellation, per-agent model/reasoning dispatch, complete-tick retention,
+schema-v10 export/archive behavior, and schema-v9 compatibility. World Lab tests
+cover Single tick, 5/10/25/50/100 targets, the default target of 25, per-agent
+cost warnings, cancellation reconciliation, and lost-tick status.
+
+Focused deterministic coverage includes physical-distance messaging across H3 resolutions, the eight-agent observation cap, alliance long-range visibility and delivery, channel privacy, seeded move-affordance ordering, effective neutral/alliance colors, and operator-only private-feed filters. Provider tests remain offline and verify the flat `text-flat-json-v4` contract, its selective-communication policy text, unchanged wire parsing, and legacy v3 attribution compatibility.
 
 Patient Zero coverage verifies disabled/legacy scenario defaults, valid roster
 designation, bounded exclusive global awareness, Zero authority and private
 fan-out, Patient-Zero-endpoint direct replies, ordinary range enforcement,
 immutable retry observations, normal world-action legality, export telemetry,
 and restrained World Lab role/filter rendering. Provider tests use
-`text-flat-json-v3`; no live provider or geocoder is involved.
+`text-flat-json-v4`; no live provider or geocoder is involved.
+
+Selective communication is evaluated empirically with a same-model,
+same-scenario 10-tick comparison. Fewer than 40 messages across 80 decisions
+and near-zero routine action narration are useful diagnostic targets, not
+deterministic release gates or claims that a model will comply. Default tests
+assert only the prompt policy, contract attribution, parsing, and compatibility.
 
 Operator-workspace component coverage verifies that Live/Agents switching preserves the mounted execution state, agent selection routes to the semantic inspector, Scoreboard remains directly reachable, and failure/recovery activity stays bounded. Playwright exercises the persistent command bar, workspace navigation, contextual inspector tabs, tabbed activity dock, overflow-routed setup/export actions, and desktop/narrow viewport containment. These tests continue to use only the deterministic provider.
 
 Configurable-scenario coverage is deterministic and offline: `world-scenario-v1`, temporary roster/world limits, actual H3 count and area, radius presets, seeded identities and separated spawns, default compatibility, infeasibility, pure preview, atomic apply/current-scenario reset, dynamic assignment reconciliation, density warnings, and schema-v9 attribution. Geocoding uses injected fakes; browser coverage retains the default flow and adds a 469-cell/12-agent scenario flow.
 
-Unattended-recovery coverage uses deterministic providers and timers to distinguish initial/internal/manual/unattended attempts, successful recovery, bounded exhaustion and one skip, run-target preservation, pause/cancel behavior, ineligible failures, reconciliation, idempotency, and browser-local controls. No live provider call is made.
+Legacy sequential recovery remains covered only as schema-v9 compatibility. Tick tests instead verify that an exhausted per-agent repair or transient retry becomes a final lost-tick record while sibling records commit, and that whole-tick cancellation commits nothing. No live provider call is made.
 
 Default validation is deterministic and offline except dependency/browser installation and optional basemap requests during browser rendering. No default test or GitHub Actions job contacts OpenRouter.
 
@@ -39,19 +54,19 @@ pnpm test:e2e
 ## Coverage
 
 Deterministic service and component coverage includes engine-derived action
-availability, one-slot automatic repair/transport recovery under a shared
-deadline, exact one-call manual Retry/Skip state, attempt-history export,
-idempotent mutation delivery, ambiguous-response reconciliation, mutually
-exclusive intervention controls, and model and export modal dismissal.
+availability, one-slot automatic repair/transport recovery under a shared tick
+deadline, lost-tick attribution, attempt-history export, idempotent mutation
+delivery, ambiguous-response reconciliation, atomic cancellation, and model and
+export modal dismissal.
 
 World Lab interaction coverage also verifies newest-first public-chat DOM order
-and reading-position preservation, browser-local follow-turn selection across
+and reading-position preservation, browser-local follow-latest selection across
 active/next and recovery transitions, non-color acting/next labels, shared
 dialog focus/dismissal/overflow structure, and complete collapsed dock headers.
 Playwright exercises the map-first layout at 1920×1080, 1440×900, 1024×768,
 and approximately 768×900 with deterministic scripted data only.
 
-Command-navbar coverage verifies one persistent row, always-visible known cost, stable async control slots, accessible icon controls, exact absolute run targets through 1,000, current/past target disablement, hover/focus experiment details, responsive overflow, and removal of the provider badge and inspector export action. Map interaction coverage keeps agent-marker inspection independent from explicit hex selection and verifies that the map-local hex card dismisses on a background click. Export coverage separates preview from generation, invalidates artifacts after relevant option changes, prevents stale or duplicate copy/download, and checks accessible pending/ready/error states. Shared model-option tests require identical global/per-agent ordering and formatting. Effective-color tests cover current-alliance, retained, base, and neutral fallback precedence. Dark-map tests assert tokenless CARTO URLs and complete attribution without network access.
+Command-navbar coverage verifies one persistent row, always-visible known cost, stable async control slots, accessible icon controls, exact absolute tick targets 5/10/25/50/100, current/past target advancement, hover/focus experiment details, responsive overflow, and removal of the provider badge and inspector export action. Map interaction coverage keeps agent-marker inspection independent from explicit hex selection and verifies that the map-local hex card dismisses on a background click. Export coverage separates preview from generation, includes lost ticks by default, invalidates artifacts after relevant option changes, prevents stale or duplicate copy/download, and checks accessible pending/ready/error states. Shared model-option tests require identical global/per-agent ordering and formatting. Effective-color tests cover current-alliance, retained, base, and neutral fallback precedence. Dark-map tests assert tokenless CARTO URLs and complete attribution without network access.
 
 Behavior coverage verifies registry uniqueness/versioning, deterministic balanced and fully random assignment, independent profile dimensions, turn-one locking, reset semantics, exact diplomacy affordances, layered prompt trust language, bounded structural detail codes, turn attribution, and export preservation. Agent Controller coverage verifies accessible Overview/Models/Behavior tabs, default readiness, manual pre-turn selection, post-start locking, responsive dialog layout, and compact roster summaries.
 
@@ -70,12 +85,12 @@ valid `Retry-After`, the bounded missing/invalid-header fallback, shared-deadlin
 consumption, cancellation during backoff, and the unchanged two-call ceiling.
 
 - Centralized development-contract tests prove radius 6 produces exactly 127 unique open/uncontrolled cells, eight unique deterministic starts, stable IDs/default personalities, and an eight-entry scoreboard with up to seven other-agent observations.
-- Alliance engine tests cover free-agent formation, recruitment, recipient-only acceptance, proposal conflicts and one-round expiry, stale invalidation, one-alliance membership, unilateral departure/dissolution, unchanged individual control, deterministic color reuse, and allied-capture rejection.
-- Simulation tests cover independent world/communication/diplomacy outcomes, provider-error world preservation, bounded authoritative alliance observations, reset/default semantics, multi-agent telemetry relevance, alliance territory sums, and exactly 25 turns per agent after 200 completed turns.
+- Alliance engine tests cover free-agent formation, recruitment, recipient-only acceptance, proposal conflicts, exact two-tick expiry for tick callers, legacy two-roster-round expiry, stale invalidation, one-alliance membership, unilateral departure/dissolution, unchanged individual control, deterministic color reuse, and allied-capture rejection.
+- Simulation tests cover frozen observations, independent world/communication/diplomacy outcomes, isolated lost ticks, bounded authoritative alliance observations, reset/default semantics, multi-agent telemetry relevance, alliance territory sums, and complete eight-record tick groups.
 - Runtime mocks cover the explicit per-turn model and reasoning profile, universal text-only request, flat JSON extraction/repair, exact default/off/effort payloads, absent provider-specific controls, malformed or missing output, cancellation, output exhaustion, metadata preservation, and the unchanged one-request boundary without OpenRouter calls.
 - Catalog fixtures cover required-capability inclusion/exclusion, text modalities, context floor, pricing parsing, malformed entries, timeout/failure, cache TTL, stale fallback, manual refresh, and credential non-disclosure without network access.
 - Schema-v5 export tests cover eight-agent selection, state-only alliance/proposal snapshots, diplomacy/event metrics and preview counts, selected-agent proposal/membership relevance, unrelated direct/rejected exclusion, cost handling, retention, and all four safe tiers.
-- React and Playwright fixtures cover 127 MapLibre cells, eight markers, base/effective colors, alliance panels and events, separate component results, safe text rendering, reset, and exact browser-owned pause at turn 200 without a genuine-provider run.
+- React and Playwright fixtures cover 127 MapLibre cells, eight markers, base/effective colors, alliance panels and events, separate component results, safe text rendering, reset, bounded tick targets, and lost-tick inspection without a genuine-provider run.
 
 - Shared schema tests cover valid/invalid observations and decoupled decisions, required four-way world actions, optional public/direct communication, separate component results, all turn outcomes, response snapshots, history bounds, and model-authored string limits.
 - Shared schema tests cover authoritative whitespace trimming and 1/280/281-character boundaries, recipient IDs, typed public/direct events and rejected attempts, 12-entry public and six-entry directional direct observation bounds.

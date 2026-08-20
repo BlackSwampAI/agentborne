@@ -6,6 +6,8 @@ import {
   worldSetupPreviewResponseSchema,
   worldSetupRequestSchema,
   WORLD_SCENARIO_LIMITS,
+  AGENT_DECISION_CONTRACT_VERSION,
+  LEGACY_AGENT_DECISION_CONTRACT_VERSION,
 } from './index';
 
 const roster = [
@@ -49,6 +51,19 @@ const request = {
 };
 
 describe('scenario contracts', () => {
+  it('defaults safe virtual tick bounds and rejects inverted bounds', () => {
+    const parsed = worldSetupRequestSchema.parse(request);
+    expect(parsed.minimumTickIntervalMinutes).toBe(5);
+    expect(parsed.maximumTickIntervalMinutes).toBe(10);
+    expect(
+      worldSetupRequestSchema.safeParse({
+        ...parsed,
+        minimumTickIntervalMinutes: 11,
+        maximumTickIntervalMinutes: 10,
+      }).success,
+    ).toBe(false);
+  });
+
   it('centralizes temporary limits', () => {
     expect(WORLD_SCENARIO_LIMITS).toMatchObject({
       minimumAgents: 1,
@@ -126,5 +141,23 @@ describe('scenario contracts', () => {
         patientZeroAgentId: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
       }).success,
     ).toBe(false);
+  });
+
+  it('keeps prompt attribution out of setup input and attributes applied scenarios to v4', () => {
+    expect(
+      worldSetupRequestSchema.safeParse({
+        ...request,
+        decisionContractVersion: LEGACY_AGENT_DECISION_CONTRACT_VERSION,
+      }).success,
+    ).toBe(false);
+    expect(
+      appliedScenarioSchema.parse({
+        ...worldSetupRequestSchema.parse(request),
+        exactCellCount: 1,
+        areaSquareKilometers: 0.1,
+        startingCells: ['8928308280fffff'],
+        setupWarnings: [],
+      }).decisionContractVersion,
+    ).toBe(AGENT_DECISION_CONTRACT_VERSION);
   });
 });

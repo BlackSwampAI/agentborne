@@ -1,6 +1,7 @@
 import { gridDisk, gridDistance } from 'h3-js';
 import {
   AgentProviderError,
+  dispatchTickDecisions,
   type AgentProvider,
   type ProviderDecision,
 } from '@hexzero/agent-runtime';
@@ -73,6 +74,8 @@ import {
   getEffectiveAgentColor,
   physicalDistanceKm,
   expireAllianceProposals,
+  seededTickIntervalMinutes,
+  seededTickOrder,
   toWorldState,
   type WorldState,
 } from '@hexzero/world-engine';
@@ -150,6 +153,10 @@ export class SimulationService {
   #state: WorldState;
   #turns: AgentTurnRecord[] = [];
   #completedTurnCount = 0;
+  #completedTickCount = 0;
+  #virtualTime = RESET_GENERATED_AT;
+  #lastTickIntervalMinutes: number | null = null;
+  #resolutionOrder: AgentId[] = [];
   #cursor = 0;
   #busy = false;
   #verificationBusy = false;
@@ -245,6 +252,10 @@ export class SimulationService {
       world: this.#worldSnapshot(),
       scenario: this.#scenario,
       turnNumber: this.#completedTurnCount,
+      tickNumber: this.#completedTickCount,
+      virtualTime: this.#virtualTime,
+      lastTickIntervalMinutes: this.#lastTickIntervalMinutes,
+      resolutionOrder: this.#resolutionOrder,
       nextAgentId: next.id,
       activeAgentId: this.#activeAgentId,
       cancellationRequested: this.#cancellationRequested,
@@ -282,7 +293,7 @@ export class SimulationService {
   reset(): SimulationSnapshot {
     if (this.#busy || this.#verificationBusy) {
       throw new SimulationConflictError(
-        'Reset is unavailable while a model turn is in progress.',
+        'Reset is unavailable while model execution is in progress.',
       );
     }
     this.#status = 'resetting';
@@ -291,6 +302,10 @@ export class SimulationService {
     );
     this.#turns = [];
     this.#completedTurnCount = 0;
+    this.#completedTickCount = 0;
+    this.#virtualTime = RESET_GENERATED_AT;
+    this.#lastTickIntervalMinutes = null;
+    this.#resolutionOrder = [];
     this.#cursor = 0;
     this.#activeAgentId = null;
     this.#activeRequestController = null;
@@ -424,6 +439,10 @@ export class SimulationService {
     this.#behaviorConfiguration = nextBehavior;
     this.#turns = [];
     this.#completedTurnCount = 0;
+    this.#completedTickCount = 0;
+    this.#virtualTime = RESET_GENERATED_AT;
+    this.#lastTickIntervalMinutes = null;
+    this.#resolutionOrder = [];
     this.#cursor = 0;
     this.#activeAgentId = null;
     this.#activeRequestController = null;
@@ -454,7 +473,7 @@ export class SimulationService {
   updateModelConfiguration(input: unknown): SimulationSnapshot {
     if (this.#busy || this.#verificationBusy)
       throw new SimulationConflictError(
-        'Model changes are unavailable while a model turn is in progress.',
+        'Model changes are unavailable while model execution is in progress.',
       );
     const parsed = updateExperimentModelsRequestSchema.safeParse(input);
     if (!parsed.success)
@@ -580,7 +599,8 @@ export class SimulationService {
       version !== 6 &&
       version !== 7 &&
       version !== 8 &&
-      version !== 9
+      version !== 9 &&
+      version !== 10
     )
       throw new SimulationValidationError(
         'invalid_model_configuration',
@@ -619,7 +639,7 @@ export class SimulationService {
         'The imported model assignment is invalid.',
       );
     const importedPatientZero =
-      version === 9 &&
+      (version === 9 || version === 10) &&
       typeof experiment?.scenario === 'object' &&
       experiment.scenario !== null
         ? (appliedScenarioSchema.safeParse(experiment.scenario).data
@@ -647,7 +667,7 @@ export class SimulationService {
       locked: false,
     };
     if (
-      (version === 8 || version === 9) &&
+      (version === 8 || version === 9 || version === 10) &&
       experiment?.behaviorConfiguration !== undefined
     ) {
       const importedBehavior = behaviorConfigurationSchema.safeParse(
@@ -695,7 +715,7 @@ export class SimulationService {
   ): Agent {
     if (this.#busy || this.#verificationBusy) {
       throw new SimulationConflictError(
-        'Personality changes are unavailable while a model turn is in progress.',
+        'Personality changes are unavailable while model execution is in progress.',
       );
     }
     const agentIdResult = agentIdSchema.safeParse(agentIdInput);
@@ -749,7 +769,7 @@ export class SimulationService {
   restoreDefaultPersonalities(): SimulationSnapshot {
     if (this.#busy || this.#verificationBusy) {
       throw new SimulationConflictError(
-        'Personality changes are unavailable while a model turn is in progress.',
+        'Personality changes are unavailable while model execution is in progress.',
       );
     }
     const defaults = new Map(
@@ -792,7 +812,7 @@ export class SimulationService {
   previewExperimentExport(request: unknown): ExperimentExportPreview {
     if (this.#busy || this.#verificationBusy)
       throw new SimulationConflictError(
-        'Export is unavailable while a model turn is in progress.',
+        'Export is unavailable while model execution is in progress.',
       );
     return experimentExportPreviewSchema.parse(
       createExperimentPreview(this.#experimentSource(), request, this.#now()),
@@ -802,7 +822,7 @@ export class SimulationService {
   generateExperimentExport(request: unknown): ExperimentExportDocument {
     if (this.#busy || this.#verificationBusy)
       throw new SimulationConflictError(
-        'Export is unavailable while a model turn is in progress.',
+        'Export is unavailable while model execution is in progress.',
       );
     return experimentExportDocumentSchema.parse(
       createExperimentExport(this.#experimentSource(), request, this.#now()),
@@ -855,6 +875,10 @@ export class SimulationService {
   }
 
   async executeNextTurn(): Promise<AgentTurnRecord> {
+    if (this.#completedTickCount > 0)
+      throw new SimulationConflictError(
+        'Legacy sequential turns cannot run after a simultaneous tick.',
+      );
     if (this.#pendingFailedTurn)
       throw new SimulationConflictError(
         'The failed turn must be retried or skipped before starting another turn.',
@@ -862,9 +886,276 @@ export class SimulationService {
     return this.#executeTurnAttempt('initial');
   }
 
+  /** Execute one atomic simultaneous tick for every active agent. */
+  async executeNextTick(): Promise<AgentTurnRecord[]> {
+    if (this.#busy || this.#verificationBusy)
+      throw new SimulationConflictError(
+        'A simulation tick is already in progress.',
+      );
+    if (
+      this.#pendingFailedTurn ||
+      (this.#completedTurnCount > 0 && this.#completedTickCount === 0)
+    )
+      throw new SimulationConflictError(
+        'A simultaneous tick cannot start inside a legacy sequential experiment. Reset first.',
+      );
+    const agents = [...this.#state.agents.values()];
+    const unresolved = agents
+      .map(({ id }) => this.#resolvedModel(id))
+      .filter(({ available }) => !available);
+    if (unresolved.length)
+      throw new SimulationValidationError(
+        'models_unavailable',
+        'Every agent requires an available compatible model before the experiment can run.',
+      );
+
+    const tickNumber = this.#completedTickCount + 1;
+    const preTickState = this.#state;
+    const observations = new Map(
+      agents.map(({ id }) => [id, structuredClone(this.#buildObservation(id))]),
+    );
+    const order = seededTickOrder(
+      agents.map(({ id }) => id),
+      this.#scenario.worldSeed,
+      tickNumber,
+    );
+    const interval = seededTickIntervalMinutes(
+      this.#scenario.worldSeed,
+      tickNumber,
+      this.#scenario.minimumTickIntervalMinutes,
+      this.#scenario.maximumTickIntervalMinutes,
+    );
+    const virtualTime = new Date(
+      new Date(this.#virtualTime).getTime() + interval * 60_000,
+    ).toISOString();
+    const controller = new AbortController();
+    this.#busy = true;
+    this.#activeRequestController = controller;
+    this.#activeAgentId = null;
+    this.#cancellationRequested = false;
+    this.#status = 'waiting-for-model';
+    const deadlineAtMs = Date.now() + OPENROUTER_PROVIDER_TIMEOUT_MS;
+    try {
+      const dispatched = await dispatchTickDecisions(
+        this.#provider,
+        agents.map(({ id }) => {
+          const resolved = this.#resolvedModel(id);
+          return {
+            agentId: id,
+            observation: observations.get(id)!,
+            modelId: resolved.modelId!,
+            reasoningProfile: resolved.reasoningProfile,
+          };
+        }),
+        {
+          concurrency: Math.min(8, agents.length),
+          deadlineAtMs,
+          signal: controller.signal,
+          now: this.#now,
+        },
+      );
+      if (controller.signal.aborted) throw new SimulationTurnCancelledError();
+      const byAgent = new Map(
+        dispatched.map((result) => [result.agentId, result]),
+      );
+      const context = {
+        now: () => virtualTime,
+        createEventId: this.#createEventId,
+        createAllianceId: this.#createAllianceId,
+        createProposalId: this.#createProposalId,
+        communicationRangeKm: this.#scenario.communicationRangeKm,
+        patientZeroAgentId: this.#scenario.patientZeroAgentId,
+        tickNumber,
+      };
+      const recordOrdinal = new Map(
+        order.map((agentId, index) => [
+          agentId,
+          this.#completedTurnCount + index + 1,
+        ]),
+      );
+      let state = preTickState;
+      const actionResults = new Map<
+        AgentId,
+        ReturnType<typeof applyWorldAction>['result']
+      >();
+      for (const agentId of order) {
+        const result = byAgent.get(agentId)!;
+        if (result.outcome === 'lost-tick') continue;
+        const applied = applyWorldAction(
+          state,
+          agentId,
+          result.decision.decision.worldAction,
+          context,
+        );
+        state = applied.state;
+        actionResults.set(agentId, applied.result);
+      }
+      const communicationResults = new Map<
+        AgentId,
+        ReturnType<typeof applyCommunication>['result']
+      >();
+      for (const agentId of order) {
+        const result = byAgent.get(agentId)!;
+        if (result.outcome === 'lost-tick') continue;
+        const applied = applyCommunication(
+          state,
+          preTickState,
+          agentId,
+          result.decision.decision.communication,
+          context,
+        );
+        state = applied.state;
+        communicationResults.set(agentId, applied.result);
+      }
+      const diplomacyResults = new Map<
+        AgentId,
+        ReturnType<typeof applyDiplomacy>['result']
+      >();
+      const diplomacyEvents = new Map<AgentId, AllianceEvent[]>();
+      for (const agentId of order) {
+        const result = byAgent.get(agentId)!;
+        if (result.outcome === 'lost-tick') continue;
+        const before = state;
+        const applied = applyDiplomacy(
+          state,
+          agentId,
+          result.decision.decision.diplomacy,
+          recordOrdinal.get(agentId)!,
+          context,
+        );
+        state = applied.state;
+        diplomacyResults.set(agentId, applied.result);
+        diplomacyEvents.set(agentId, allianceEventsSince(before, state));
+      }
+      const beforeExpiration = state;
+      state = expireAllianceProposals(
+        state,
+        recordOrdinal.get(order.at(-1)!)!,
+        context,
+      );
+      const expirationEvents = allianceEventsSince(beforeExpiration, state);
+      if (expirationEvents.length) {
+        const finalAgentId = order.at(-1)!;
+        diplomacyEvents.set(finalAgentId, [
+          ...(diplomacyEvents.get(finalAgentId) ?? []),
+          ...expirationEvents,
+        ]);
+      }
+      state = {
+        ...state,
+        events: state.events.slice(-MAX_WORLD_EVENT_HISTORY),
+      };
+
+      const records = order.map((agentId, index) => {
+        const result = byAgent.get(agentId)!;
+        const base = {
+          turnNumber: this.#completedTurnCount + index + 1,
+          tickNumber,
+          tickPosition: index + 1,
+          virtualTime,
+          tickIntervalMinutes: interval,
+          agentId,
+          startedAt: result.attempts[0]?.startedAt ?? this.#now(),
+          completedAt: result.attempts.at(-1)?.completedAt ?? this.#now(),
+          observation: observations.get(agentId)!,
+          behavior: this.#behaviorFor(agentId),
+          modelAttempts: result.attempts,
+          allianceEvents: diplomacyEvents.get(agentId) ?? [],
+        };
+        if (result.outcome === 'lost-tick')
+          return agentTurnRecordSchema.parse({
+            ...base,
+            outcome: 'lost-tick',
+            failure: result.failure,
+            provider: result.attempts.at(-1)?.provider,
+          });
+        const decision = result.decision.decision;
+        const actionResult = actionResults.get(agentId)!;
+        return agentTurnRecordSchema.parse({
+          ...base,
+          outcome: actionResult.accepted ? 'accepted' : 'rejected',
+          worldAction: decision.worldAction,
+          communication: communicationIntentSchema.safeParse(
+            decision.communication,
+          ).data,
+          diplomacy: diplomacyIntentSchema.safeParse(decision.diplomacy).data,
+          summary: decision.summary,
+          worldActionResult: actionResult,
+          communicationResult: communicationResults.get(agentId)!,
+          diplomacyResult: diplomacyResults.get(agentId)!,
+          provider: result.decision.metadata,
+        });
+      });
+      if (controller.signal.aborted) throw new SimulationTurnCancelledError();
+      this.#commitCompletedTick(
+        records,
+        state,
+        tickNumber,
+        virtualTime,
+        interval,
+        order,
+      );
+      this.#status = 'paused';
+      return records;
+    } catch (error) {
+      if (
+        controller.signal.aborted ||
+        (error &&
+          typeof error === 'object' &&
+          'failure' in error &&
+          (error as { failure?: ProviderFailure }).failure?.code ===
+            'cancelled')
+      ) {
+        this.#status = 'paused';
+        throw new SimulationTurnCancelledError();
+      }
+      throw error;
+    } finally {
+      this.#busy = false;
+      this.#activeRequestController = null;
+      this.#activeAgentId = null;
+      this.#cancellationRequested = false;
+      if (this.#status === 'waiting-for-model') this.#status = 'paused';
+    }
+  }
+
+  #commitCompletedTick(
+    records: AgentTurnRecord[],
+    state: WorldState,
+    tickNumber: number,
+    virtualTime: string,
+    interval: number,
+    order: AgentId[],
+  ): void {
+    this.#state = state;
+    this.#completedTickCount = tickNumber;
+    this.#virtualTime = virtualTime;
+    this.#lastTickIntervalMinutes = interval;
+    this.#resolutionOrder = [...order];
+    this.#completedTurnCount = records.at(-1)!.turnNumber;
+    this.#turns = retainCompleteTickGroups(
+      [...this.#turns, ...records],
+      MAX_TURN_HISTORY,
+    );
+    this.#experimentTurns = retainCompleteTickGroups(
+      [...this.#experimentTurns, ...structuredClone(records)],
+      this.#experimentRetentionLimit,
+    );
+    for (const record of records) this.#experimentMetrics.add(record);
+    this.#behaviorConfiguration = {
+      ...this.#behaviorConfiguration,
+      locked: true,
+    };
+    this.#modelConfiguration = { ...this.#modelConfiguration, locked: false };
+  }
+
   async retryFailedTurn(
     kind: 'manual-retry' | 'unattended-retry' = 'manual-retry',
   ): Promise<AgentTurnRecord> {
+    if (this.#completedTickCount > 0)
+      throw new SimulationConflictError(
+        'Legacy retry is unavailable after a simultaneous tick.',
+      );
     if (!this.#pendingFailedTurn)
       throw new SimulationConflictError(
         'There is no failed turn awaiting a manual retry.',
@@ -875,6 +1166,10 @@ export class SimulationService {
   skipFailedTurn(
     skipKind: 'manual' | 'unattended' = 'manual',
   ): AgentTurnRecord {
+    if (this.#completedTickCount > 0)
+      throw new SimulationConflictError(
+        'Legacy skip is unavailable after a simultaneous tick.',
+      );
     if (this.#busy || this.#verificationBusy)
       throw new SimulationConflictError('A model request is still active.');
     const pending = this.#pendingFailedTurn;
@@ -907,7 +1202,9 @@ export class SimulationService {
     attemptKind: 'initial' | 'manual-retry' | 'unattended-retry',
   ): Promise<AgentTurnRecord> {
     if (this.#busy || this.#verificationBusy) {
-      throw new SimulationConflictError('A model turn is already in progress.');
+      throw new SimulationConflictError(
+        'Model execution is already in progress.',
+      );
     }
     const agents = [...this.#state.agents.values()];
     const unresolved = agents
@@ -1345,6 +1642,8 @@ export class SimulationService {
       modelConfiguration: this.#modelConfiguration,
       behaviorConfiguration: this.#behaviorConfiguration,
       scenario: this.#scenario,
+      schemaVersion:
+        this.#completedTickCount > 0 || this.#completedTurnCount === 0 ? 10 : 9,
     };
   }
 
@@ -1997,4 +2296,22 @@ function asProviderError(error: unknown): {
       retryable: true,
     },
   };
+}
+
+function retainCompleteTickGroups(
+  records: AgentTurnRecord[],
+  limit: number,
+): AgentTurnRecord[] {
+  if (records.length <= limit) return records;
+  const groups = new Map<number, AgentTurnRecord[]>();
+  for (const record of records) {
+    const key = record.tickNumber ?? record.turnNumber;
+    groups.set(key, [...(groups.get(key) ?? []), record]);
+  }
+  const retained: AgentTurnRecord[] = [];
+  for (const group of [...groups.values()].reverse()) {
+    if (retained.length > 0 && retained.length + group.length > limit) break;
+    retained.unshift(...group);
+  }
+  return retained;
 }

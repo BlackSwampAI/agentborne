@@ -10,6 +10,7 @@ import {
   OpenRouterAgentProvider,
   ScriptedAgentProvider,
   buildOpenRouterRequest,
+  normalizeFlatDecision,
 } from '.';
 import { applyProviderEnvironmentFile } from './provider-environment';
 
@@ -268,6 +269,31 @@ describe('OpenRouterAgentProvider', () => {
     expect(guidance).toContain('Field agents retain autonomy');
   });
 
+  it('makes selective communication the universal default without changing wire fields', () => {
+    const guidance = buildOpenRouterRequest(observation, TEST_MODEL)
+      .messages[0]!.content;
+    expect(guidance).toContain('DECISION CONTRACT (text-flat-json-v4)');
+    expect(guidance).toContain(
+      'communicationType "none" is the normal/default choice',
+    );
+    expect(guidance).toContain('concrete request or reply');
+    expect(guidance).toContain('warning grounded in observed facts');
+    expect(guidance).toContain('materially changed plan');
+    expect(guidance).toContain('border or conflict coordination');
+    expect(guidance).toContain('coordinated target or route');
+    expect(guidance).toContain(
+      'Do not narrate a routine move, infect, capture, or wait action',
+    );
+    expect(guidance).toContain('send motivational filler');
+    expect(guidance).toContain('restate the observation or decision summary');
+    expect(guidance).toContain('repeat an unchanged plan');
+    expect(guidance).toContain('must add terms or useful context');
+    expect(guidance).toContain('assigned personality and style');
+    expect(guidance).toContain(
+      'communicationType (none|public|direct|alliance|zero)',
+    );
+  });
+
   it('guides addressed field agents toward useful private replies without blind or illegal compliance', () => {
     const fieldObservation = agentObservationSchema.parse({
       ...observation,
@@ -408,6 +434,25 @@ describe('OpenRouterAgentProvider', () => {
       });
     },
   );
+
+  it('keeps the v4 prompt compatible with the prior flat JSON wire shape', () => {
+    expect(
+      normalizeFlatDecision({
+        worldActionType: 'wait',
+        targetCell: '',
+        communicationType: 'none',
+        communicationRecipientId: '',
+        communicationMessage: '',
+        diplomacyType: 'none',
+        diplomacyRecipientId: '',
+        diplomacyProposalId: '',
+        summary: 'Wait.',
+      }),
+    ).toMatchObject({
+      success: true,
+      data: { worldAction: { type: 'wait' }, summary: 'Wait.' },
+    });
+  });
 
   it.each([
     ['1.5', 1_500],

@@ -118,7 +118,10 @@ export class ExperimentQueryService {
     const rows = this.#db
       .prepare(
         `
-        SELECT turn_number AS turn, agent_id AS agent, outcome, action,
+        SELECT turn_number AS turn, tick_number AS tick,
+               tick_position AS tickPosition, virtual_time AS virtualTime,
+               tick_interval_minutes AS tickIntervalMinutes,
+               agent_id AS agent, outcome, action,
                action_accepted AS actionAccepted, action_reason AS reason,
                position_before AS positionBefore, position_after AS positionAfter,
                model_id AS model, reasoning_profile AS reasoning,
@@ -458,7 +461,7 @@ export class ExperimentQueryService {
           SUM(outcome = 'accepted') AS accepted,
           SUM(outcome = 'rejected') AS rejected,
           SUM(outcome = 'provider-error') AS failed,
-          SUM(outcome = 'operator-skipped') AS lost,
+          SUM(outcome IN ('operator-skipped', 'lost-tick')) AS lost,
           SUM((SELECT COUNT(*) FROM model_attempts m WHERE m.turn_id = turns.id) > 1) AS retried
         FROM turns WHERE experiment_id = ?
       `,
@@ -472,6 +475,34 @@ export class ExperimentQueryService {
       `,
       )
       .all(experimentId);
+    const ticks = this.#db
+      .prepare(
+        `
+        WITH attempt_totals AS (
+          SELECT turn_id, COUNT(*) AS providerCalls,
+                 SUM(latency_ms) AS aggregateLatencyMs,
+                 MAX(latency_ms) AS maximumLatencyMs,
+                 SUM(cost_credits) AS knownCostCredits,
+                 SUM(cost_credits IS NULL) AS attemptsWithUnknownCost
+          FROM model_attempts WHERE experiment_id = ? GROUP BY turn_id
+        )
+        SELECT tick_number AS tick, MIN(virtual_time) AS virtualTime,
+               MIN(tick_interval_minutes) AS intervalMinutes,
+               COUNT(*) AS agentRecords,
+               SUM(outcome = 'lost-tick') AS lostTicks,
+               SUM(outcome = 'lost-tick' AND json_extract(failure_json, '$.code') = 'timeout') AS deadlineMisses,
+               SUM(COALESCE(a.providerCalls, 0)) AS providerCallCount,
+               ROUND(SUM(COALESCE(a.knownCostCredits, 0)), 8) AS knownCostCredits,
+               SUM(COALESCE(a.attemptsWithUnknownCost, 0)) AS attemptsWithUnknownCost,
+               SUM(COALESCE(a.aggregateLatencyMs, 0)) AS aggregateLatencyMs,
+               MAX(COALESCE(a.maximumLatencyMs, 0)) AS maximumLatencyMs
+        FROM turns t LEFT JOIN attempt_totals a ON a.turn_id = t.id
+        WHERE t.experiment_id = ? AND tick_number IS NOT NULL
+        GROUP BY tick_number ORDER BY tick_number ASC
+        LIMIT ?
+      `,
+      )
+      .all(experimentId, experimentId, MAX_DETAIL_LIMIT);
     const communications = this.#db
       .prepare(
         `
@@ -598,6 +629,7 @@ export class ExperimentQueryService {
       roster,
       sourceExports,
       turns: turnMetrics,
+      ticks,
       actions,
       territory: {
         current: territoryRows.length > 0 ? territoryRows : sourceTerritory,
@@ -839,7 +871,7 @@ function comparisonMetrics(db: DatabaseSync, experimentId: string) {
              COUNT(DISTINCT agent_id) AS activeAgents,
              SUM(outcome = 'accepted') AS accepted,
              SUM(outcome = 'provider-error') AS failed,
-             SUM(outcome = 'operator-skipped') AS lost
+             SUM(outcome IN ('operator-skipped', 'lost-tick')) AS lost
       FROM turns WHERE experiment_id = ?
     `,
     )

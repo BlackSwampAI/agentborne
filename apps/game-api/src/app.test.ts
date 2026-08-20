@@ -18,6 +18,7 @@ import {
   restoreDefaultPersonalitiesResponseSchema,
   simulationSnapshotSchema,
   singleTurnResponseSchema,
+  singleTickResponseSchema,
   updateAgentPersonalityResponseSchema,
   updateExperimentModelsResponseSchema,
   verifyModelResponseSchema,
@@ -63,6 +64,118 @@ describe('provider environment compatibility', () => {
 });
 
 describe('game API simulation boundary', () => {
+  it('coalesces repeated delivery of the same tick mutation ID', async () => {
+    let calls = 0;
+    const app = createApp({
+      provider: {
+        mode: 'scripted-test',
+        configured: true,
+        async decide(): Promise<ProviderDecision> {
+          calls += 1;
+          await Promise.resolve();
+          return {
+            decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
+            metadata: {
+              provider: 'scripted-test',
+              model: 'tick-idempotency',
+              latencyMs: 0,
+              costCredits: 0,
+            },
+          };
+        },
+      },
+    });
+    const request = () =>
+      app.request('/api/simulation/tick?mutationId=tick_same_001', {
+        method: 'POST',
+      });
+    const [first, second] = await Promise.all([request(), request()]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(calls).toBe(8);
+    expect(
+      simulationSnapshotSchema.parse(
+        await (await app.request('/api/simulation')).json(),
+      ).tickNumber,
+    ).toBe(1);
+  });
+
+  it('replays the original complete tick envelope after later ticks commit', async () => {
+    let calls = 0;
+    const app = createApp({
+      provider: {
+        mode: 'scripted-test',
+        configured: true,
+        async decide(): Promise<ProviderDecision> {
+          calls += 1;
+          return {
+            decision: { worldAction: { type: 'wait' }, summary: 'Wait.' },
+            metadata: {
+              provider: 'scripted-test',
+              model: 'tick-replay',
+              latencyMs: 0,
+              costCredits: 0,
+            },
+          };
+        },
+      },
+    });
+    const first = singleTickResponseSchema.parse(
+      await (
+        await app.request('/api/simulation/tick?mutationId=tick_replay_A', {
+          method: 'POST',
+        })
+      ).json(),
+    );
+    const second = singleTickResponseSchema.parse(
+      await (
+        await app.request('/api/simulation/tick?mutationId=tick_replay_B', {
+          method: 'POST',
+        })
+      ).json(),
+    );
+    const replay = singleTickResponseSchema.parse(
+      await (
+        await app.request('/api/simulation/tick?mutationId=tick_replay_A', {
+          method: 'POST',
+        })
+      ).json(),
+    );
+    expect(first).toMatchObject({ tickNumber: 1, snapshot: { tickNumber: 1 } });
+    expect(second).toMatchObject({
+      tickNumber: 2,
+      snapshot: { tickNumber: 2 },
+    });
+    expect(replay).toEqual(first);
+    expect(calls).toBe(16);
+    expect(
+      simulationSnapshotSchema.parse(
+        await (await app.request('/api/simulation')).json(),
+      ).tickNumber,
+    ).toBe(2);
+  });
+
+  it('returns one complete simultaneous tick group', async () => {
+    const app = createApp({
+      provider: new ScriptedAgentProvider(
+        Array.from({ length: 8 }, () => ({
+          worldAction: { type: 'wait' as const },
+          summary: 'Wait.',
+        })),
+      ),
+    });
+    const response = await app.request('/api/simulation/tick', {
+      method: 'POST',
+    });
+    expect(response.status).toBe(200);
+    expect(singleTickResponseSchema.parse(await response.json())).toMatchObject(
+      {
+        tickNumber: 1,
+        snapshot: { tickNumber: 1, turnNumber: 8 },
+      },
+    );
+  });
+
   it('coalesces repeated delivery of the same turn mutation ID', async () => {
     let calls = 0;
     const app = createApp({
@@ -121,7 +234,7 @@ describe('game API simulation boundary', () => {
     expect(payload.experiment.currentTerritory).toHaveLength(8);
   });
 
-  it('returns a non-turn-consuming cancellation response', async () => {
+  it('returns a non-tick-consuming cancellation response from the tick route', async () => {
     let requestStarted!: () => void;
     const started = new Promise<void>((resolve) => {
       requestStarted = resolve;
@@ -145,10 +258,10 @@ describe('game API simulation boundary', () => {
       },
     };
     const app = createApp({ provider });
-    const pendingTurn = app.request('/api/simulation/turn', { method: 'POST' });
+    const pendingTurn = app.request('/api/simulation/tick', { method: 'POST' });
     await started;
     expect(
-      (await app.request('/api/simulation/turn/cancel', { method: 'POST' }))
+      (await app.request('/api/simulation/tick/cancel', { method: 'POST' }))
         .status,
     ).toBe(200);
     const response = await pendingTurn;
@@ -160,6 +273,7 @@ describe('game API simulation boundary', () => {
       snapshot: {
         status: 'paused',
         turnNumber: 0,
+        tickNumber: 0,
         turns: [],
         experiment: { totalCompletedTurns: 0 },
       },

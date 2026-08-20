@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { assignBehavior, WORLD_RADIUS_PRESETS } from '@hexzero/shared';
+import {
+  AGENT_DECISION_CONTRACT_VERSION,
+  assignBehavior,
+  WORLD_RADIUS_PRESETS,
+} from '@hexzero/shared';
 import {
   DEVELOPMENT_AGENT_BLUEPRINTS,
   allocateDeterministicSpawns,
@@ -20,6 +24,9 @@ describe('configurable world scenarios', () => {
     );
     expect(first).toEqual(second);
     expect(first.feasible && first.scenario.exactCellCount).toBe(127);
+    expect(first.feasible && first.scenario.decisionContractVersion).toBe(
+      AGENT_DECISION_CONTRACT_VERSION,
+    );
     expect(
       first.feasible &&
         first.world.agents.map(({ id, currentCell }) => ({ id, currentCell })),

@@ -1,6 +1,14 @@
 # Local experiment archive
 
-The experiment archive is a durable, local research surface for completed or partially retained exports. It does not participate in an active simulation: the Game API's in-memory engine remains authoritative, and an archive write cannot change an accepted game outcome. This slice imports schema-v9 JSON exports; it is not crash recovery, restartable simulation state, or a scheduler.
+The archive accepts current schema-v10 exports and legacy schema-v9 exports.
+Migration 2 adds nullable tick number, deterministic tick position, virtual
+time, and interval columns so legacy rows remain valid. Schema-v10 lost-tick
+outcomes are preserved as source outcomes; canonical summaries continue to be
+derived from normalized rows and remain distinct from source metrics. Bounded
+queries order tick-attributed records by tick and tick position where exposed;
+the CLI still provides no arbitrary SQL surface.
+
+The experiment archive is a durable, local research surface for completed or partially retained exports. It does not participate in an active simulation: the Game API's in-memory engine remains authoritative, and an archive write cannot change an accepted game outcome. It imports schema-v10 and compatible schema-v9 JSON exports; it is not crash recovery, restartable simulation state, or a scheduler.
 
 ## Storage and configuration
 

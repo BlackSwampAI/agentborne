@@ -1,4 +1,5 @@
 import {
+  AGENT_DECISION_CONTRACT_VERSION,
   experimentExportDocumentSchema,
   experimentExportPreviewSchema,
   experimentExportRequestSchema,
@@ -29,9 +30,11 @@ import {
   type WorldSnapshot,
   type BehaviorConfiguration,
   type AppliedScenario,
+  type ExperimentTickSummary,
 } from '@hexzero/shared';
 
 export interface ExperimentSource {
+  schemaVersion: 9 | 10;
   id: ExperimentId;
   startedAt: string;
   providerMode: 'openrouter' | 'scripted-test';
@@ -79,6 +82,7 @@ export class ExperimentMetricAccumulator {
       }
     if (
       turn.outcome !== 'provider-error' &&
+      turn.outcome !== 'lost-tick' &&
       turn.outcome !== 'operator-skipped' &&
       turn.communicationResult.requested &&
       turn.communicationResult.accepted &&
@@ -91,6 +95,7 @@ export class ExperimentMetricAccumulator {
     }
     if (
       turn.outcome !== 'provider-error' &&
+      turn.outcome !== 'lost-tick' &&
       turn.outcome !== 'operator-skipped' &&
       turn.communicationResult.requested &&
       turn.communicationResult.accepted &&
@@ -170,6 +175,7 @@ interface MutableMetrics {
   accepted: number;
   rejected: number;
   providerErrors: number;
+  lostTicks: number;
   operatorSkipped: number;
   modelCalls: number;
   failedModelAttempts: number;
@@ -273,6 +279,7 @@ function mutableMetrics(): MutableMetrics {
     accepted: 0,
     rejected: 0,
     providerErrors: 0,
+    lostTicks: 0,
     operatorSkipped: 0,
     modelCalls: 0,
     failedModelAttempts: 0,
@@ -366,6 +373,7 @@ function addToMutable(
 ): void {
   metrics.turns += 1;
   if (turn.outcome === 'provider-error') metrics.providerErrors += 1;
+  else if (turn.outcome === 'lost-tick') metrics.lostTicks += 1;
   else if (turn.outcome === 'operator-skipped') {
     metrics.operatorSkipped += 1;
     if (turn.skipKind === 'unattended') {
@@ -376,6 +384,7 @@ function addToMutable(
   metrics.visited.add(turn.observation.currentCell.cell);
   if (
     turn.outcome !== 'provider-error' &&
+    turn.outcome !== 'lost-tick' &&
     turn.outcome !== 'operator-skipped'
   ) {
     if (turn.worldAction.type === 'move') metrics.requestedMoves += 1;
@@ -530,12 +539,14 @@ function addToMutable(
   if (
     retried &&
     turn.outcome !== 'provider-error' &&
+    turn.outcome !== 'lost-tick' &&
     turn.outcome !== 'operator-skipped'
   )
     metrics.recoveredByRetry += 1;
   if (
     retried &&
     turn.outcome !== 'provider-error' &&
+    turn.outcome !== 'lost-tick' &&
     turn.outcome !== 'operator-skipped'
   ) {
     if (manuallyRetried) metrics.recoveredManually += 1;
@@ -581,7 +592,8 @@ function usageAttempts(turn: AgentTurnRecord) {
     ? [
         {
           provider: turn.provider,
-          failed: turn.outcome === 'provider-error',
+          failed:
+            turn.outcome === 'provider-error' || turn.outcome === 'lost-tick',
           kind: 'initial' as const,
         },
       ]
@@ -599,6 +611,7 @@ function finalizeMutable(metrics: MutableMetrics) {
     accepted: metrics.accepted,
     rejected: metrics.rejected,
     providerErrors: metrics.providerErrors,
+    lostTicks: metrics.lostTicks,
     operatorSkipped: metrics.operatorSkipped,
     modelCalls: metrics.modelCalls,
     failedModelAttempts: metrics.failedModelAttempts,
@@ -731,12 +744,13 @@ export function createExperimentExport(
           },
     );
   const document: ExperimentExportDocument = {
-    schemaVersion: 9,
+    schemaVersion: source.schemaVersion,
     generatedAt,
     experiment: {
       id: source.id,
       startedAt: source.startedAt,
       providerMode: source.providerMode,
+      decisionContractVersion: AGENT_DECISION_CONTRACT_VERSION,
       modelConfiguration: structuredClone(source.modelConfiguration),
       behaviorConfiguration: structuredClone(source.behaviorConfiguration),
       scenario: structuredClone(source.scenario),
@@ -749,6 +763,13 @@ export function createExperimentExport(
     selection: {
       selectedAgentIds,
       matchingTurnCount: filtered.length,
+      ...(source.schemaVersion === 10
+        ? {
+            matchingTickCount: new Set(
+              filtered.map(({ tickNumber }) => tickNumber).filter(Boolean),
+            ).size,
+          }
+        : {}),
       matchingCommunicationCount: communications.length,
       matchingControlChangeCount: controlChanges.length,
       matchingDiplomacyEventCount: allianceEvents.length,
@@ -809,6 +830,9 @@ export function createExperimentExport(
       : {}),
     allianceEvents: structuredClone(allianceEvents),
     turns: filtered.map((turn) => exportTurn(turn, request)),
+    ...(source.schemaVersion === 10
+      ? { tickSummaries: summarizeTicks(filtered) }
+      : {}),
   };
   return experimentExportDocumentSchema.parse(document);
 }
@@ -906,6 +930,9 @@ export function createExperimentPreview(
   return experimentExportPreviewSchema.parse({
     experimentId: source.id,
     matchingTurnCount: document.selection.matchingTurnCount,
+    ...(document.selection.matchingTickCount === undefined
+      ? {}
+      : { matchingTickCount: document.selection.matchingTickCount }),
     matchingCommunicationCount: document.selection.matchingCommunicationCount,
     matchingControlChangeCount: document.selection.matchingControlChangeCount,
     matchingDiplomacyEventCount: document.selection.matchingDiplomacyEventCount,
@@ -950,6 +977,7 @@ function filterTurns(
       selected.has(turn.agentId) &&
       request.outcomes.includes(turn.outcome) &&
       (turn.outcome === 'provider-error' ||
+        turn.outcome === 'lost-tick' ||
         turn.outcome === 'operator-skipped' ||
         request.actions.includes(turn.worldAction.type)),
   );
@@ -973,6 +1001,7 @@ function filterCommunications(
   let communications = source.turns.flatMap((turn) => {
     if (
       turn.outcome === 'provider-error' ||
+      turn.outcome === 'lost-tick' ||
       turn.outcome === 'operator-skipped' ||
       !turn.communicationResult.requested
     )
@@ -1208,6 +1237,16 @@ function exportTurn(
     request.level !== 'custom' || Boolean(custom?.providerUsageMetadata);
   const base: ExperimentExportDocument['turns'][number] = {
     turnNumber: turn.turnNumber,
+    ...(turn.tickNumber === undefined ? {} : { tickNumber: turn.tickNumber }),
+    ...(turn.tickPosition === undefined
+      ? {}
+      : { tickPosition: turn.tickPosition }),
+    ...(turn.virtualTime === undefined
+      ? {}
+      : { virtualTime: turn.virtualTime }),
+    ...(turn.tickIntervalMinutes === undefined
+      ? {}
+      : { tickIntervalMinutes: turn.tickIntervalMinutes }),
     startedAt: turn.startedAt,
     completedAt: turn.completedAt,
     agentId: turn.agentId,
@@ -1217,7 +1256,9 @@ function exportTurn(
       ...structuredClone(attempt),
       ...(includeProvider ? {} : { provider: undefined }),
     })),
-    ...(turn.outcome === 'provider-error' || turn.outcome === 'operator-skipped'
+    ...(turn.outcome === 'provider-error' ||
+    turn.outcome === 'lost-tick' ||
+    turn.outcome === 'operator-skipped'
       ? { failure: structuredClone(turn.failure) }
       : {
           worldAction: structuredClone(turn.worldAction),
@@ -1273,6 +1314,7 @@ function exportTurn(
   }
   if (
     turn.outcome !== 'provider-error' &&
+    turn.outcome !== 'lost-tick' &&
     turn.outcome !== 'operator-skipped' &&
     (includeValidation || includeEvent)
   ) {
@@ -1285,6 +1327,48 @@ function exportTurn(
       ? structuredClone(turn.provider)
       : compactProvider(turn.provider);
   return base;
+}
+
+function summarizeTicks(
+  records: readonly AgentTurnRecord[],
+): ExperimentTickSummary[] {
+  const groups = new Map<number, AgentTurnRecord[]>();
+  for (const record of records) {
+    if (record.tickNumber === undefined) continue;
+    groups.set(record.tickNumber, [
+      ...(groups.get(record.tickNumber) ?? []),
+      record,
+    ]);
+  }
+  return [...groups.entries()].map(([tickNumber, tickRecords]) => {
+    const attempts = tickRecords.flatMap(({ modelAttempts }) => modelAttempts);
+    const latencies = attempts.map(
+      ({ provider, failure }) => provider?.latencyMs ?? failure?.latencyMs ?? 0,
+    );
+    const knownCosts = attempts.flatMap(({ provider }) =>
+      provider?.costCredits === undefined ? [] : [provider.costCredits],
+    );
+    return {
+      tickNumber,
+      virtualTime: tickRecords[0]!.virtualTime!,
+      intervalMinutes: tickRecords[0]!.tickIntervalMinutes!,
+      agentRecordCount: tickRecords.length,
+      lostTicks: tickRecords.filter(({ outcome }) => outcome === 'lost-tick')
+        .length,
+      deadlineMisses: tickRecords.filter(
+        (record) =>
+          record.outcome === 'lost-tick' && record.failure.code === 'timeout',
+      ).length,
+      providerCallCount: attempts.length,
+      aggregateDecisionLatencyMs: latencies.reduce(
+        (total, latency) => total + latency,
+        0,
+      ),
+      maximumDecisionLatencyMs: Math.max(0, ...latencies),
+      knownCostCredits: knownCosts.reduce((total, cost) => total + cost, 0),
+      attemptsWithUnknownCost: attempts.length - knownCosts.length,
+    };
+  });
 }
 
 function summarizeEvent(
@@ -1372,6 +1456,7 @@ export function calculateExperimentMetrics(
     const mostRecentZeroTurn = records.findLast(
       (turn) =>
         turn.outcome !== 'provider-error' &&
+        turn.outcome !== 'lost-tick' &&
         turn.outcome !== 'operator-skipped' &&
         turn.communicationResult.requested &&
         turn.communicationResult.accepted &&
@@ -1380,6 +1465,7 @@ export function calculateExperimentMetrics(
     const mostRecentZeroDirective =
       mostRecentZeroTurn &&
       mostRecentZeroTurn.outcome !== 'provider-error' &&
+      mostRecentZeroTurn.outcome !== 'lost-tick' &&
       mostRecentZeroTurn.outcome !== 'operator-skipped' &&
       mostRecentZeroTurn.communicationResult.requested &&
       mostRecentZeroTurn.communicationResult.accepted &&
@@ -1407,6 +1493,8 @@ export function calculateExperimentMetrics(
       providerErrors: records.filter(
         ({ outcome }) => outcome === 'provider-error',
       ).length,
+      lostTicks: records.filter(({ outcome }) => outcome === 'lost-tick')
+        .length,
       operatorSkipped: records.filter(
         ({ outcome }) => outcome === 'operator-skipped',
       ).length,
@@ -1420,39 +1508,47 @@ export function calculateExperimentMetrics(
         (turn) =>
           !usageAttempts(turn).some(({ kind }) => kind === 'manual-retry') &&
           turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'lost-tick' &&
           turn.outcome !== 'operator-skipped',
       ).length,
       recoveredManually: retriedTurns.filter(
         (turn) =>
           usageAttempts(turn).some(({ kind }) => kind === 'manual-retry') &&
           turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'lost-tick' &&
           turn.outcome !== 'operator-skipped',
       ).length,
       recoveredByRetry: retriedTurns.filter(
         ({ outcome }) =>
-          outcome !== 'provider-error' && outcome !== 'operator-skipped',
+          outcome !== 'provider-error' &&
+          outcome !== 'lost-tick' &&
+          outcome !== 'operator-skipped',
       ).length,
       requestedMoves: records.filter(
         (turn) =>
           turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'lost-tick' &&
           turn.outcome !== 'operator-skipped' &&
           turn.worldAction.type === 'move',
       ).length,
       requestedInfections: records.filter(
         (turn) =>
           turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'lost-tick' &&
           turn.outcome !== 'operator-skipped' &&
           turn.worldAction.type === 'infect',
       ).length,
       requestedCaptures: records.filter(
         (turn) =>
           turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'lost-tick' &&
           turn.outcome !== 'operator-skipped' &&
           turn.worldAction.type === 'capture',
       ).length,
       requestedWaits: records.filter(
         (turn) =>
           turn.outcome !== 'provider-error' &&
+          turn.outcome !== 'lost-tick' &&
           turn.outcome !== 'operator-skipped' &&
           turn.worldAction.type === 'wait',
       ).length,
@@ -1615,10 +1711,14 @@ function diplomacyMetrics(
   const completed = records.filter(
     (
       turn,
-    ): turn is Exclude<AgentTurnRecord, { outcome: 'provider-error' }> & {
+    ): turn is Exclude<
+      AgentTurnRecord,
+      { outcome: 'provider-error' | 'lost-tick' | 'operator-skipped' }
+    > & {
       diplomacyResult: Exclude<DiplomacyResult, { requested: false }>;
     } =>
       turn.outcome !== 'provider-error' &&
+      turn.outcome !== 'lost-tick' &&
       turn.outcome !== 'operator-skipped' &&
       turn.diplomacyResult.requested,
   );
@@ -1728,6 +1828,7 @@ function diplomacyMetrics(
     alliedCaptureAttempts: records.filter(
       (turn) =>
         turn.outcome !== 'provider-error' &&
+        turn.outcome !== 'lost-tick' &&
         turn.outcome !== 'operator-skipped' &&
         turn.worldAction.type === 'capture' &&
         !turn.worldActionResult.accepted &&
@@ -1736,6 +1837,7 @@ function diplomacyMetrics(
     alliedCaptureRejections: records.filter(
       (turn) =>
         turn.outcome !== 'provider-error' &&
+        turn.outcome !== 'lost-tick' &&
         turn.outcome !== 'operator-skipped' &&
         turn.worldAction.type === 'capture' &&
         !turn.worldActionResult.accepted &&
@@ -1820,6 +1922,7 @@ function groupedDiplomacyRejections(records: readonly AgentTurnRecord[]) {
   for (const turn of records) {
     if (
       turn.outcome === 'provider-error' ||
+      turn.outcome === 'lost-tick' ||
       turn.outcome === 'operator-skipped' ||
       !turn.diplomacyResult.requested ||
       turn.diplomacyResult.accepted

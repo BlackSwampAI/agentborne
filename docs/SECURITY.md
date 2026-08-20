@@ -17,6 +17,12 @@ The development API has no authentication, rate limiting, or spending guard. It 
 
 ## Model-provider isolation
 
+Simultaneous ticks retain the same provider isolation. Every job receives a
+schema-validated clone of its frozen observation, resolved model and reasoning
+profile, abort signal, and the tick's shared deadline. Agent-authored output
+cannot mutate the world directly or enter another same-tick observation.
+Cancellation discards every result from the uncommitted tick.
+
 OpenRouter receives one immutable structured observation and is instructed to return exactly one plain JSON object as text, containing a required world action plus at most one optional communication and one optional diplomacy intent. Its flat required fields use explicit empty-string and `none` sentinels. The runtime performs bounded extraction and conservative repair for wrappers such as code fences, surrounding prose, and trailing commas, then rejects missing text, unusable JSON, unknown fields, contradictory sentinels, or output truncation before the deterministic world engine validates all normalized components independently.
 
 The request uses the selected model, messages, `max_tokens`, `stream: false`, and at most one normalized reasoning object selected from sanitized model metadata. Provider default omits the object. Off is offered only for non-mandatory reasoning and sends `{ enabled: false, exclude: true }`; an advertised effort sends `{ enabled: true, effort, exclude: true }`. It deliberately sends no tools, `tool_choice`, `response_format`, `provider.require_parameters`, standalone `reasoning_effort`, or model-specific parameter. Model IDs are never inspected or special-cased. Transport/provider failures, unavailable-model/profile failures, text/JSON contract failures, and later simulation-rule rejection remain distinct safe outcomes. The adapter never silently substitutes a model or scripted behavior.
@@ -25,7 +31,9 @@ Explicit scripted mode bypasses repository `.env` loading entirely. This keeps d
 
 ## Location-search boundary
 
-Browser-driven unattended recovery is explicitly opt-in and bounded to at most three additional one-call retries per failed logical turn. Authentication, configuration, cancellation, conflicts, and unreconciled connection state require operator intervention. Retry requests reuse only the saved safe observation and never retain raw output, credentials, or private reasoning. Provider cost can increase by the configured bound, and closing the tab stops orchestration.
+Tick recovery is server-owned and bounded to the existing at-most-one automatic
+repair or transient retry inside the shared deadline. Lost ticks are final;
+there is no browser-driven Retry/Skip or unattended recovery path.
 
 Search runs only after explicit submission. Queries are trimmed to 120 characters, URL-encoded, receive no browser credentials, and are not logged by application code. The replaceable Nominatim adapter identifies the project, requests at most five results, limits upstream access to once per second per process, caches at most 100 normalized queries, times out after five seconds, and returns safe failures. `NOMINATIM_BASE_URL` replaces the upstream. Tests inject a fake; manual coordinates remain available.
 
@@ -38,14 +46,16 @@ but never both, and all calls share the original 75-second deadline. A
 corrective request contains the same authoritative observation plus only
 allowlisted validation codes; it never contains the raw invalid response, raw
 Zod issues, stack traces, provider bodies, or copied diagnostic text.
-Engine-rejected normalized decisions are not retried. Manual Retry is one
-request per click and cannot invoke automatic recovery.
+Engine-rejected normalized decisions are not retried. Manual Retry exists only
+for legacy sequential/schema-v9 compatibility. Tick recovery is limited to one
+bounded in-deadline automatic repair or transient retry; an unresolved decision
+becomes a final attributed lost tick.
 
 The model is explicitly instructed to return only one flat JSON decision with one concise visible summary and no hidden reasoning or chain-of-thought. Optional reasoning configuration always sets `exclude: true`; Provider default sends no reasoning instruction. Only numeric reasoning-token billing metadata is retained if OpenRouter reports it. The application stores no raw prompts, raw provider payloads, reasoning text, or private reasoning.
 
 Agent-authored messages, personalities, summaries, scoreboards, alliance events, proposals, and natural-language alliance claims are bounded untrusted data. They appear only inside the immutable user observation, never the fixed system instruction. Direct eligibility is derived from the pre-action snapshot. Recipient/range, infection, controller-presence, alliance membership, proposal eligibility, system ID/color allocation, and capture validation remain authoritative in the world engine. Models cannot choose alliance IDs, colors, membership lists, or metadata. Only accepted typed diplomacy changes alliance state, and rejected components cannot partially mutate or corrupt one another. World Lab renders model text through React text nodes and never raw HTML.
 
-World Lab personality edits are also untrusted, bounded text. The Game API trims and runtime-validates them before changing the authoritative session, and rejects changes during an active turn. The runtime supplies the active personality only inside the immutable observation as subordinate behavioral context. It is never interpolated into the fixed system instruction and cannot grant actions, weaken engine validation, request secrets, or authorize prompt/reasoning disclosure. React renders active and historical personality text as text rather than HTML.
+World Lab personality edits are also untrusted, bounded text. The Game API trims and runtime-validates them before changing the authoritative session, and rejects changes during active model execution. The runtime supplies the active personality only inside the immutable observation as subordinate behavioral context. It is never interpolated into the fixed system instruction and cannot grant actions, weaken engine validation, request secrets, or authorize prompt/reasoning disclosure. React renders active and historical personality text as text rather than HTML.
 
 Personality mutation errors use typed, generic response bodies. They do not expose raw prompts, provider responses, credentials, diagnostics, stack traces, or internal service details. There is still no authentication or persistence; these endpoints remain limited to the loopback development surface.
 
@@ -53,15 +63,14 @@ Behavior profile IDs are allowlisted at every boundary and resolve only to appli
 
 ## Experiment telemetry and exports
 
-Pending failures retain only sanitized diagnostics, model/reasoning selections,
-timestamps, and the safe simulation observation required for an operator retry.
-Raw provider responses, reasoning text, credentials, and authorization headers
-are not retained. Manual attempts and explicit operator skips are exported for
-auditability.
+Tick failures retain only sanitized diagnostics, model/reasoning selections,
+timestamps, and the safe frozen observation. A resolved lost tick is final and
+has no manual retry/skip path. Raw provider responses, reasoning text,
+credentials, and authorization headers are not retained.
 
 The Game API captures only schema-validated safe observations, requested world actions, optional communication and diplomacy intents, separate result records, visible concise summaries, bounded message text, typed alliance events, sanitized rejected attempts, bounded provider failures, and normalized usage metadata. Malformed identifiers use nullable or absent sanitized representations; raw provider output is never retained. It never records or exports API keys, authorization data, fixed or hidden prompts, raw provider request/response bodies, private chain-of-thought, hidden analysis, secrets, or unbounded diagnostics. Historical records are cloned and immutable.
 
-Export requests, agent IDs, levels, ranges, outcome/world-action filters, communication channel/status filters, and Custom dependencies are runtime-validated. Filtering and metrics remain server-owned. Schema version 8 adds allowlisted behavior metadata without changing schema-v7 model and attempt-accounting meanings; schema-v5 through v7 imports remain supported. Selected-agent exports use sender/recipient-aware communication filtering and direct multi-agent relevance for proposals and membership changes; unrelated direct messages and rejected diplomacy are excluded. Reset clears communications, alliances, proposals, alliance events, and their metrics while preserving active personality values and unlocking preserved assignments for the new experiment.
+Export requests, agent IDs, levels, ranges, outcome/world-action filters, communication channel/status filters, and Custom dependencies are runtime-validated. Filtering and metrics remain server-owned. Schema v10 requires complete tick attribution and canonical safe per-tick summaries derived from all model attempts; schema-v9 remains the legacy sequential export format and documented older safe imports remain supported by the Game API. Selected-agent exports use sender/recipient-aware communication filtering and direct multi-agent relevance for proposals and membership changes; unrelated direct messages and rejected diplomacy are excluded. Reset clears communications, alliances, proposals, alliance events, and their metrics while preserving active personality values and unlocking preserved assignments for the new experiment.
 
 Actual cost is accepted only from OpenRouter's safe `usage.cost`. Missing cost is unknown, never zero; scripted-test providers explicitly report zero. The active Game API still has no authentication, budget enforcement, restartable persistence, provider-management endpoint, upload, or sharing link. The loopback-only boundary remains mandatory.
 

@@ -1,5 +1,11 @@
 # Gameplay Foundation
 
+> **Delivery status (2026-08-20):** the pre-PR5 simultaneous agent tick,
+> deterministic virtual clock, shared-deadline dispatcher, phased resolution,
+> and schema-v10 experiment attribution are delivered as an operator-driven
+> foundation. Simulated players, threat observations, and Player Mode timing
+> remain future work and are not activated by this milestone.
+
 ## Current experimental Patient Zero slice
 
 One scenario roster agent may coordinate global infection strategy through a
@@ -7,7 +13,7 @@ bounded authoritative overview, private advisory directives, and ordinary
 direct replies. The role changes information and communication only: it has no
 extra movement or world-action power, cannot force compliance, cannot see live
 player GPS, and does not implement capture succession. It operates under the
-current sequential turn model until the later simultaneous-tick milestone.
+simultaneous tick model under the same movement and world-action limits.
 
 > **Status: accepted product and roadmap direction, not an implementation claim.**
 > This document records foundational decisions for future World Lab and Player
@@ -77,9 +83,9 @@ Player interactions occur continuously in real time. Agents act on server-author
 - Build every surviving agent's observation from that same snapshot.
 - Request decisions concurrently under a shared bounded deadline.
 - No agent sees another agent's decision from the same tick.
-- Missing, malformed, or late decisions lose that tick after the bounded unattended-recovery policy is exhausted.
+- Missing, malformed, or late decisions become final attributed lost ticks after the one permitted in-deadline repair or transient retry is exhausted.
 - Valid decisions resolve simultaneously and deterministically.
-- The next tick is scheduled using a hidden randomized interval, initially tunable between 5 and 10 minutes.
+- Each explicit tick advances the deterministic virtual clock by a hidden seeded interval, initially tunable between 5 and 10 minutes; no background scheduler exists yet.
 - The exact schedule remains server-only. Player Mode must not receive or display
   `nextTickAt`, a countdown, progress ring, or equivalent timing information.
 
@@ -324,7 +330,7 @@ World Lab should make the new behavior measurable. Useful aggregate and per-agen
 - Alliance warnings and downstream reactions.
 - Simulated-player distance traveled, cells cleaned, and captures.
 - Decision latency and deadline misses.
-- Retry and unattended-recovery results.
+- Automatic repair/transport attempts and final lost-tick results.
 - Token usage and cost per tick.
 
 Telemetry must continue to exclude raw provider output and private
@@ -336,7 +342,7 @@ The intended sequence is:
 
 1. Configurable map scale, H3 resolution, and agent roster. **Implemented in the World Lab scenario milestone.**
 2. Goal-oriented prompt revision and versioned scenario attribution. **Implemented as `durable-influence-v1` without player-survival language.**
-3. Simultaneous agent ticks with a provider-neutral dispatcher and virtual clock.
+3. Simultaneous agent ticks with a provider-neutral dispatcher and virtual clock. **Implemented as the pre-PR5 experiment foundation without background scheduling or Player Mode timing exposure.**
 4. Deterministic real-time simulated players and threat observations.
 5. Comparative unattended World Lab experiments.
 6. Real GPS Player Mode using the already-tested capture and disinfection rules.

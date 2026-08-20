@@ -9,8 +9,11 @@ import {
 } from 'h3-js';
 import {
   ALLIANCE_COLOR_PALETTE,
+  AGENT_DECISION_CONTRACT_VERSION,
   DEVELOPMENT_WORLD_CONFIG,
   DEFAULT_COMMUNICATION_RANGE_KM,
+  DEFAULT_MINIMUM_TICK_INTERVAL_MINUTES,
+  DEFAULT_MAXIMUM_TICK_INTERVAL_MINUTES,
   NEUTRAL_AGENT_COLOR,
   assignBehavior,
   OBJECTIVE_PROMPT_VERSION,
@@ -67,6 +70,7 @@ export interface EngineContext {
   now: () => string;
   communicationRangeKm: number;
   patientZeroAgentId: AgentId | null;
+  tickNumber?: number;
 }
 
 export interface AppliedAction {
@@ -542,6 +546,12 @@ export function applyDiplomacy(
       proposerAllianceId: proposerAlliance?.id ?? null,
       originatingTurn: turnNumber,
       expirationTurn: turnNumber + state.agents.size * 2,
+      ...(context.tickNumber === undefined
+        ? {}
+        : {
+            originatingTick: context.tickNumber,
+            expirationTick: context.tickNumber + 2,
+          }),
     };
     proposals.set(proposal.id, proposal);
     const event: AllianceEvent = {
@@ -722,13 +732,19 @@ export function expireAllianceProposals(
   const proposals = new Map(state.pendingAllianceProposals ?? []);
   const resolved = { ...defaultContext, ...context };
   const events: AllianceEvent[] = [];
-  for (const proposal of proposals.values())
-    if (proposal.expirationTurn <= completedTurn) {
+  for (const proposal of proposals.values()) {
+    const expired =
+      proposal.expirationTick === undefined
+        ? proposal.expirationTurn <= completedTurn
+        : context.tickNumber !== undefined &&
+          proposal.expirationTick <= context.tickNumber;
+    if (expired) {
       proposals.delete(proposal.id);
       events.push(
         proposalClosedEvent(proposal, 'expired', completedTurn, resolved),
       );
     }
+  }
   return events.length
     ? {
         ...state,
@@ -1016,6 +1032,38 @@ function seededNumber(seed: string): () => number {
   };
 }
 
+/** Stable per-tick shuffle used by simulation resolution, never provider completion order. */
+export function seededTickOrder<T extends string>(
+  values: readonly T[],
+  scenarioSeed: string,
+  tickNumber: number,
+): T[] {
+  const random = seededNumber(`${scenarioSeed}:tick-order:${tickNumber}`);
+  return values
+    .map((value) => ({ value, rank: random() }))
+    .sort(
+      (left, right) =>
+        left.rank - right.rank || left.value.localeCompare(right.value),
+    )
+    .map(({ value }) => value);
+}
+
+export function seededTickIntervalMinutes(
+  scenarioSeed: string,
+  tickNumber: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (
+    !Number.isInteger(minimum) ||
+    !Number.isInteger(maximum) ||
+    minimum > maximum
+  )
+    throw new Error('Invalid tick interval bounds.');
+  const random = seededNumber(`${scenarioSeed}:tick-interval:${tickNumber}`);
+  return minimum + Math.floor(random() * (maximum - minimum + 1));
+}
+
 function shuffled<T>(values: readonly T[], seed: string): T[] {
   const result = [...values];
   const random = seededNumber(seed);
@@ -1121,6 +1169,8 @@ export function defaultWorldSetupRequest(): WorldSetupRequest {
     spawnSeed: DEFAULT_SPAWN_SEED,
     minimumSpawnSeparation: 1,
     communicationRangeKm: DEFAULT_COMMUNICATION_RANGE_KM,
+    minimumTickIntervalMinutes: DEFAULT_MINIMUM_TICK_INTERVAL_MINUTES,
+    maximumTickIntervalMinutes: DEFAULT_MAXIMUM_TICK_INTERVAL_MINUTES,
     patientZeroAgentId: null,
     roster,
     modelConfiguration: {
@@ -1250,6 +1300,7 @@ export function previewWorldSetup(
   };
   const scenario: AppliedScenario = {
     ...request,
+    decisionContractVersion: AGENT_DECISION_CONTRACT_VERSION,
     exactCellCount: cells.length,
     areaSquareKilometers: cells.reduce(
       (total, cell) => total + cellArea(cell, UNITS.km2),

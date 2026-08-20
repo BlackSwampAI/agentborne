@@ -1,8 +1,25 @@
 # Architecture
 
+## Simultaneous tick authority
+
+The Game API owns an operator-triggered tick transaction. It freezes the world
+and builds every observation before dispatching any model request. A
+provider-neutral runtime dispatcher starts jobs concurrently with bounded
+concurrency, resolved model/reasoning identity, immutable per-agent observation,
+and one shared absolute deadline. Provider completion order is never resolution
+order.
+
+The simulation derives a reproducible per-tick agent order from the scenario
+seed. The world engine then resolves all world actions, all communications using
+the frozen pre-tick eligibility state, all diplomacy, and one proposal-expiration
+pass. Only the complete candidate state and complete record group commit.
+Cancellation aborts outstanding jobs and commits neither records, events, tick,
+nor virtual time. The browser accelerates explicit tick requests; it does not
+schedule authoritative work in the background.
+
 ## Persistent World Lab operator shell
 
-World Lab owns one browser execution controller at the root of its client component. The controller centralizes authoritative snapshot reconciliation, mutation IDs, playback timing, bounded-run targets, cancellation, and unattended recovery. Switching between the Live and Agents workspaces changes only the presented workspace; it does not unmount or duplicate the controller, its timer, or its in-flight request state.
+World Lab owns one browser execution controller at the root of its client component. The controller centralizes authoritative snapshot reconciliation, mutation IDs, playback timing, bounded tick targets, and cancellation. Switching between the Live and Agents workspaces changes only the presented workspace; it does not unmount or duplicate the controller, its timer, or its in-flight request state.
 
 The Live workspace is a grid of independently scrolling agent rail, map, contextual inspector, and bounded activity dock. Agent and hex selections select the corresponding semantic inspector tab, while Scoreboard and Run remain directly reachable. The Agents workspace reuses the same snapshot and existing server mutations for model, reasoning, personality, and strategy assignment. Roster replacement remains a World Setup operation that creates a replacement experiment rather than mutating the active roster mid-run.
 
@@ -16,17 +33,17 @@ World Lab → Game API / simulation service → agent runtime → one decision
 
 The Game API also owns one process-local experiment record. Each completed safe turn is captured once, independently from the browser snapshot, and server-side export levels filter that record without affecting provider requests.
 
-Completed schema-v9 exports may cross a separate offline archive boundary into `packages/experiment-archive`. Node's built-in SQLite stores normalized immutable research records through versioned migrations, foreign keys, prepared statements, and transactional idempotent imports. This downstream observability archive is never consulted by turn execution and cannot recover, resume, or mutate the active world. Its bounded query service is application-independent so a future read-only MCP adapter can reuse it without exposing arbitrary SQL.
+Completed schema-v10 exports and compatible schema-v9 exports may cross a separate offline archive boundary into `packages/experiment-archive`. Node's built-in SQLite stores normalized immutable research records through versioned migrations, foreign keys, prepared statements, and transactional idempotent imports. This downstream observability archive is never consulted by tick execution and cannot recover, resume, or mutate the active world. Its bounded query service is application-independent so a future read-only MCP adapter can reuse it without exposing arbitrary SQL.
 
 World Setup uses `world-scenario-v1`. Pure preview computes the actual H3 disk, exact count, summed cell area, deterministic roster/spawns, feasibility, and warnings. Apply recomputes and atomically replaces world and experiment state. Reset reconstructs the current scenario; the Toledo default preserves legacy starts. Explicit location search crosses a replaceable server-owned adapter with no autocomplete, a one-request-per-second Nominatim limit, bounded cache/timeout, normalized results, and OpenStreetMap attribution. Manual coordinates bypass that network boundary.
 
-World Lab may opt into browser-driven unattended recovery for continuous Start or Run-to sessions. After the existing initial call and at most one internal repair/transport retry, the browser serially requests one-call unattended retries up to a local limit of one through three, then commits one attributed unattended skip. Every mutation has a fresh idempotency key and uses the authoritative pending turn. Pausing, cancellation, ineligible failures, or failed reconciliation stops the loop. The tab must remain open; this is not scheduling, simultaneous ticks, or a production recovery service.
+World Lab issues explicit ticks while Start or a bounded run is active. Provider recovery is contained inside each job's shared tick deadline. Lost ticks are final; the browser exposes no pending Retry/Skip or unattended-recovery loop.
 
 ## Applications
 
-`apps/world-lab` is a Next.js App Router developer/admin surface. It fetches runtime-validated simulation snapshots through a local rewrite, controls one turn at a time, and updates MapLibre's existing H3 GeoJSON source without recreating the map. Agent markers are fully visible and use deterministic offsets when sharing cells.
+`apps/world-lab` is a Next.js App Router developer/admin surface. It fetches runtime-validated simulation snapshots through a local rewrite, controls one tick at a time, and updates MapLibre's existing H3 GeoJSON source without recreating the map. Agent markers are fully visible and use deterministic offsets when sharing cells.
 
-Its command navbar is the single persistent application-control row. Browser-session run-target selection remains client orchestration and preserves absolute turn semantics; execution and reconciliation still consume authoritative API snapshots. Global and per-agent selectors share one deduplicating, case-insensitive model-option builder. Current alliance membership is the first UI color authority for map, roster, chat, and log accents, followed by retained effective color, base agent color, and a neutral fallback.
+Its command navbar is the single persistent application-control row. Browser-session run-target selection remains client orchestration and preserves absolute tick semantics; execution and reconciliation still consume authoritative API snapshots. Global and per-agent selectors share one deduplicating, case-insensitive model-option builder. Current alliance membership is the first UI color authority for map, roster, chat, and log accents, followed by retained effective color, base agent color, and a neutral fallback.
 
 The default basemap is tokenless CARTO Dark Matter with OpenStreetMap and CARTO attribution. Deterministic tests inspect its configuration and mocked MapLibre H3 sources without requesting external tiles.
 
@@ -35,7 +52,10 @@ Communication resolves against the authoritative pre-action snapshot. Public cha
 `apps/game-api` is a Hono service bound conservatively to loopback. Its single in-memory `SimulationService` owns the development session, monotonic completed-turn count, turn cursor, bounded histories, and overlap lock. It exposes:
 
 - `GET /api/simulation` — current authoritative snapshot
-- `POST /api/simulation/turn` — one agent observation, one provider decision, one engine application
+- `POST /api/simulation/tick` — one simultaneous decision opportunity for every active roster agent
+- `POST /api/simulation/tick/cancel` — atomically abort the active tick
+- `POST /api/simulation/turn`, `/turn/retry`, `/turn/skip`, and unattended turn variants — legacy sequential/schema-v9 compatibility only; they cannot mix with committed ticks
+- `POST /api/simulation/turn/cancel` — legacy cancellation alias
 - `POST /api/simulation/reset` — deterministic reset, rejected while a turn is active
 - `POST /api/simulation/agents/:agentId/personality` — trim, validate, and replace one active personality
 - `POST /api/simulation/personalities/restore-defaults` — restore all eight milestone personality directives without resetting progress
@@ -45,33 +65,38 @@ Communication resolves against the authoritative pre-action snapshot. Public cha
 - `POST /api/simulation/models/refresh` — explicitly refresh that catalog
 - `POST /api/simulation/models/verify` — make one explicit, non-mutating compatibility probe
 - `POST /api/simulation/experiment/models` — replace the unlocked global/per-agent assignment
-- `POST /api/simulation/turn/cancel` — abort the active provider request without mutating the world or consuming a turn
 - `POST /api/simulation/experiment/import` — restore model assignments from a validated export
 
 The legacy `GET /api/development-world` and `GET /health` endpoints remain for low-level diagnostics.
 
 The Game API is authoritative for session personality configuration. World reset reconstructs deterministic positions, 127 open cells, empty alliances/proposals/events/metrics, cursor, and completed-turn count, then reapplies the eight current personality values. Restoring defaults changes only those values. Both personality mutations are rejected while the service's turn lock is active.
 
-## Turn flow
+## Tick flow
 
 An applied scenario may designate one Patient Zero coordinator. The service
 adds a bounded global strategic view only to that agent's immutable
 observation; other observations retain their local/alliance bounds. The engine
 alone authorizes player-hidden Zero broadcasts and Patient-Zero-endpoint direct
 range bypass. Patient Zero receives no extra movement, action, infection,
-capture, ownership, or alliance authority. Current execution remains
-sequential, with committed-event visibility; future simultaneous ticks must
-use one frozen observation snapshot.
+capture, ownership, or alliance authority. Every agent observation is built
+from one frozen pre-tick snapshot.
 
-Recoverable provider, parsing, schema, and exceptional post-provider validation
-failures are held as a server-owned pending logical turn. Ordinary
-engine-authoritative action rejection remains a completed `rejected` outcome.
-Manual Retry reuses the same agent
-observation and world boundary while resolving the model and reasoning profile
-again from current operator configuration. Operator Skip commits an explicit
-`operator-skipped` record without invoking a world action, communication, or
-diplomacy, then advances the cursor once. Neither path schedules an automatic
-retry.
+The universal `text-flat-json-v4` prompt makes `communicationType: "none"` the
+normal choice for ordinary agents and Patient Zero unless a message adds new
+decision-relevant value. Concrete requests or replies, negotiation,
+observed-fact warnings, changed plans, border/conflict coordination, and
+coordinated targets or routes are useful categories. Routine action narration,
+motivational filler, observation/summary restatement, and unchanged-plan
+repetition are prohibited prompt behaviors. Messages accompanying formal
+diplomacy add terms or context instead of duplicating the formal intent. Useful
+messages retain the assigned personality and style, and all existing channel,
+trust, privacy, and Patient Zero authority rules remain unchanged. This is
+provider guidance, not engine semantic classification, rejection, or throttling.
+
+Recoverable provider, parsing, and schema failures may consume the one automatic
+retry inside the shared deadline. An unresolved decision becomes an attributed
+final lost tick. Ordinary engine-authoritative action rejection remains a
+completed `rejected` outcome and does not affect sibling components.
 
 For a new logical turn, the service owns one 75-second deadline and permits at
 most two provider calls: initial plus either one contract repair or one transient
@@ -79,19 +104,39 @@ transport retry. Both calls receive the same immutable observation, resolved
 model, and reasoning profile. Repair prompts are fresh universal flat-JSON
 requests containing only allowlisted validation codes; raw invalid output is
 discarded. Structurally normalized decisions enter the normal engine path once,
-and engine rejection is never an automatic retry condition. Manual Retry makes
-exactly one request per click, may include the latest safe feedback, and cannot
-trigger nested recovery.
+and engine rejection is never an automatic retry condition.
 
-The development world is a deterministic H3 resolution-nine radius-six disk (127 cells) around Toledo with eight fixed profiles and unique perimeter starts. One agent acts per turn in stable array order, so 200 completed turns give every agent exactly 25 turns. Each provider call asks for one flat JSON object containing a required world action, zero or one communication, and zero or one diplomacy intent (`propose-alliance`, `accept-alliance`, or `leave-alliance`). Required sentinel-bearing fields normalize into the internal unions before existing Zod and engine validation. There are no social ticks, background inference calls, or automatic replies.
+The development world is a deterministic H3 resolution-nine radius-six disk
+(127 cells) around Toledo with eight fixed profiles and unique perimeter starts.
+Every active agent receives one decision opportunity per tick. Each provider
+call asks for one flat JSON object containing a required world action, zero or
+one communication, and zero or one diplomacy intent (`propose-alliance`,
+`accept-alliance`, or `leave-alliance`). Required sentinel-bearing fields
+normalize into the internal unions before existing Zod and engine validation.
+There are no background inference calls or automatic replies.
 
 Names, colors, stable IDs, and starting cells remain fixed. Personality text is mutable session configuration, but each observation copies the active value at turn start. Completed observations and turn records remain immutable, so a newly edited active personality can intentionally differ from the latest historical observation until that agent acts again.
 
-The engine alone accepts or rejects all components and creates events. The service preserves the pre-decision state, then applies world action, communication, diplomacy, and automatic proposal expiry in that deterministic order. Direct-message eligibility uses the preserved pre-action state. Each rejected component leaves the others intact. Missing text, unusable JSON, contradictory fields, timeouts, and truncated output follow the provider-failure path, stop all playback, and preserve the world without expiring proposals. Operator cancellation is separate: it aborts the active request, applies no world or proposal changes, creates no turn record, does not advance the cursor or completed-turn count, and returns to paused state. The active request and browser request settle before between-turn model editing is re-enabled.
+The engine alone accepts or rejects all components and creates events. The
+service applies every world action, then every communication using frozen
+pre-tick eligibility, then diplomacy, then one proposal-expiry pass. Each
+rejected component leaves the others intact. Missing text, unusable JSON,
+contradictory fields, timeouts, and truncated output produce a lost tick for
+that agent while valid siblings resolve. Operator cancellation aborts all
+active requests and commits no world, events, records, tick, or virtual time.
 
 ## Formal alliance state
 
-World state owns up to four active alliances and bounded pending proposals. Alliance and proposal IDs are system-generated typed UUIDs. Each alliance contains two to eight unique agents, each agent belongs to at most one alliance, and the engine allocates the first free color from a fixed four-color accessible palette. A proposal records proposer, recipient, proposer alliance at creation, originating turn, and expiration turn. Created at turn `N`, it remains eligible through turn `N + 8` and expires after that turn without inference.
+World state owns up to four active alliances and bounded pending proposals.
+Alliance and proposal IDs are system-generated typed UUIDs. Each alliance
+contains two to eight unique agents, each agent belongs to at most one alliance,
+and the engine allocates the first free color from a fixed four-color accessible
+palette. A proposal records proposer, recipient, proposer alliance at creation,
+the globally unique originating record ordinal, and tick authority. Created at
+tick `N`, it expires at tick `N + 2` without inference; legacy schema-v9 turn
+fields retain their two-roster-round lifetime. The one expiry pass is attributed
+to the final record in deterministic resolution order so its safe telemetry is
+not lost.
 
 Free agents may propose only to free agents; allied agents may invite a free agent into their current alliance. Recipient-only acceptance either forms a two-agent alliance or recruits into the recorded unchanged alliance. Membership changes invalidate impossible proposals. Departure is unilateral; individual hex control never changes, and an alliance dissolves below two members. Hexes store only individual `controllerAgentId`; effective marker and territory color is derived from the controller's current alliance, or its permanent base color when unaffiliated. Capture eligibility rejects `allied-controller`.
 
@@ -103,13 +148,13 @@ Snapshots keep the newest 120 turn records and 120 world events. Observations ex
 
 The active experiment has a runtime-validated UUID, start time, versioned authoritative scenario and ordered initial roster, immutable configuration events, initial world, and up to 5,000 complete safe turns. The browser snapshot and world-event list remain capped at 120. Reset creates a new experiment from the current scenario and clears telemetry/cost; no previous experiments survive reset or process restart.
 
-Metrics and filtering are deterministic Game API responsibilities. Schema version 7 adds attempt-aware Retry/Skip accounting to the model and reasoning-profile assignments introduced in schema version 6. A turn's top-level provider metadata records the final attempt, while `modelAttempts` is canonical for call, token, and cost totals. Imports preserve recorded slugs and profiles; schema-v6 documents remain supported and missing profiles migrate to Provider default, while legacy schema-v5 documents have no assignment and remain blocked until the operator selects one.
+Metrics and filtering are deterministic Game API responsibilities. Schema v10 adds mandatory tick attribution, first-class lost ticks, and per-tick summaries. `modelAttempts` is canonical for provider-call, latency, token, and cost totals so repairs and transient retries are not undercounted. Tick-native and unstarted tick-default experiments export v10; retained sequential experiments remain v9 and cannot mix execution modes. The Game API retains its documented older safe-import support for model configuration.
 
 The agent runtime follows [OpenRouter's usage-accounting contract](https://openrouter.ai/docs/cookbook/administration/usage-accounting) and normalizes optional non-streaming usage fields: prompt, completion, total, reasoning, cached-read, cache-write tokens, and actual `usage.cost` as `costCredits`. It never derives price from a table. Safe usage already returned with a billable response is retained on later decision JSON/schema failure; network and HTTP failures without usage remain unknown. Scripted providers explicitly report zero tokens and zero cost.
 
 ## Packages
 
-`packages/shared` owns centralized scenario limits and all public schemas, including model capabilities, behavior assignments, alliances, metrics, and schema-v9 exports. Other-agent observations remain deterministically capped at seven for larger rosters. Types are inferred from Zod.
+`packages/shared` owns centralized scenario limits and all public schemas, including model capabilities, behavior assignments, alliances, metrics, schema-v10 tick exports, and genuine legacy schema-v9 exports. Other-agent observations remain deterministically capped at seven for larger rosters. Types are inferred from Zod.
 
 `packages/world-engine` remains deterministic and has no model, HTTP, UI, storage, or credential dependency. It validates world action, communication, and diplomacy independently and is the sole alliance mutation authority. Direct proximity is derived from a separately supplied pre-action state.
 
@@ -117,17 +162,17 @@ The agent runtime follows [OpenRouter's usage-accounting contract](https://openr
 
 The catalog has an eight-second timeout and five-minute in-memory TTL. A successful response replaces the cache. A timeout, transport/HTTP failure, or malformed response retains the last successful catalog and marks it stale with a safe error; without a prior success it returns an empty error state. Manual refresh bypasses TTL while coalescing concurrent refreshes.
 
-Every agent resolves an explicit global assignment or per-agent override before execution, including its reasoning profile. The acting agent's resolved slug and profile are passed to its request. Assignments may change while playback is paused and no provider/reset mutation is active. Each change is exported with timestamp, scope, prior/new slug, prior/new reasoning profile, and effective next-turn boundary. No unavailable model/profile or missing model is substituted.
+Every agent resolves an explicit global assignment or per-agent override before execution, including its reasoning profile. The acting agent's resolved slug and profile are passed to its request. Assignments may change while playback is paused and no provider/reset mutation is active. Each change is exported with timestamp, scope, prior/new slug, prior/new reasoning profile, and the first globally unique record ordinal at which it is effective; tick execution applies the configuration to the next committed tick group. No unavailable model/profile or missing model is substituted.
 
 The centralized 75-second provider abort timeout covers the complete response lifecycle, including body reading, response decoding, bounded JSON extraction/repair, normalization, and schema validation, and is cleared after every outcome. The same AbortController supports an explicit non-turn-consuming operator cancellation. Safe records expose only bounded status/code/message/request ID/model/finish-reason/latency/usage fields. Scripted providers are explicit deterministic seams selected only by tests or `HEXZERO_PROVIDER=scripted`; there is no automatic fallback. Manual probes use the exact text/flat-JSON contract and selected reasoning profile, never mutate or advance the world, may incur a small charge, and are cached only for the current server session by model ID, reasoning profile, and contract version.
 
 The deadline is shared by both permitted automatic attempts rather than renewed
-per call. Turn and Retry browser mutations carry bounded client operation IDs,
-and repeated delivery is coalesced server-side. When a proxy connection resets
-or a response is otherwise lost, the World Lab clears its local guard, refetches
-the authoritative snapshot, and shows a height-stable reconciling state while
-polling an active request. It never resubmits merely because a response was
-ambiguous.
+per call. Tick browser mutations carry bounded client operation IDs and repeated
+delivery is coalesced server-side; Turn and Retry retain that behavior only for
+legacy sequential API compatibility. When a proxy connection resets or a
+response is otherwise lost, World Lab clears its local guard, refetches the
+authoritative snapshot, and shows a height-stable reconciling state while polling
+an active tick. It never resubmits merely because a response was ambiguous.
 
 Attempt aggregation is field-wise: known prompt, completion, total, reasoning,
 cache-read, and cache-write values remain visible even when another attempt has
@@ -144,6 +189,7 @@ Experiment capture and export semantics are recorded in [ADR 0004](adr/0004-serv
 Nearby-message authority, observation bounds, and export selection semantics are recorded in [ADR 0005](adr/0005-nearby-agent-messaging.md).
 Contested control, capture, territory authority, and schema-v3 selection semantics are recorded in [ADR 0006](adr/0006-contested-hex-control.md).
 Decoupled communication and schema-v4 selection semantics are recorded in [ADR 0007](adr/0007-decoupled-world-communication.md).
+Selective agent communication and `text-flat-json-v4` attribution are recorded in [ADR 0015](adr/0015-selective-agent-communication.md).
 Formal alliances, the expanded experiment, and schema-v5 semantics are recorded in [ADR 0008](adr/0008-formal-alliances-experiment.md).
 Capability-driven model discovery and experiment assignments are recorded in [ADR 0009](adr/0009-capability-driven-model-catalog.md).
 Versioned behavior profiles, seeded assignment, and authoritative diplomacy affordances are recorded in [ADR 0010](adr/0010-versioned-agent-behavior.md).
