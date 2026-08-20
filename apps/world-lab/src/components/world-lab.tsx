@@ -103,7 +103,8 @@ export function WorldLab() {
     snapshot?.world.events.filter(
       (event) =>
         event.type === 'direct-message-sent' ||
-        event.type === 'alliance-message-sent',
+        event.type === 'alliance-message-sent' ||
+        event.type === 'zero-message-sent',
     ).length ?? 0;
   const previousPrivateCommCount = useRef<number | null>(null);
   useEffect(() => {
@@ -1014,6 +1015,14 @@ export function WorldLab() {
                 <dd>{snapshot.experiment.retainedTurns}</dd>
               </div>
               <div>
+                <dt>Patient Zero</dt>
+                <dd>
+                  {snapshot.world.agents.find(
+                    ({ id }) => id === snapshot.scenario.patientZeroAgentId,
+                  )?.name ?? 'None'}
+                </dd>
+              </div>
+              <div>
                 <dt>Public messages</dt>
                 <dd>
                   {snapshot.experiment.metrics.aggregate.publicMessagesSent}
@@ -1443,6 +1452,7 @@ export function WorldLab() {
                 hexes={snapshot.world.hexes}
                 agents={snapshot.world.agents}
                 alliances={snapshot.world.alliances}
+                patientZeroAgentId={snapshot.scenario.patientZeroAgentId}
                 selectedCell={selectedCell}
                 selectedAgentId={inspectionAgentId}
                 onSelectCell={(cell) => {
@@ -2046,6 +2056,7 @@ function WorldSetupPanel({
       spawnSeed: scenario.spawnSeed,
       minimumSpawnSeparation: scenario.minimumSpawnSeparation,
       communicationRangeKm: scenario.communicationRangeKm,
+      patientZeroAgentId: scenario.patientZeroAgentId,
       roster: scenario.roster,
       modelConfiguration: scenario.modelConfiguration,
       behaviorConfiguration: scenario.behaviorConfiguration,
@@ -2095,6 +2106,10 @@ function WorldSetupPanel({
       return {
         ...current,
         roster,
+        patientZeroAgentId:
+          current.patientZeroAgentId && ids.has(current.patientZeroAgentId)
+            ? current.patientZeroAgentId
+            : null,
         modelConfiguration: {
           ...current.modelConfiguration,
           overrides: current.modelConfiguration.overrides.filter(
@@ -2521,6 +2536,27 @@ function WorldSetupPanel({
       </section>
       <section className="setup-section">
         <h3>Assignments</h3>
+        <label>
+          Patient Zero
+          <select
+            aria-label="Patient Zero"
+            value={draft.patientZeroAgentId ?? ''}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                patientZeroAgentId: (event.target.value ||
+                  null) as AgentId | null,
+              })
+            }
+          >
+            <option value="">None</option>
+            {draft.roster.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <label>
           Behavior mode
           <select
@@ -3389,6 +3425,9 @@ function AgentRoster({
             <span>
               <span className="agent-row-title">
                 <strong>{agent.name}</strong>
+                {agent.id === snapshot.scenario.patientZeroAgentId && (
+                  <span className="patient-zero-badge">HEX-0</span>
+                )}
                 {agent.id === followedAgentId && (
                   <span className="turn-indicator">{followedLabel}</span>
                 )}
@@ -3423,17 +3462,25 @@ function PrivateComms({
   snapshot: SimulationSnapshot;
   onSelectAgent: (agentId: AgentId) => void;
 }) {
-  const [filter, setFilter] = useState<'all' | 'direct' | 'alliance'>('all');
+  const [filter, setFilter] = useState<'all' | 'direct' | 'alliance' | 'zero'>(
+    'all',
+  );
   const messages = snapshot.world.events
     .filter(
       (
         event,
       ): event is Extract<
         SimulationSnapshot['world']['events'][number],
-        { type: 'direct-message-sent' | 'alliance-message-sent' }
+        {
+          type:
+            | 'direct-message-sent'
+            | 'alliance-message-sent'
+            | 'zero-message-sent';
+        }
       > =>
         event.type === 'direct-message-sent' ||
-        event.type === 'alliance-message-sent',
+        event.type === 'alliance-message-sent' ||
+        event.type === 'zero-message-sent',
     )
     .filter((event) => filter === 'all' || event.channel === filter)
     .toReversed()
@@ -3467,7 +3514,7 @@ function PrivateComms({
         </div>
       </div>
       <div className="tab-list" aria-label="Private communication filters">
-        {(['all', 'direct', 'alliance'] as const).map((value) => (
+        {(['all', 'direct', 'alliance', 'zero'] as const).map((value) => (
           <button
             key={value}
             type="button"
@@ -3478,7 +3525,9 @@ function PrivateComms({
               ? 'All'
               : value === 'direct'
                 ? 'Direct'
-                : 'Alliance'}
+                : value === 'alliance'
+                  ? 'Alliance'
+                  : 'Zero'}
           </button>
         ))}
       </div>
@@ -3532,11 +3581,21 @@ function PrivateComms({
                         {recipient?.name ?? event.recipientId}
                       </button>{' '}
                       · {event.distance.toFixed(2)} km
+                      {(event.agentId ===
+                        snapshot.scenario.patientZeroAgentId ||
+                        event.recipientId ===
+                          snapshot.scenario.patientZeroAgentId) &&
+                        ' · Patient Zero endpoint'}
                     </>
-                  ) : (
+                  ) : event.type === 'alliance-message-sent' ? (
                     <>
                       Alliance {event.allianceId} · {event.recipientIds.length}{' '}
                       recipient{event.recipientIds.length === 1 ? '' : 's'}
+                    </>
+                  ) : (
+                    <>
+                      Zero broadcast · {event.recipientIds.length} recipient
+                      {event.recipientIds.length === 1 ? '' : 's'}
                     </>
                   )}
                 </small>
@@ -3947,8 +4006,21 @@ function AgentInspector({
       <h2>
         <span className="agent-swatch" style={{ background: agent.color }} />
         {agent.name}
+        {agent.id === snapshot.scenario.patientZeroAgentId && (
+          <span className="patient-zero-badge">Patient Zero</span>
+        )}
       </h2>
       <dl>
+        <div>
+          <dt>Patient Zero role</dt>
+          <dd>
+            {agent.id === snapshot.scenario.patientZeroAgentId
+              ? 'Designated coordinator (normal world-action rules)'
+              : snapshot.scenario.patientZeroAgentId
+                ? 'Field agent'
+                : 'Disabled'}
+          </dd>
+        </div>
         <div>
           <dt>Stable ID</dt>
           <dd>{agent.id}</dd>

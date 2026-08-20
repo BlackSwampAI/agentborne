@@ -9,6 +9,7 @@ import {
   type AgentId,
   type AgentObservation,
   type AgentTurnRecord,
+  type EventId,
   type AllianceEvent,
   type ExperimentExportDocument,
   type ExperimentExportPreview,
@@ -17,6 +18,8 @@ import {
   type ExperimentId,
   type ExperimentMetrics,
   type ExperimentModelConfiguration,
+  type ModelId,
+  type ReasoningProfile,
   type DiplomacyRejectionReason,
   type DiplomacyResult,
   type ExportedCommunication,
@@ -85,6 +88,21 @@ export class ExperimentMetricAccumulator {
         turn.communicationResult.event.recipientId,
       );
       if (recipient) recipient.directMessagesReceived += 1;
+    }
+    if (
+      turn.outcome !== 'provider-error' &&
+      turn.outcome !== 'operator-skipped' &&
+      turn.communicationResult.requested &&
+      turn.communicationResult.accepted &&
+      turn.communicationResult.event.channel === 'zero'
+    ) {
+      for (const recipientId of turn.communicationResult.event.recipientIds) {
+        const recipient = this.#records.get(recipientId);
+        if (recipient) {
+          recipient.zeroRecipientDeliveries += 1;
+          recipient.zeroDirectiveRecipients.add(recipientId);
+        }
+      }
     }
     if (
       turn.outcome === 'accepted' &&
@@ -191,6 +209,25 @@ interface MutableMetrics {
   publicMessagesSent: number;
   directMessagesSent: number;
   directMessagesReceived: number;
+  zeroBroadcastsRequested: number;
+  zeroBroadcastsDelivered: number;
+  zeroBroadcastsRejected: number;
+  zeroRecipientDeliveries: number;
+  zeroDirectiveRecipients: Set<AgentId>;
+  patientZeroRepliers: Set<AgentId>;
+  directRepliesToPatientZero: number;
+  firstZeroDirectiveTurn: number | null;
+  mostRecentZeroDirective: {
+    eventId: EventId;
+    turnNumber: number;
+    occurredAt: string;
+    agentId: AgentId;
+    recipientCount: number;
+    modelId: ModelId;
+    reasoningProfile: ReasoningProfile;
+    personalityId: AgentObservation['behavior']['personalityId'];
+    strategyId: AgentObservation['behavior']['strategyId'];
+  } | null;
   diplomacyProposalsRequested: number;
   diplomacyAcceptancesRequested: number;
   diplomacyDeparturesRequested: number;
@@ -275,6 +312,15 @@ function mutableMetrics(): MutableMetrics {
     publicMessagesSent: 0,
     directMessagesSent: 0,
     directMessagesReceived: 0,
+    zeroBroadcastsRequested: 0,
+    zeroBroadcastsDelivered: 0,
+    zeroBroadcastsRejected: 0,
+    zeroRecipientDeliveries: 0,
+    zeroDirectiveRecipients: new Set(),
+    patientZeroRepliers: new Set(),
+    directRepliesToPatientZero: 0,
+    firstZeroDirectiveTurn: null,
+    mostRecentZeroDirective: null,
     diplomacyProposalsRequested: 0,
     diplomacyAcceptancesRequested: 0,
     diplomacyDeparturesRequested: 0,
@@ -343,7 +389,8 @@ function addToMutable(
         : turn.communicationResult.attempt.channel;
       if (channel === 'public') metrics.publicMessagesRequested += 1;
       else if (channel === 'direct') metrics.directMessagesRequested += 1;
-      else metrics.allianceMessagesRequested += 1;
+      else if (channel === 'alliance') metrics.allianceMessagesRequested += 1;
+      else metrics.zeroBroadcastsRequested += 1;
       if (turn.communicationResult.accepted) {
         if (turn.communicationResult.event.channel === 'public') {
           metrics.publicMessagesAccepted += 1;
@@ -352,12 +399,47 @@ function addToMutable(
           metrics.directMessagesDelivered += 1;
           metrics.directMessagesSent += 1;
           if (aggregate) metrics.directMessagesReceived += 1;
-        } else metrics.allianceMessagesDelivered += 1;
+        } else if (turn.communicationResult.event.channel === 'alliance')
+          metrics.allianceMessagesDelivered += 1;
+        else {
+          metrics.zeroBroadcastsDelivered += 1;
+          metrics.zeroRecipientDeliveries +=
+            turn.communicationResult.event.recipientIds.length;
+          for (const id of turn.communicationResult.event.recipientIds)
+            metrics.zeroDirectiveRecipients.add(id);
+          metrics.firstZeroDirectiveTurn ??= turn.turnNumber;
+          metrics.mostRecentZeroDirective = {
+            eventId: turn.communicationResult.event.id,
+            turnNumber: turn.turnNumber,
+            occurredAt: turn.communicationResult.event.occurredAt,
+            agentId: turn.agentId,
+            recipientCount: turn.communicationResult.event.recipientIds.length,
+            modelId: turn.provider.model,
+            reasoningProfile:
+              turn.modelAttempts.at(-1)?.reasoningProfile ?? 'provider-default',
+            personalityId: turn.observation.behavior.personalityId,
+            strategyId: turn.observation.behavior.strategyId,
+          };
+        }
       } else if (turn.communicationResult.attempt.channel === 'public') {
         metrics.publicMessagesRejected += 1;
       } else if (turn.communicationResult.attempt.channel === 'direct')
         metrics.directMessagesRejected += 1;
-      else metrics.allianceMessagesRejected += 1;
+      else if (turn.communicationResult.attempt.channel === 'alliance')
+        metrics.allianceMessagesRejected += 1;
+      else metrics.zeroBroadcastsRejected += 1;
+    }
+    if (
+      turn.communicationResult.requested &&
+      turn.communicationResult.accepted &&
+      turn.communicationResult.event.channel === 'direct' &&
+      turn.observation.patientZero.agentId !== null &&
+      turn.agentId !== turn.observation.patientZero.agentId &&
+      turn.communicationResult.event.recipientId ===
+        turn.observation.patientZero.agentId
+    ) {
+      metrics.directRepliesToPatientZero += 1;
+      metrics.patientZeroRepliers.add(turn.agentId);
     }
     if (turn.diplomacyResult.requested) {
       const type = turn.diplomacyResult.accepted
@@ -556,6 +638,15 @@ function finalizeMutable(metrics: MutableMetrics) {
     publicMessagesSent: metrics.publicMessagesSent,
     directMessagesSent: metrics.directMessagesSent,
     directMessagesReceived: metrics.directMessagesReceived,
+    zeroBroadcastsRequested: metrics.zeroBroadcastsRequested,
+    zeroBroadcastsDelivered: metrics.zeroBroadcastsDelivered,
+    zeroBroadcastsRejected: metrics.zeroBroadcastsRejected,
+    zeroRecipientDeliveries: metrics.zeroRecipientDeliveries,
+    uniqueZeroDirectiveRecipients: metrics.zeroDirectiveRecipients.size,
+    directRepliesToPatientZero: metrics.directRepliesToPatientZero,
+    uniquePatientZeroRepliers: metrics.patientZeroRepliers.size,
+    firstZeroDirectiveTurn: metrics.firstZeroDirectiveTurn,
+    mostRecentZeroDirective: metrics.mostRecentZeroDirective,
     diplomacyProposalsRequested: metrics.diplomacyProposalsRequested,
     diplomacyAcceptancesRequested: metrics.diplomacyAcceptancesRequested,
     diplomacyDeparturesRequested: metrics.diplomacyDeparturesRequested,
@@ -1211,7 +1302,7 @@ function summarizeEvent(
 }
 
 function summarizeCommunication(
-  channel: 'public' | 'direct' | 'alliance',
+  channel: 'public' | 'direct' | 'alliance' | 'zero',
   recipientId?: AgentId,
   distance?: number,
 ): string {
@@ -1219,7 +1310,9 @@ function summarizeCommunication(
     ? 'Published to world chat.'
     : channel === 'alliance'
       ? 'Delivered to current alliance members.'
-      : `Delivered directly to ${recipientId} from distance ${distance}.`;
+      : channel === 'zero'
+        ? 'Delivered privately to all other active agents.'
+        : `Delivered directly to ${recipientId} from distance ${distance}.`;
 }
 
 export function calculateExperimentMetrics(
@@ -1276,6 +1369,37 @@ export function calculateExperimentMetrics(
       usageAttempts(turn).some(({ kind }) => kind !== 'initial'),
     );
     const movement = movementMetrics(records);
+    const mostRecentZeroTurn = records.findLast(
+      (turn) =>
+        turn.outcome !== 'provider-error' &&
+        turn.outcome !== 'operator-skipped' &&
+        turn.communicationResult.requested &&
+        turn.communicationResult.accepted &&
+        turn.communicationResult.event.channel === 'zero',
+    );
+    const mostRecentZeroDirective =
+      mostRecentZeroTurn &&
+      mostRecentZeroTurn.outcome !== 'provider-error' &&
+      mostRecentZeroTurn.outcome !== 'operator-skipped' &&
+      mostRecentZeroTurn.communicationResult.requested &&
+      mostRecentZeroTurn.communicationResult.accepted &&
+      mostRecentZeroTurn.communicationResult.event.channel === 'zero'
+        ? {
+            eventId: mostRecentZeroTurn.communicationResult.event.id,
+            turnNumber: mostRecentZeroTurn.turnNumber,
+            occurredAt: mostRecentZeroTurn.communicationResult.event.occurredAt,
+            agentId: mostRecentZeroTurn.agentId,
+            recipientCount:
+              mostRecentZeroTurn.communicationResult.event.recipientIds.length,
+            modelId: mostRecentZeroTurn.provider.model,
+            reasoningProfile:
+              mostRecentZeroTurn.modelAttempts.at(-1)?.reasoningProfile ??
+              'provider-default',
+            personalityId:
+              mostRecentZeroTurn.observation.behavior.personalityId,
+            strategyId: mostRecentZeroTurn.observation.behavior.strategyId,
+          }
+        : null;
     return {
       totalTurns: records.length,
       accepted: records.filter(({ outcome }) => outcome === 'accepted').length,
@@ -1376,6 +1500,7 @@ export function calculateExperimentMetrics(
             scopedAgentIds.includes(previousControllerAgentId),
           ).length,
       ...communicationMetrics(relevantCommunications, scopedAgentIds, agentId),
+      mostRecentZeroDirective,
       ...diplomacyMetrics(
         records,
         agentId
@@ -1739,6 +1864,21 @@ function communicationMetrics(
       communication.channel === 'alliance' &&
       authoredBySelection(communication),
   );
+  const zeroAuthored = communications.filter(
+    (communication) =>
+      communication.channel === 'zero' && authoredBySelection(communication),
+  );
+  const patientZeroId = communications.find(
+    ({ channel, status }) => channel === 'zero' && status === 'accepted',
+  )?.agentId;
+  const repliesToPatientZero = patientZeroId
+    ? directAuthored.filter(
+        ({ status, recipientId, agentId: senderId }) =>
+          status === 'accepted' &&
+          recipientId === patientZeroId &&
+          senderId !== patientZeroId,
+      )
+    : [];
   const deliveredDirect = directAuthored.filter(
     (communication) =>
       communication.status === 'accepted' &&
@@ -1771,6 +1911,31 @@ function communicationMetrics(
     allianceMessagesRejected: allianceAuthored.filter(
       ({ status }) => status === 'rejected',
     ).length,
+    zeroBroadcastsRequested: zeroAuthored.length,
+    zeroBroadcastsDelivered: zeroAuthored.filter(
+      ({ status }) => status === 'accepted',
+    ).length,
+    zeroBroadcastsRejected: zeroAuthored.filter(
+      ({ status }) => status === 'rejected',
+    ).length,
+    zeroRecipientDeliveries: zeroAuthored.reduce(
+      (sum, communication) =>
+        sum +
+        (communication.status === 'accepted'
+          ? (communication.recipientIds?.length ?? 0)
+          : 0),
+      0,
+    ),
+    uniqueZeroDirectiveRecipients: new Set(
+      zeroAuthored.flatMap(({ recipientIds }) => recipientIds ?? []),
+    ).size,
+    directRepliesToPatientZero: repliesToPatientZero.length,
+    uniquePatientZeroRepliers: new Set(
+      repliesToPatientZero.map(({ agentId: senderId }) => senderId),
+    ).size,
+    firstZeroDirectiveTurn:
+      zeroAuthored.find(({ status }) => status === 'accepted')
+        ?.originatingTurn ?? null,
     publicMessagesSent: publicAuthored.filter(
       ({ status }) => status === 'accepted',
     ).length,

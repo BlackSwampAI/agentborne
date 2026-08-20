@@ -479,6 +479,67 @@ describe('nearby messaging', () => {
       attempt: { channel: 'alliance' },
     });
   });
+
+  it('allows only Patient Zero to broadcast privately to every other active agent', () => {
+    const before = stateWithRecipientAt(1);
+    const rejected = applyCommunication(
+      before,
+      before,
+      agentId,
+      { channel: 'zero', message: 'Separate the fronts.' },
+      { ...context, patientZeroAgentId: recipientId },
+    );
+    expect(rejected.state).toBe(before);
+    expect(rejected.result).toMatchObject({
+      accepted: false,
+      reason: 'not-patient-zero',
+    });
+    const delivered = applyCommunication(
+      before,
+      before,
+      agentId,
+      { channel: 'zero', message: 'Separate the fronts.' },
+      { ...context, patientZeroAgentId: agentId },
+    );
+    expect(delivered.result).toMatchObject({
+      accepted: true,
+      event: {
+        channel: 'zero',
+        recipientIds: [recipientId],
+        playerVisible: false,
+      },
+    });
+  });
+
+  it('bypasses direct range only when Patient Zero is one endpoint', () => {
+    const before = stateWithRecipientAt(4);
+    const ordinary = applyCommunication(
+      before,
+      before,
+      agentId,
+      { channel: 'direct', recipientId, message: 'Too far.' },
+      { ...context, communicationRangeKm: 0.001 },
+    );
+    expect(ordinary.result).toMatchObject({
+      accepted: false,
+      reason: 'out-of-range',
+    });
+    const reply = applyCommunication(
+      before,
+      before,
+      agentId,
+      { channel: 'direct', recipientId, message: 'Directive received.' },
+      {
+        ...context,
+        communicationRangeKm: 0.001,
+        patientZeroAgentId: recipientId,
+      },
+    );
+    expect(reply.result).toMatchObject({
+      accepted: true,
+      event: { channel: 'direct' },
+    });
+  });
 });
 
 describe('wait and deterministic development world', () => {

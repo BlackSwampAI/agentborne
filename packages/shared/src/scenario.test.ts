@@ -109,4 +109,22 @@ describe('scenario contracts', () => {
       }).success,
     ).toBe(false);
   });
+
+  it('defaults legacy scenarios to disabled Patient Zero and validates designation', () => {
+    expect(
+      worldSetupRequestSchema.parse(request).patientZeroAgentId,
+    ).toBeNull();
+    expect(
+      worldSetupRequestSchema.parse({
+        ...request,
+        patientZeroAgentId: roster[0].id,
+      }).patientZeroAgentId,
+    ).toBe(roster[0].id);
+    expect(
+      worldSetupRequestSchema.safeParse({
+        ...request,
+        patientZeroAgentId: '2507bb46-7ae4-45ca-8dda-644c4f85ca14',
+      }).success,
+    ).toBe(false);
+  });
 });

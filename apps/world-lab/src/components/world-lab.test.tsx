@@ -1034,6 +1034,37 @@ describe('WorldLab', () => {
     expect(overflowTrigger.closest('details')).not.toHaveAttribute('open');
   });
 
+  it('shows Patient Zero in the roster, marker, inspector, setup selector, and private filter', async () => {
+    const patientZero = initial.world.agents[0]!;
+    const designated = simulationSnapshotSchema.parse({
+      ...initial,
+      scenario: { ...initial.scenario, patientZeroAgentId: patientZero.id },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => jsonResponse(designated)),
+    );
+    const user = userEvent.setup();
+    render(<WorldLab />);
+    expect(await screen.findByText('HEX-0')).toBeInTheDocument();
+    expect(
+      await screen.findByRole('button', {
+        name: `Select agent ${patientZero.name}, Patient Zero`,
+      }),
+    ).toHaveClass('patient-zero');
+    await user.click(
+      within(
+        screen.getByRole('complementary', { name: 'Agent roster' }),
+      ).getByRole('button', { name: new RegExp(patientZero.name) }),
+    );
+    expect(screen.getByText('Patient Zero role')).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: /Private comms/ }));
+    expect(screen.getByRole('button', { name: 'Zero' })).toBeInTheDocument();
+    await openOverflow(user);
+    await user.click(screen.getByRole('button', { name: 'World setup' }));
+    expect(screen.getByLabelText('Patient Zero')).toHaveValue(patientZero.id);
+  });
+
   it('exposes opt-in bounded unattended recovery with provider-cost guidance', async () => {
     const user = userEvent.setup();
     render(<WorldLab />);
@@ -2120,7 +2151,7 @@ describe('WorldLab', () => {
           return jsonResponse({
             verification: {
               modelId: 'example/alpha',
-              contractVersion: 'text-flat-json-v2',
+              contractVersion: 'text-flat-json-v3',
               status: probeCalls === 1 ? 'failed' : 'verified',
               testedAt: '2026-08-15T12:00:00.000Z',
               ...(probeCalls === 1

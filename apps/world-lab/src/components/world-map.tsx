@@ -31,6 +31,7 @@ interface WorldMapProps {
   hexes: Hex[];
   agents: AgentProfile[];
   alliances: Alliance[];
+  patientZeroAgentId: AgentId | null;
   selectedCell: H3Cell | null;
   selectedAgentId: AgentId | null;
   onSelectCell: (cell: H3Cell) => void;
@@ -113,6 +114,7 @@ export function WorldMap(props: WorldMapProps) {
     hexes,
     agents,
     alliances,
+    patientZeroAgentId,
     selectedCell,
     selectedAgentId,
     onSelectCell,
@@ -408,10 +410,13 @@ export function WorldMap(props: WorldMapProps) {
       const distance = cellmates.length > 1 ? 15 : 0;
       const element = document.createElement('button');
       element.type = 'button';
-      element.className = `agent-marker${agent.id === selectedAgentId ? ' selected' : ''}`;
+      element.className = `agent-marker${agent.id === selectedAgentId ? ' selected' : ''}${agent.id === patientZeroAgentId ? ' patient-zero' : ''}`;
       element.dataset.agentId = agent.id;
-      element.setAttribute('aria-label', `Select agent ${agent.name}`);
-      element.title = `${agent.name} · ${agent.currentCell}`;
+      element.setAttribute(
+        'aria-label',
+        `Select agent ${agent.name}${agent.id === patientZeroAgentId ? ', Patient Zero' : ''}`,
+      );
+      element.title = `${agent.name}${agent.id === patientZeroAgentId ? ' · Patient Zero' : ''} · ${agent.currentCell}`;
       const effectiveColor = resolveAgentColor(
         { world: { agents, alliances } } as unknown as Pick<
           SimulationSnapshot,
@@ -436,7 +441,7 @@ export function WorldMap(props: WorldMapProps) {
         .addTo(map);
       markersRef.current.push(marker);
     }
-  }, [agents, alliances, mapReady, selectedAgentId]);
+  }, [agents, alliances, mapReady, patientZeroAgentId, selectedAgentId]);
 
   const overlayReady = overlayDiagnostics.status === 'ready';
   const overlayLabel = overlayReady
